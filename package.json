@@ -1,0 +1,22 @@
+{
+  "name": "lks-quote-system",
+  "version": "1.0.0",
+  "description": "LKS Quote + Invoice + Receipt System",
+  "main": "dist/index.js",
+  "scripts": {
+    "dev": "ts-node src/index.ts",
+    "build": "tsc",
+    "start": "node dist/index.js"
+  },
+  "dependencies": {
+    "airtable": "^0.12.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.5",
+    "ts-node": "^10.9.2",
+    "@types/node": "^20.12.11",
+    "@types/express": "^4.17.21"
+  }
+}
