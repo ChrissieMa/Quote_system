@@ -708,7 +708,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       const sub = parseFloat(document.getElementById('subtotal').value) || 0;
       const disc = parseFloat(document.getElementById('discount').value);
       const d = isNaN(disc) ? 1 : disc;
-      document.getElementById('total').value = (sub * d).toFixed(2);
+      document.getElementById('total').value = Math.ceil(sub * d);
     }
     recalcSubtotal();
   </script>`;
@@ -759,7 +759,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     const itemsJson = JSON.stringify(items);
     const subtotal = parseFloat(b.subtotal) || 0;
     const discountRate = parseFloat(b.discount) || 1;
-    const total = parseFloat(b.total) || subtotal * discountRate;
+    const total = Math.ceil(parseFloat(b.total) || subtotal * discountRate);
 
     const quoteNumber = await getNextNumber(tableQuotes, 'Quote Number', 'QT');
     const publicToken = generateToken();
@@ -862,23 +862,22 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           </tr>`;
         }).join('');
 
-    // Customer info block
-    const custName = (quote['Customer Name'] as string) || '';
-    const custPhone = (quote['Customer Phone'] as string) || '';
-    const custEmail = (quote['Customer Email'] as string) || '';
-    const custAddr = (quote['Chinese Delivery Address'] as string) || '';
-    const hasCustomer = custName || custPhone || custEmail || custAddr;
+    // Contact info block (always shown from Quotes table)
+    const contactName = (quote['Contact Name'] as string) || '';
+    const contactPhone = (quote['Phone'] as string) || '';
+    const contactMethod = (quote['Contact Method'] as string) || '';
+    const contactHandle = (quote['Contact Handle / Reference'] as string) || '';
 
-    const customerBlock = hasCustomer ? `
+    const contactBlock = `
       <div class="section">
-        <div class="section-title">Customer Information</div>
+        <div class="section-title">Contact Information</div>
         <div class="info-grid info-grid-2">
-          <div class="info-block"><div class="lbl">Name</div><div class="val-sm">${escapeHtml(custName) || 'N/A'}</div></div>
-          <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${escapeHtml(custPhone) || 'N/A'}</div></div>
-          <div class="info-block"><div class="lbl">Email</div><div class="val-sm">${escapeHtml(custEmail) || 'N/A'}</div></div>
-          <div class="info-block"><div class="lbl">Delivery Address</div><div class="val-sm">${escapeHtml(custAddr) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Contact Name</div><div class="val-sm">${escapeHtml(contactName) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${escapeHtml(contactPhone) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Contact Method</div><div class="val-sm">${escapeHtml(contactMethod) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Contact Handle / Reference</div><div class="val-sm">${escapeHtml(contactHandle) || 'N/A'}</div></div>
         </div>
-      </div>` : '';
+      </div>`;
 
     const content = `
       <div class="doc-card">
@@ -897,7 +896,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             ${quote['Valid Until'] ? `<div class="info-block"><div class="lbl">Valid Until</div><div class="val-sm">${escapeHtml(quote['Valid Until'] as string)}</div></div>` : '<div></div>'}
           </div>
 
-          ${customerBlock}
+          ${contactBlock}
 
           <div class="section">
             <div class="section-title">Items</div>
@@ -926,24 +925,13 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           <div class="totals-box">
             <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            <div class="row total-row"><span>Total</span><span>$${total.toFixed(2)}</span></div>
+            <div class="row total-row"><span>Total</span><span>$${total}</span></div>
           </div>
 
           ${quote['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:14px;">${nl2br(quote['Notes'])}</p></div>` : ''}
           ${quote['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:13px;color:#374151;">${nl2br(quote['Terms and Conditions'])}</p></div>` : ''}
 
           <div class="thank-you">Thank you!</div>
-
-          <hr class="divider">
-
-          <div style="text-align:center;margin-top:12px;">
-            <a href="/quote/${token}/customer-info" class="btn btn-primary" style="font-size:15px;padding:12px 32px;">
-              Confirm Order &amp; Fill In Details →
-            </a>
-            <p style="margin-top:10px;font-size:12px;color:#9ca3af;">
-              Please contact us via WhatsApp / IG if you have any questions before confirming.
-            </p>
-          </div>
         </div>
       </div>
     `;
@@ -1007,11 +995,11 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
 
     const content = `
       <div class="doc-card">
-        ${docHeader('確認訂單', 'Confirm Order')}
+        ${docHeader('填寫資料', '請填寫以下資料以便後續安排')}
         <div class="doc-body">
           <div class="alert alert-info">
-            You are confirming order for <strong>Quote ${qNum}</strong>.
-            Please fill in your details below.
+            您正在確認 <strong>報價單 ${qNum}</strong> 的訂單。
+            請填寫以下資料以便後續安排。
           </div>
 
           <form action="/quote/${token}/customer-info" method="POST">
@@ -1069,7 +1057,7 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
         </div>
       </div>`;
 
-    res.send(renderPage(`Confirm Order — ${qNum}`, content));
+    res.send(renderPage(`填寫資料 — ${qNum}`, content));
   } catch (error: any) {
     console.error(error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
@@ -1093,6 +1081,31 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
+    // Upsert customer into Customers table (correct field names)
+    const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
+    if (existingByPhone.length > 0) {
+      await tableCustomers.update([{
+        id: existingByPhone[0].id,
+        fields: {
+          'Customer Name': customerName,
+          'Email': customerEmail,
+          'Address': chineseDeliveryAddress,
+          'How did you know us?': howDidYouKnowUs || '',
+        }
+      }]);
+    } else {
+      await tableCustomers.create([{
+        fields: {
+          'Customer Name': customerName,
+          'Phone': customerPhone,
+          'Email': customerEmail,
+          'Address': chineseDeliveryAddress,
+          'How did you know us?': howDidYouKnowUs || '',
+        }
+      }]);
+    }
+
+    // Store customer info on Quote for reference, update status
     await tableQuotes.update([{
       id: record.id,
       fields: {
@@ -1348,9 +1361,9 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
           <div class="totals-box">
             <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            <div class="row total-row"><span>Total</span><span>$${total.toFixed(2)}</span></div>
+            <div class="row total-row"><span>Total</span><span>$${Math.ceil(total)}</span></div>
             <div class="row balance-row" style="color:${status === 'Paid' ? '#10b981' : '#ef4444'};">
-              <span>Balance Due</span><span>$${balanceDue.toFixed(2)}</span>
+              <span>Balance Due</span><span>$${Math.ceil(balanceDue)}</span>
             </div>
           </div>
 
@@ -1473,7 +1486,7 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
             <div class="section-title">Payment Details</div>
             <div style="background:#f0fdf4;border:1px solid #6ee7b7;border-radius:6px;padding:20px;text-align:center;">
               <div style="font-size:13px;color:#065f46;margin-bottom:6px;">PAID IN FULL</div>
-              <div style="font-size:32px;font-weight:700;color:#10b981;">$${total.toFixed(2)}</div>
+              <div style="font-size:32px;font-weight:700;color:#10b981;">$${Math.ceil(total)}</div>
               ${of['Payment Method'] ? `<div style="margin-top:8px;color:#374151;font-size:14px;">via ${escapeHtml(of['Payment Method'] as string)}</div>` : ''}
             </div>
           </div>
