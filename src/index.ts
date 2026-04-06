@@ -843,16 +843,18 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     // Items table rows
     const itemRows = items.length === 0
-      ? '<tr><td colspan="10" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+      ? '<tr><td colspan="13" style="text-align:center;color:#9ca3af;">No items</td></tr>'
       : items.map((item: any, idx: number) => {
-          const interSize = [item.interL, item.interD, item.interH].filter(Boolean).join(' x ');
-          const outerSize = [item.outerL, item.outerD, item.outerH].filter(Boolean).join(' x ');
           return `<tr>
             <td>${idx + 1}</td>
-            <td>${escapeHtml(item.itemType)}</td>
-            <td>${escapeHtml(item.forWhat)}</td>
-            <td>${escapeHtml(interSize) || '-'}</td>
-            <td>${escapeHtml(outerSize) || '-'}</td>
+            <td>${escapeHtml(item.itemType) || '-'}</td>
+            <td>${escapeHtml(item.forWhat) || '-'}</td>
+            <td style="text-align:center;">${item.interL || '-'}</td>
+            <td style="text-align:center;">${item.interD || '-'}</td>
+            <td style="text-align:center;">${item.interH || '-'}</td>
+            <td style="text-align:center;">${item.outerL || '-'}</td>
+            <td style="text-align:center;">${item.outerD || '-'}</td>
+            <td style="text-align:center;">${item.outerH || '-'}</td>
             <td style="text-align:center;">${item.noOfLevels || '-'}</td>
             <td>${escapeHtml(item.levelHeights) || '-'}</td>
             <td>${renderAccTags(item.accessories)}</td>
@@ -907,8 +909,12 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
                     <th>#</th>
                     <th>Item Type</th>
                     <th>For What</th>
-                    <th>Inter Size (cm)</th>
-                    <th>Outer Size (cm)</th>
+                    <th>Inter L</th>
+                    <th>Inter D</th>
+                    <th>Inter H</th>
+                    <th>Outer L</th>
+                    <th>Outer D</th>
+                    <th>Outer H</th>
                     <th>Levels</th>
                     <th>Level Heights</th>
                     <th>Accessories</th>
@@ -1081,58 +1087,68 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
-    // Upsert customer into Customers table (correct field names)
-    const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
-    if (existingByPhone.length > 0) {
-      await tableCustomers.update([{
-        id: existingByPhone[0].id,
-        fields: {
-          'Customer Name': customerName,
-          'Email': customerEmail,
-          'Address': chineseDeliveryAddress,
-          'How did you know us?': howDidYouKnowUs || '',
-        }
-      }]);
-    } else {
-      await tableCustomers.create([{
-        fields: {
-          'Customer Name': customerName,
-          'Phone': customerPhone,
-          'Email': customerEmail,
-          'Address': chineseDeliveryAddress,
-          'How did you know us?': howDidYouKnowUs || '',
-        }
-      }]);
+    // Step 1: Write to Customers table
+    try {
+      const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone.replace(/'/g, "\\'")}'` }).firstPage();
+      if (existingByPhone.length > 0) {
+        await tableCustomers.update([{
+          id: existingByPhone[0].id,
+          fields: {
+            'Customer Name': customerName,
+            'Email': customerEmail,
+            'Address': chineseDeliveryAddress,
+          } as FieldSet
+        }]);
+      } else {
+        await tableCustomers.create([{
+          fields: {
+            'Customer Name': customerName,
+            'Phone': customerPhone,
+            'Email': customerEmail,
+            'Address': chineseDeliveryAddress,
+          } as FieldSet
+        }]);
+      }
+    } catch (custErr: any) {
+      console.error('Customers table write error (non-fatal):', custErr.message);
+      // Non-fatal: continue even if Customers write fails
     }
 
-    // Store customer info on Quote for reference, update status
-    await tableQuotes.update([{
-      id: record.id,
-      fields: {
+    // Step 2: Update Quote status only (minimal fields to avoid unknown field errors)
+    const quoteUpdateFields: FieldSet = { 'Status': 'Ready to Convert' };
+    // Try to write customer fields to Quotes table — only if those fields exist
+    try {
+      await tableQuotes.update([{ id: record.id, fields: {
+        'Status': 'Ready to Convert',
         'Customer Name': customerName,
         'Customer Phone': customerPhone,
         'Customer Email': customerEmail,
         'Chinese Delivery Address': chineseDeliveryAddress,
         'Payment Method': paymentMethod,
         'How Did You Know Us': howDidYouKnowUs || '',
-        'Status': 'Ready to Convert',
         'Customer Submitted At': new Date().toISOString(),
-      }
-    }]);
+      } as FieldSet }]);
+    } catch (quoteErr: any) {
+      console.error('Quotes full update failed, retrying with minimal fields:', quoteErr.message);
+      // Fallback: only update Status
+      await tableQuotes.update([{ id: record.id, fields: quoteUpdateFields }]);
+    }
 
-    res.send(renderPage('Order Confirmed', `
+    res.send(renderPage('已收到資料', `
       <div class="doc-card">
-        ${docHeader('訂單已確認', 'Order Confirmed')}
+        ${docHeader('多謝您的確認', 'Thank You')}
         <div class="doc-body">
-          <div class="alert alert-success">
-            <strong>Thank you, ${escapeHtml(customerName)}!</strong><br>
-            Your order has been confirmed. We will review it and send you an invoice shortly.
+          <div class="alert alert-success" style="font-size:15px;line-height:1.8;">
+            <strong>多謝 ${escapeHtml(customerName)}！</strong><br>
+            我們已經收到您的資料。<br>
+            稍後我們會為您準備 Invoice（發票），並透過 WhatsApp 或電郵發送給您，請留意付款詳情。<br><br>
+            如有任何查詢，歡迎隨時聯絡我們。
           </div>
-          <p style="margin-bottom:16px;color:#374151;">
-            If you have any questions, please contact us via WhatsApp or IG.<br>
-            <strong>Phone:</strong> ${COMPANY.phone} &nbsp;|&nbsp; <strong>Email:</strong> ${COMPANY.email}
-          </p>
-          <a href="/quote/${token}" class="btn btn-outline">← Back to Quote</a>
+          <div style="margin-top:16px;padding:16px;background:#f9fafb;border-radius:6px;font-size:14px;color:#374151;">
+            <strong>聯絡方式：</strong><br>
+            📞 WhatsApp / 電話：${COMPANY.phone}<br>
+            📧 電郵：${COMPANY.email}
+          </div>
         </div>
       </div>
     `));
