@@ -478,32 +478,37 @@ app.get('/quotes', async (req: Request, res: Response) => {
           const invoiceToken = f['Invoice Public Token'] as string | undefined;
           const receiptToken = f['Receipt Public Token'] as string | undefined;
 
-          // Build action buttons
-          let actions = `<a href="/quote/${token}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
+          // Build action buttons — ALL always shown
+          const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${token}/customer-info`;
+          let actions = '';
 
-          if (status === 'Draft' || status === 'Pending Customer Info') {
-            actions += ` <a href="/quote/${token}/customer-info" class="btn btn-secondary btn-sm" target="_blank">Fill Customer Info</a>`;
-          } else if (status === 'Ready to Convert' || status === 'Converted to Invoice' || status === 'Paid') {
-            actions += ` <a href="/quote/${token}/customer-info" class="btn btn-secondary btn-sm" target="_blank">View Customer Info</a>`;
-          }
+          // 1. View Quote
+          actions += `<a href="/quote/${token}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
 
-          if (status === 'Ready to Convert') {
-            actions += `
-              <form method="POST" action="/admin/quote/${token}/convert" style="display:inline;" onsubmit="return confirm('Convert this quote to Invoice?')">
-                <button type="submit" class="btn btn-primary btn-sm">Convert to Invoice</button>
-              </form>`;
-          }
+          // 2. Copy Customer Info Link
+          actions += ` <button type="button" class="btn btn-secondary btn-sm" onclick="copyLink('${customerInfoLink}', this)">Copy Customer Info Link</button>`;
 
-          if (status === 'Converted to Invoice' && invoiceToken) {
+          // 3. Convert to Invoice (always shown)
+          actions += `
+            <form method="POST" action="/admin/quote/${token}/convert" style="display:inline;" onsubmit="return confirm('Convert this quote to Invoice?')">
+              <button type="submit" class="btn btn-primary btn-sm">Convert to Invoice</button>
+            </form>`;
+
+          // 4. View Invoice (only if token exists)
+          if (invoiceToken) {
             actions += ` <a href="/invoice/${invoiceToken}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
+          }
+
+          // 5. Mark as Paid (only if invoice token exists)
+          if (invoiceToken) {
             actions += `
               <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline;" onsubmit="return confirm('Mark this invoice as Paid?')">
                 <button type="submit" class="btn btn-primary btn-sm">Mark as Paid</button>
               </form>`;
           }
 
-          if (status === 'Paid' && receiptToken) {
-            if (invoiceToken) actions += ` <a href="/invoice/${invoiceToken}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
+          // 6. View Receipt (only if receipt token exists)
+          if (receiptToken) {
             actions += ` <a href="/receipt/${receiptToken}" class="btn btn-success btn-sm" target="_blank">View Receipt</a>`;
           }
 
@@ -543,7 +548,19 @@ app.get('/quotes', async (req: Request, res: Response) => {
       <div class="dash-grid">${cardsHtml}</div>
     `;
 
-    res.send(renderPage('Quote Dashboard', content));
+    const extraHead = `<script>
+      function copyLink(url, btn) {
+        navigator.clipboard.writeText(url).then(() => {
+          const orig = btn.textContent;
+          btn.textContent = 'Copied!';
+          btn.style.background = '#10b981';
+          setTimeout(() => { btn.textContent = orig; btn.style.background = ''; }, 2000);
+        }).catch(() => {
+          prompt('Copy this link:', url);
+        });
+      }
+    </script>`;
+    res.send(renderPage('Quote Dashboard', content, extraHead));
   } catch (error: any) {
     console.error(error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error loading dashboard: ${escapeHtml(error.message)}</div>`));
@@ -589,6 +606,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
             </div>
           </div>
 
+          <!-- Hidden field to store items as JSON -->
+          <input type="hidden" name="itemsJson" id="itemsJsonField">
+
           <div class="section">
             <div class="section-title">Items</div>
             <div style="overflow-x:auto;">
@@ -614,20 +634,20 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 </thead>
                 <tbody id="itemsBody">
                   <tr>
-                    <td><input type="text" name="item_type[]" placeholder="e.g. Display Case"></td>
-                    <td><input type="text" name="item_for[]" placeholder="e.g. Shoes"></td>
-                    <td><input type="number" name="item_inter_l[]" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="item_inter_d[]" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="item_inter_h[]" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="item_outer_l[]" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="item_outer_d[]" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="item_outer_h[]" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="item_levels[]" min="1" style="width:50px"></td>
-                    <td><input type="text" name="item_level_heights[]" placeholder="e.g. 20,30"></td>
-                    <td><input type="text" name="item_accessories[]" placeholder="e.g. LED, Door"></td>
-                    <td><input type="text" name="item_description[]" placeholder="Remarks"></td>
-                    <td><input type="number" name="item_qty[]" min="1" value="1" style="width:55px" class="qty-input" oninput="recalcRow(this)"></td>
-                    <td><input type="number" name="item_amount[]" step="0.01" style="width:80px" class="amount-input" oninput="recalcSubtotal()"></td>
+                    <td><input type="text" class="f-type" placeholder="e.g. Display Case"></td>
+                    <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
+                    <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-ih" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-ol" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-od" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-oh" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
+                    <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
+                    <td><input type="text" class="f-acc" placeholder="e.g. LED, Door"></td>
+                    <td><input type="text" class="f-desc" placeholder="Remarks"></td>
+                    <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
+                    <td><input type="number" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
                   </tr>
                 </tbody>
@@ -688,7 +708,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       const tbody = document.getElementById('itemsBody');
       const first = tbody.querySelector('tr');
       const clone = first.cloneNode(true);
-      clone.querySelectorAll('input').forEach(i => { i.value = i.name.includes('qty') ? '1' : ''; });
+      clone.querySelectorAll('input').forEach(i => {
+        i.value = i.classList.contains('f-qty') ? '1' : '';
+      });
       tbody.appendChild(clone);
     }
     function removeRow(btn) {
@@ -699,17 +721,47 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     }
     function recalcSubtotal() {
       let sum = 0;
-      document.querySelectorAll('.amount-input').forEach(i => { sum += parseFloat(i.value) || 0; });
+      document.querySelectorAll('.f-amt').forEach(i => { sum += parseFloat(i.value) || 0; });
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
     }
-    function recalcRow(qtyInput) { recalcSubtotal(); }
     function recalcTotal() {
       const sub = parseFloat(document.getElementById('subtotal').value) || 0;
       const disc = parseFloat(document.getElementById('discount').value);
       const d = isNaN(disc) ? 1 : disc;
       document.getElementById('total').value = Math.ceil(sub * d);
     }
+    function serializeItems() {
+      const rows = document.querySelectorAll('#itemsBody tr');
+      const items = [];
+      rows.forEach(row => {
+        const get = cls => (row.querySelector('.' + cls) || {}).value || '';
+        const amt = parseFloat(get('f-amt')) || 0;
+        const qty = parseInt(get('f-qty')) || 1;
+        const type = get('f-type');
+        if (!type && !amt) return; // skip empty rows
+        items.push({
+          itemType: type,
+          forWhat: get('f-for'),
+          interL: get('f-il'),
+          interD: get('f-id'),
+          interH: get('f-ih'),
+          outerL: get('f-ol'),
+          outerD: get('f-od'),
+          outerH: get('f-oh'),
+          noOfLevels: parseInt(get('f-lv')) || null,
+          levelHeights: get('f-lh'),
+          accessories: get('f-acc'),
+          description: get('f-desc'),
+          qty: qty,
+          amount: amt,
+        });
+      });
+      document.getElementById('itemsJsonField').value = JSON.stringify(items);
+    }
+    document.getElementById('quoteForm').addEventListener('submit', function() {
+      serializeItems();
+    });
     recalcSubtotal();
   </script>`;
 
@@ -723,38 +775,13 @@ app.post('/quote/create', async (req: Request, res: Response) => {
   try {
     const b = req.body;
 
-    // Build items array from table inputs
-    const types: string[] = [].concat(b['item_type[]'] || []);
-    const fors: string[] = [].concat(b['item_for[]'] || []);
-    const interLs: string[] = [].concat(b['item_inter_l[]'] || []);
-    const interDs: string[] = [].concat(b['item_inter_d[]'] || []);
-    const interHs: string[] = [].concat(b['item_inter_h[]'] || []);
-    const outerLs: string[] = [].concat(b['item_outer_l[]'] || []);
-    const outerDs: string[] = [].concat(b['item_outer_d[]'] || []);
-    const outerHs: string[] = [].concat(b['item_outer_h[]'] || []);
-    const levels: string[] = [].concat(b['item_levels[]'] || []);
-    const levelHeights: string[] = [].concat(b['item_level_heights[]'] || []);
-    const accessories: string[] = [].concat(b['item_accessories[]'] || []);
-    const descriptions: string[] = [].concat(b['item_description[]'] || []);
-    const qtys: string[] = [].concat(b['item_qty[]'] || []);
-    const amounts: string[] = [].concat(b['item_amount[]'] || []);
-
-    const items = types.map((_, i) => ({
-      itemType: types[i] || '',
-      forWhat: fors[i] || '',
-      interL: interLs[i] || '',
-      interD: interDs[i] || '',
-      interH: interHs[i] || '',
-      outerL: outerLs[i] || '',
-      outerD: outerDs[i] || '',
-      outerH: outerHs[i] || '',
-      noOfLevels: levels[i] ? parseInt(levels[i], 10) : null,
-      levelHeights: levelHeights[i] || '',
-      accessories: accessories[i] || '',
-      description: descriptions[i] || '',
-      qty: qtys[i] ? parseInt(qtys[i], 10) : 1,
-      amount: amounts[i] ? parseFloat(amounts[i]) : 0,
-    })).filter(item => item.itemType || item.description || item.amount);
+    // Items are sent as JSON from the hidden field serialized by JS
+    let items: any[] = [];
+    try {
+      items = JSON.parse(b.itemsJson || '[]');
+    } catch (_) {
+      items = [];
+    }
 
     const itemsJson = JSON.stringify(items);
     const subtotal = parseFloat(b.subtotal) || 0;
@@ -1087,52 +1114,30 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
-    // Step 1: Write to Customers table
-    try {
-      const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone.replace(/'/g, "\\'")}'` }).firstPage();
-      if (existingByPhone.length > 0) {
-        await tableCustomers.update([{
-          id: existingByPhone[0].id,
-          fields: {
-            'Customer Name': customerName,
-            'Email': customerEmail,
-            'Address': chineseDeliveryAddress,
-          } as FieldSet
-        }]);
-      } else {
-        await tableCustomers.create([{
-          fields: {
-            'Customer Name': customerName,
-            'Phone': customerPhone,
-            'Email': customerEmail,
-            'Address': chineseDeliveryAddress,
-          } as FieldSet
-        }]);
-      }
-    } catch (custErr: any) {
-      console.error('Customers table write error (non-fatal):', custErr.message);
-      // Non-fatal: continue even if Customers write fails
+    // Step 1: Write customer info to Customers table ONLY
+    const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
+    if (existingByPhone.length > 0) {
+      await tableCustomers.update([{
+        id: existingByPhone[0].id,
+        fields: {
+          'Customer Name': customerName,
+          'Email': customerEmail,
+          'Address': chineseDeliveryAddress,
+        } as FieldSet
+      }]);
+    } else {
+      await tableCustomers.create([{
+        fields: {
+          'Customer Name': customerName,
+          'Phone': customerPhone,
+          'Email': customerEmail,
+          'Address': chineseDeliveryAddress,
+        } as FieldSet
+      }]);
     }
 
-    // Step 2: Update Quote status only (minimal fields to avoid unknown field errors)
-    const quoteUpdateFields: FieldSet = { 'Status': 'Ready to Convert' };
-    // Try to write customer fields to Quotes table — only if those fields exist
-    try {
-      await tableQuotes.update([{ id: record.id, fields: {
-        'Status': 'Ready to Convert',
-        'Customer Name': customerName,
-        'Customer Phone': customerPhone,
-        'Customer Email': customerEmail,
-        'Chinese Delivery Address': chineseDeliveryAddress,
-        'Payment Method': paymentMethod,
-        'How Did You Know Us': howDidYouKnowUs || '',
-        'Customer Submitted At': new Date().toISOString(),
-      } as FieldSet }]);
-    } catch (quoteErr: any) {
-      console.error('Quotes full update failed, retrying with minimal fields:', quoteErr.message);
-      // Fallback: only update Status
-      await tableQuotes.update([{ id: record.id, fields: quoteUpdateFields }]);
-    }
+    // Step 2: Only update Status on Quotes table — no customer fields written here
+    await tableQuotes.update([{ id: record.id, fields: { 'Status': 'Ready to Convert' } as FieldSet }]);
 
     res.send(renderPage('已收到資料', `
       <div class="doc-card">
@@ -1170,32 +1175,23 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     const quote = records[0];
     const qf = quote.fields;
 
-    if (qf['Status'] !== 'Ready to Convert') {
-      return res.status(400).send(renderPage('Error', `<div class="alert alert-danger">Quote status must be "Ready to Convert". Current: ${escapeHtml(qf['Status'] as string)}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back to Dashboard</a>`));
+    // Use Quote's Phone field to look up customer in Customers table
+    const quotePhone = (qf['Phone'] as string) || '';
+    if (!quotePhone) {
+      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Quote has no Phone number. Cannot find customer.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
-    const customerPhone = qf['Customer Phone'] as string;
-    const customerName = qf['Customer Name'] as string;
-    const customerEmail = qf['Customer Email'] as string;
-    const customerAddress = qf['Chinese Delivery Address'] as string;
-
-    if (!customerPhone || !customerName) {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Missing customer phone or name. Please ensure customer info is filled in.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
-    }
-
-    // A. Customers — upsert by phone
+    // A. Customers — look up by phone from Customers table
     let customerRecordId: string;
-    const existingCustomers = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
+    const existingCustomers = await tableCustomers.select({ filterByFormula: `{Phone} = '${quotePhone}'` }).firstPage();
 
     if (existingCustomers.length > 0) {
       customerRecordId = existingCustomers[0].id;
-      await tableCustomers.update([{
-        id: customerRecordId,
-        fields: { 'Customer Name': customerName, 'Email': customerEmail, 'Address': customerAddress }
-      }]);
     } else {
+      // Customer not found — create a minimal record using Contact Name from Quote
+      const contactName = (qf['Contact Name'] as string) || '';
       const newCustomer = await tableCustomers.create([{
-        fields: { 'Customer Name': customerName, 'Phone': customerPhone, 'Email': customerEmail, 'Address': customerAddress }
+        fields: { 'Customer Name': contactName, 'Phone': quotePhone } as FieldSet
       }]);
       customerRecordId = newCustomer[0].id;
     }
