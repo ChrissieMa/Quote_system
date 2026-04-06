@@ -1,5 +1,5 @@
 import express, { Request, Response } from 'express';
-import Airtable from 'airtable';
+import Airtable, { FieldSet } from 'airtable';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 
@@ -12,7 +12,23 @@ app.use(express.urlencoded({ extended: true }));
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 
-// Check env vars
+const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
+
+const COMPANY = {
+  name: process.env.COMPANY_NAME || 'LKS Display Box',
+  address1: '香港九龍觀塘成業街7號',
+  address2: '寧晉中心35樓G1室',
+  phone: process.env.COMPANY_PHONE || '68983722',
+  email: process.env.COMPANY_EMAIL || 'lksdisplaybox@gmail.com',
+};
+
+const DEFAULT_TERMS = `1. 由送貨起計，三天內包補板，過左三天後才發現有爆板請再購買壞板。
+2. 如發現強行安裝而弄花或損壞，恕不會補發！
+3. 如客戶要求LKS司機在收貨地址以外地方收貨，均不會為損壞板件補發。
+4. 司機大約會在兩天內聯絡，請耐心等待司機聯絡相約送貨時間。
+5. LKS Display Box 保留最終決定權。`;
+
+// Check required env vars
 const requiredEnvVars = [
   'AIRTABLE_API_KEY',
   'AIRTABLE_BASE_ID',
@@ -21,7 +37,6 @@ const requiredEnvVars = [
   'AIRTABLE_TABLE_ORDER_ITEMS',
   'AIRTABLE_TABLE_QUOTES'
 ];
-
 for (const envVar of requiredEnvVars) {
   if (!process.env[envVar]) {
     console.error(`Missing required environment variable: ${envVar}`);
@@ -36,342 +51,1046 @@ const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 
-// Helpers
+// ─── Helpers ───────────────────────────────────────────────────────────────
 const generateToken = () => crypto.randomBytes(16).toString('hex');
-const escapeHtml = (unsafe: string) => {
-  return (unsafe || '').toString()
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-};
 
-const getNextNumber = async (table: Airtable.Table<any>, field: string, prefix: string) => {
-  const records = await table.select({
-    fields: [field],
-    sort: [{ field: field, direction: 'desc' }],
-    maxRecords: 1
-  }).firstPage();
+const escapeHtml = (unsafe: unknown): string =>
+  String(unsafe ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 
-  if (records.length === 0 || !records[0].get(field)) {
-    return `${prefix}-2026-0001`;
-  }
-  
+const nl2br = (str: unknown): string =>
+  escapeHtml(str).replace(/\n/g, '<br>');
+
+const getNextNumber = async (
+  table: Airtable.Table<FieldSet>,
+  field: string,
+  prefix: string
+): Promise<string> => {
+  const records = await table
+    .select({ fields: [field], sort: [{ field, direction: 'desc' }], maxRecords: 1 })
+    .firstPage();
+  if (records.length === 0 || !records[0].get(field)) return `${prefix}-2026-0001`;
   const lastNumber = records[0].get(field) as string;
   const match = lastNumber.match(/-(\d+)$/);
   if (match) {
-    const nextNum = parseInt(match[1], 10) + 1;
-    return `${prefix}-2026-${nextNum.toString().padStart(4, '0')}`;
+    const next = parseInt(match[1], 10) + 1;
+    return `${prefix}-2026-${next.toString().padStart(4, '0')}`;
   }
   return `${prefix}-2026-0001`;
 };
 
-// HTML Template Helper
-const renderPage = (title: string, content: string) => `
-<!DOCTYPE html>
-<html>
+// ─── Shared CSS ─────────────────────────────────────────────────────────────
+const SHARED_CSS = `
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    background: #f3f4f6;
+    color: #111;
+    line-height: 1.6;
+    padding: 20px;
+    font-size: 14px;
+  }
+  a { color: #d8833b; text-decoration: none; }
+  a:hover { text-decoration: underline; }
+
+  /* ── Layout ── */
+  .page-wrap { max-width: 900px; margin: 0 auto; }
+  .doc-card {
+    background: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 12px rgba(0,0,0,0.08);
+    overflow: hidden;
+    margin-bottom: 24px;
+  }
+  .doc-body { padding: 28px 32px; }
+
+  /* ── Header ── */
+  .doc-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 20px 32px 16px;
+    border-bottom: 3px solid #d8833b;
+    background: #fff;
+  }
+  .doc-header .logo { width: 100px; flex-shrink: 0; }
+  .doc-header .logo img { width: 100%; height: auto; display: block; }
+  .doc-header .doc-title {
+    flex: 1;
+    text-align: center;
+    padding-top: 8px;
+  }
+  .doc-header .doc-title h1 {
+    font-size: 26px;
+    font-weight: 700;
+    color: #d8833b;
+    margin-bottom: 2px;
+  }
+  .doc-header .doc-title p {
+    font-size: 14px;
+    color: #d8833b;
+    font-weight: 600;
+  }
+  .doc-header .company-info {
+    text-align: right;
+    font-size: 12px;
+    line-height: 1.7;
+    color: #333;
+  }
+  .doc-header .company-info strong { font-size: 14px; }
+
+  /* ── Info Grid ── */
+  .info-grid { display: grid; gap: 12px; margin-bottom: 16px; }
+  .info-grid-2 { grid-template-columns: 1fr 1fr; }
+  .info-grid-3 { grid-template-columns: 1fr 1fr 1fr; }
+  .info-block .lbl { font-weight: 700; color: #d8833b; font-size: 12px; margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .info-block .val { font-size: 15px; font-weight: 600; }
+  .info-block .val-sm { font-size: 13px; }
+
+  /* ── Section ── */
+  .section { margin-bottom: 20px; }
+  .section-title {
+    font-weight: 700;
+    color: #d8833b;
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-bottom: 8px;
+    padding-bottom: 4px;
+    border-bottom: 1px solid #f0e0d0;
+  }
+
+  /* ── Items Table ── */
+  .items-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .items-table th {
+    background: #d8833b;
+    color: #fff;
+    padding: 9px 10px;
+    text-align: left;
+    font-weight: 600;
+    white-space: nowrap;
+  }
+  .items-table td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: top; }
+  .items-table tr:nth-child(even) td { background: #fdf8f5; }
+
+  /* ── Accessories Tags ── */
+  .acc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .acc-tag {
+    display: inline-block;
+    border: 1px solid #d8833b;
+    border-radius: 3px;
+    padding: 2px 7px;
+    font-size: 11px;
+    color: #d8833b;
+    background: #fff8f2;
+    white-space: nowrap;
+  }
+
+  /* ── Totals ── */
+  .totals-box { text-align: right; padding: 12px 0; border-top: 1px solid #e5e7eb; }
+  .totals-box .row { display: flex; justify-content: flex-end; gap: 24px; margin-bottom: 4px; font-size: 14px; }
+  .totals-box .row span:first-child { color: #666; }
+  .totals-box .row.total-row { font-size: 17px; font-weight: 700; color: #d8833b; margin-top: 6px; border-top: 2px solid #d8833b; padding-top: 6px; }
+  .totals-box .row.balance-row { font-size: 16px; font-weight: 700; }
+
+  /* ── Badges ── */
+  .badge {
+    display: inline-block;
+    padding: 3px 10px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 700;
+    color: #fff;
+    vertical-align: middle;
+  }
+  .badge-draft { background: #6b7280; }
+  .badge-pending { background: #f59e0b; color: #000; }
+  .badge-ready { background: #3b82f6; }
+  .badge-converted { background: #10b981; }
+  .badge-paid { background: #10b981; }
+  .badge-unpaid { background: #ef4444; }
+
+  /* ── Buttons ── */
+  .btn {
+    display: inline-block;
+    padding: 9px 18px;
+    border-radius: 5px;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    border: none;
+    text-decoration: none;
+    transition: opacity 0.15s;
+  }
+  .btn:hover { opacity: 0.85; text-decoration: none; }
+  .btn-primary { background: #d8833b; color: #fff; }
+  .btn-secondary { background: #6b7280; color: #fff; }
+  .btn-success { background: #10b981; color: #fff; }
+  .btn-danger { background: #ef4444; color: #fff; }
+  .btn-outline { background: #fff; color: #d8833b; border: 1.5px solid #d8833b; }
+  .btn-sm { padding: 5px 12px; font-size: 12px; }
+
+  /* ── Forms ── */
+  .form-group { margin-bottom: 16px; }
+  .form-group label { display: block; font-weight: 600; margin-bottom: 5px; font-size: 13px; color: #333; }
+  .form-group input,
+  .form-group select,
+  .form-group textarea {
+    width: 100%;
+    padding: 9px 12px;
+    border: 1.5px solid #d1d5db;
+    border-radius: 5px;
+    font-size: 14px;
+    font-family: inherit;
+    transition: border-color 0.15s;
+  }
+  .form-group input:focus,
+  .form-group select:focus,
+  .form-group textarea:focus {
+    outline: none;
+    border-color: #d8833b;
+  }
+  .form-row { display: grid; gap: 12px; }
+  .form-row-2 { grid-template-columns: 1fr 1fr; }
+  .form-row-3 { grid-template-columns: 1fr 1fr 1fr; }
+
+  /* ── Alerts ── */
+  .alert { padding: 12px 16px; border-radius: 5px; margin-bottom: 16px; font-size: 14px; }
+  .alert-success { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+  .alert-danger { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+  .alert-info { background: #dbeafe; color: #1e40af; border: 1px solid #93c5fd; }
+
+  /* ── Dashboard Cards ── */
+  .dash-grid { display: grid; gap: 14px; }
+  .quote-card {
+    background: #fff;
+    border: 1px solid #e5e7eb;
+    border-left: 4px solid #d8833b;
+    border-radius: 6px;
+    padding: 16px 20px;
+  }
+  .quote-card-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 10px; }
+  .quote-card-title { font-size: 16px; font-weight: 700; }
+  .quote-card-meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
+  .quote-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #f3f4f6; }
+
+  /* ── Search / Filter Bar ── */
+  .filter-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
+  .filter-bar input { flex: 1; min-width: 200px; padding: 8px 12px; border: 1.5px solid #d1d5db; border-radius: 5px; font-size: 14px; }
+  .filter-tabs { display: flex; gap: 6px; flex-wrap: wrap; }
+  .filter-tab {
+    padding: 5px 14px;
+    border-radius: 20px;
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    border: 1.5px solid #d1d5db;
+    background: #fff;
+    color: #6b7280;
+    text-decoration: none;
+  }
+  .filter-tab.active, .filter-tab:hover { background: #d8833b; color: #fff; border-color: #d8833b; text-decoration: none; }
+
+  /* ── Items Input Table ── */
+  .items-input-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .items-input-table th {
+    background: #f9fafb;
+    border: 1px solid #d1d5db;
+    padding: 7px 8px;
+    text-align: left;
+    font-weight: 600;
+    color: #374151;
+    font-size: 12px;
+    white-space: nowrap;
+  }
+  .items-input-table td { border: 1px solid #d1d5db; padding: 5px 6px; vertical-align: middle; }
+  .items-input-table input, .items-input-table select {
+    width: 100%;
+    padding: 5px 7px;
+    border: 1px solid #e5e7eb;
+    border-radius: 3px;
+    font-size: 12px;
+    font-family: inherit;
+  }
+  .items-input-table input:focus, .items-input-table select:focus {
+    outline: none;
+    border-color: #d8833b;
+  }
+
+  /* ── Privacy Notice ── */
+  .privacy-notice {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 5px;
+    padding: 12px 16px;
+    font-size: 12px;
+    color: #6b7280;
+    margin-top: 16px;
+  }
+
+  /* ── Thank You ── */
+  .thank-you { text-align: center; padding: 16px 0 4px; color: #d8833b; font-size: 16px; font-weight: 600; }
+
+  /* ── Divider ── */
+  .divider { border: none; border-top: 1px solid #e5e7eb; margin: 20px 0; }
+
+  /* ── Responsive ── */
+  @media (max-width: 640px) {
+    body { padding: 10px; }
+    .doc-header { flex-direction: column; gap: 12px; }
+    .doc-header .company-info { text-align: left; }
+    .doc-header .doc-title { text-align: left; }
+    .info-grid-2, .info-grid-3 { grid-template-columns: 1fr 1fr; }
+    .form-row-2, .form-row-3 { grid-template-columns: 1fr; }
+    .doc-body { padding: 16px; }
+    .items-input-table { font-size: 11px; }
+    .items-input-table th, .items-input-table td { padding: 4px 4px; }
+  }
+`;
+
+// ─── HTML Page Template ──────────────────────────────────────────────────────
+const renderPage = (title: string, content: string, extraHead = ''): string => `<!DOCTYPE html>
+<html lang="zh-Hant">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>${escapeHtml(title)}</title>
-  <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; background-color: #f3f4f6; color: #333; line-height: 1.6; padding: 20px; }
-    .container { max-width: 800px; margin: 0 auto; background: #fff; padding: 30px; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-    h1, h2, h3 { color: #111; }
-    .header { border-bottom: 2px solid #eee; padding-bottom: 20px; margin-bottom: 20px; }
-    .company-info { color: #666; font-size: 0.9em; }
-    .items-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-    .items-table th, .items-table td { border: 1px solid #ddd; padding: 12px; text-align: left; }
-    .items-table th { background-color: #f9fafb; }
-    .totals { text-align: right; margin-top: 20px; }
-    .totals p { margin: 5px 0; }
-    .totals strong { font-size: 1.2em; }
-    .form-group { margin-bottom: 15px; }
-    .form-group label { display: block; margin-bottom: 5px; font-weight: bold; }
-    .form-group input, .form-group select, .form-group textarea { width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box; }
-    button { background-color: #007bff; color: white; padding: 10px 20px; border: none; border-radius: 4px; cursor: pointer; font-size: 16px; }
-    button:hover { background-color: #0056b3; }
-    .alert { padding: 15px; margin-bottom: 20px; border: 1px solid transparent; border-radius: 4px; }
-    .alert-success { color: #155724; background-color: #d4edda; border-color: #c3e6cb; }
-    .alert-danger { color: #721c24; background-color: #f8d7da; border-color: #f5c6cb; }
-    .badge { display: inline-block; padding: 4px 8px; border-radius: 12px; font-size: 12px; font-weight: bold; color: white; }
-    .badge-draft { background: #6c757d; }
-    .badge-pending { background: #ffc107; color: #000; }
-    .badge-converted { background: #28a745; }
-    .badge-paid { background: #28a745; }
-    .badge-unpaid { background: #dc3545; }
-  </style>
+  <title>${escapeHtml(title)} | LKS Display Box</title>
+  <style>${SHARED_CSS}</style>
+  ${extraHead}
 </head>
 <body>
-  <div class="container">
+  <div class="page-wrap">
     ${content}
   </div>
 </body>
-</html>
-`;
+</html>`;
 
-// --- Routes ---
+// ─── Shared Components ───────────────────────────────────────────────────────
+const docHeader = (titleZh: string, titleEn: string): string => `
+<div class="doc-header">
+  <div class="logo">
+    <img src="${LOGO_URL}" alt="LKS Logo" crossorigin="anonymous">
+  </div>
+  <div class="doc-title">
+    <h1>${titleZh}</h1>
+    <p>${titleEn}</p>
+  </div>
+  <div class="company-info">
+    <strong>${COMPANY.name}</strong><br>
+    ${COMPANY.address1}<br>
+    ${COMPANY.address2}<br>
+    ${COMPANY.phone}<br>
+    ${COMPANY.email}
+  </div>
+</div>`;
 
-// GET /quote/create
-app.get('/quote/create', (req: Request, res: Response) => {
-  const html = renderPage('Create Quote', `
-    <h1>Create New Quote</h1>
-    <form action="/quote/create" method="POST">
-      <div class="form-group">
-        <label>Contact Name</label>
-        <input type="text" name="contactName" required>
+const parseAccessories = (raw: string | undefined): string[] => {
+  if (!raw || raw.trim() === '' || raw.trim() === '-') return [];
+  return raw.split(/[,，;\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+};
+
+const renderAccTags = (raw: string | undefined): string => {
+  const tags = parseAccessories(raw);
+  if (tags.length === 0) return '<span style="color:#9ca3af">-</span>';
+  return `<div class="acc-tags">${tags.map(t => `<span class="acc-tag">${escapeHtml(t)}</span>`).join('')}</div>`;
+};
+
+const statusBadgeClass = (status: string): string => {
+  const map: Record<string, string> = {
+    'Draft': 'badge-draft',
+    'Pending Customer Info': 'badge-pending',
+    'Ready to Convert': 'badge-ready',
+    'Converted to Invoice': 'badge-converted',
+    'Paid': 'badge-paid',
+    'Unpaid': 'badge-unpaid',
+  };
+  return map[status] || 'badge-draft';
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /quotes  — Dashboard
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/quotes', async (req: Request, res: Response) => {
+  try {
+    const filterStatus = (req.query.status as string) || 'all';
+    const search = ((req.query.search as string) || '').toLowerCase().trim();
+
+    const allRecords = await tableQuotes
+      .select({ sort: [{ field: 'Created At', direction: 'desc' }] })
+      .firstPage();
+
+    let records = allRecords;
+
+    // Filter by status tab
+    if (filterStatus !== 'all') {
+      const statusMap: Record<string, string[]> = {
+        draft: ['Draft'],
+        pending: ['Pending Customer Info'],
+        ready: ['Ready to Convert'],
+        invoiced: ['Converted to Invoice'],
+        paid: ['Paid'],
+      };
+      const allowed = statusMap[filterStatus] || [];
+      records = records.filter(r => allowed.includes(r.fields['Status'] as string));
+    }
+
+    // Search filter
+    if (search) {
+      records = records.filter(r => {
+        const qn = ((r.fields['Quote Number'] as string) || '').toLowerCase();
+        const cn = ((r.fields['Customer Name'] as string) || '').toLowerCase();
+        const ph = ((r.fields['Customer Phone'] as string) || '').toLowerCase();
+        const contact = ((r.fields['Contact Name'] as string) || '').toLowerCase();
+        return qn.includes(search) || cn.includes(search) || ph.includes(search) || contact.includes(search);
+      });
+    }
+
+    const tabs = [
+      { key: 'all', label: 'All' },
+      { key: 'draft', label: 'Draft' },
+      { key: 'pending', label: 'Pending Info' },
+      { key: 'ready', label: 'Ready' },
+      { key: 'invoiced', label: 'Invoiced' },
+      { key: 'paid', label: 'Paid' },
+    ];
+
+    const tabsHtml = tabs.map(t => {
+      const isActive = filterStatus === t.key;
+      const url = `/quotes?status=${t.key}${search ? `&search=${encodeURIComponent(search)}` : ''}`;
+      return `<a href="${url}" class="filter-tab${isActive ? ' active' : ''}">${t.label}</a>`;
+    }).join('');
+
+    const cardsHtml = records.length === 0
+      ? '<div style="text-align:center;padding:40px;color:#9ca3af;">No quotes found.</div>'
+      : records.map(r => {
+          const f = r.fields;
+          const token = f['Public Token'] as string;
+          const status = (f['Status'] as string) || 'Draft';
+          const qNum = escapeHtml(f['Quote Number'] as string);
+          const qDate = escapeHtml(f['Quote Date'] as string);
+          const customerName = escapeHtml((f['Customer Name'] as string) || (f['Contact Name'] as string) || 'N/A');
+          const phone = escapeHtml((f['Customer Phone'] as string) || (f['Phone'] as string) || '');
+          const total = f['Total'] ? `$${f['Total']}` : '-';
+          const invoiceToken = f['Invoice Public Token'] as string | undefined;
+          const receiptToken = f['Receipt Public Token'] as string | undefined;
+
+          // Build action buttons
+          let actions = `<a href="/quote/${token}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
+
+          if (status === 'Draft' || status === 'Pending Customer Info') {
+            actions += ` <a href="/quote/${token}/customer-info" class="btn btn-secondary btn-sm" target="_blank">Fill Customer Info</a>`;
+          } else if (status === 'Ready to Convert' || status === 'Converted to Invoice' || status === 'Paid') {
+            actions += ` <a href="/quote/${token}/customer-info" class="btn btn-secondary btn-sm" target="_blank">View Customer Info</a>`;
+          }
+
+          if (status === 'Ready to Convert') {
+            actions += `
+              <form method="POST" action="/admin/quote/${token}/convert" style="display:inline;" onsubmit="return confirm('Convert this quote to Invoice?')">
+                <button type="submit" class="btn btn-primary btn-sm">Convert to Invoice</button>
+              </form>`;
+          }
+
+          if (status === 'Converted to Invoice' && invoiceToken) {
+            actions += ` <a href="/invoice/${invoiceToken}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
+            actions += `
+              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline;" onsubmit="return confirm('Mark this invoice as Paid?')">
+                <button type="submit" class="btn btn-primary btn-sm">Mark as Paid</button>
+              </form>`;
+          }
+
+          if (status === 'Paid' && receiptToken) {
+            if (invoiceToken) actions += ` <a href="/invoice/${invoiceToken}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
+            actions += ` <a href="/receipt/${receiptToken}" class="btn btn-success btn-sm" target="_blank">View Receipt</a>`;
+          }
+
+          return `
+            <div class="quote-card">
+              <div class="quote-card-header">
+                <div>
+                  <div class="quote-card-title">${qNum} <span class="badge ${statusBadgeClass(status)}">${escapeHtml(status)}</span></div>
+                  <div class="quote-card-meta">${qDate}${phone ? ` · ${phone}` : ''}</div>
+                </div>
+                <div style="text-align:right;">
+                  <div style="font-size:18px;font-weight:700;color:#d8833b;">${total}</div>
+                  <div style="font-size:13px;color:#6b7280;">${customerName}</div>
+                </div>
+              </div>
+              <div class="quote-card-actions">${actions}</div>
+            </div>`;
+        }).join('');
+
+    const content = `
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
+        <h2 style="font-size:22px;font-weight:700;">Quote Dashboard</h2>
+        <a href="/quote/create" class="btn btn-primary">+ New Quote</a>
       </div>
-      <div class="form-group">
-        <label>Phone</label>
-        <input type="text" name="phone" required>
-      </div>
-      <div class="form-group">
-        <label>Contact Method</label>
-        <select name="contactMethod" required>
-          <option value="WhatsApp">WhatsApp</option>
-          <option value="IG">IG</option>
-          <option value="Facebook">Facebook</option>
-          <option value="Phone">Phone</option>
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Contact Handle / Reference</label>
-        <input type="text" name="contactHandle">
-      </div>
-      <div class="form-group">
-        <label>Items JSON (Array of { description, qty, price, amount, size?, accessories? })</label>
-        <textarea name="itemsJson" rows="8" required>[
-  {
-    "description": "Display Case",
-    "qty": 1,
-    "price": 3200,
-    "amount": 3200
+
+      <form method="GET" action="/quotes" style="margin-bottom:12px;">
+        <div class="filter-bar">
+          <input type="text" name="search" placeholder="Search quote no. / customer / phone..." value="${escapeHtml(search)}">
+          <input type="hidden" name="status" value="${escapeHtml(filterStatus)}">
+          <button type="submit" class="btn btn-secondary">Search</button>
+          ${search ? `<a href="/quotes?status=${escapeHtml(filterStatus)}" class="btn btn-outline">Clear</a>` : ''}
+        </div>
+      </form>
+
+      <div class="filter-tabs" style="margin-bottom:16px;">${tabsHtml}</div>
+
+      <div class="dash-grid">${cardsHtml}</div>
+    `;
+
+    res.send(renderPage('Quote Dashboard', content));
+  } catch (error: any) {
+    console.error(error);
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error loading dashboard: ${escapeHtml(error.message)}</div>`));
   }
-]</textarea>
-      </div>
-      <div class="form-group">
-        <label>Subtotal</label>
-        <input type="number" name="subtotal" step="0.01" required>
-      </div>
-      <div class="form-group">
-        <label>Discount</label>
-        <input type="number" name="discount" step="0.01" value="0">
-      </div>
-      <div class="form-group">
-        <label>Total</label>
-        <input type="number" name="total" step="0.01" required>
-      </div>
-      <div class="form-group">
-        <label>Description Summary</label>
-        <input type="text" name="descriptionSummary">
-      </div>
-      <div class="form-group">
-        <label>Notes</label>
-        <textarea name="notes" rows="3"></textarea>
-      </div>
-      <div class="form-group">
-        <label>Terms and Conditions</label>
-        <textarea name="terms" rows="4">Standard Terms and Conditions apply.</textarea>
-      </div>
-      <div class="form-group">
-        <label>Valid Until (YYYY-MM-DD)</label>
-        <input type="date" name="validUntil">
-      </div>
-      <button type="submit">Generate Quote</button>
-    </form>
-  `);
-  res.send(html);
 });
 
-// POST /quote/create
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /quote/create
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/quote/create', (_req: Request, res: Response) => {
+  const content = `
+    <div class="doc-card">
+      ${docHeader('建立報價單', 'Create Quote')}
+      <div class="doc-body">
+        <form id="quoteForm" action="/quote/create" method="POST">
+
+          <div class="section">
+            <div class="section-title">Contact Information</div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Contact Name *</label>
+                <input type="text" name="contactName" required>
+              </div>
+              <div class="form-group">
+                <label>Phone *</label>
+                <input type="text" name="phone" required>
+              </div>
+            </div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Contact Method</label>
+                <select name="contactMethod">
+                  <option value="WhatsApp">WhatsApp</option>
+                  <option value="IG">IG</option>
+                  <option value="Facebook">Facebook</option>
+                  <option value="Phone">Phone</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Contact Handle / Reference</label>
+                <input type="text" name="contactHandle">
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Items</div>
+            <div style="overflow-x:auto;">
+              <table class="items-input-table" id="itemsTable">
+                <thead>
+                  <tr>
+                    <th>Item Type</th>
+                    <th>For What</th>
+                    <th>Inter L</th>
+                    <th>Inter D</th>
+                    <th>Inter H</th>
+                    <th>Outer L</th>
+                    <th>Outer D</th>
+                    <th>Outer H</th>
+                    <th>Levels</th>
+                    <th>Level Heights</th>
+                    <th>Accessories</th>
+                    <th>Description</th>
+                    <th>QTY</th>
+                    <th>Amount ($)</th>
+                    <th></th>
+                  </tr>
+                </thead>
+                <tbody id="itemsBody">
+                  <tr>
+                    <td><input type="text" name="item_type[]" placeholder="e.g. Display Case"></td>
+                    <td><input type="text" name="item_for[]" placeholder="e.g. Shoes"></td>
+                    <td><input type="number" name="item_inter_l[]" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="item_inter_d[]" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="item_inter_h[]" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="item_outer_l[]" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="item_outer_d[]" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="item_outer_h[]" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="item_levels[]" min="1" style="width:50px"></td>
+                    <td><input type="text" name="item_level_heights[]" placeholder="e.g. 20,30"></td>
+                    <td><input type="text" name="item_accessories[]" placeholder="e.g. LED, Door"></td>
+                    <td><input type="text" name="item_description[]" placeholder="Remarks"></td>
+                    <td><input type="number" name="item_qty[]" min="1" value="1" style="width:55px" class="qty-input" oninput="recalcRow(this)"></td>
+                    <td><input type="number" name="item_amount[]" step="0.01" style="width:80px" class="amount-input" oninput="recalcSubtotal()"></td>
+                    <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div style="margin-top:10px;">
+              <button type="button" class="btn btn-outline btn-sm" onclick="addRow()">+ Add Item</button>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Pricing</div>
+            <div class="form-row form-row-3">
+              <div class="form-group">
+                <label>Subtotal ($)</label>
+                <input type="number" name="subtotal" id="subtotal" step="0.01" readonly style="background:#f9fafb;">
+              </div>
+              <div class="form-group">
+                <label>Discount (e.g. 0.9 = 9折, 1 = no discount)</label>
+                <input type="number" name="discount" id="discount" step="0.01" min="0" max="1" value="1" oninput="recalcTotal()">
+              </div>
+              <div class="form-group">
+                <label>Total ($)</label>
+                <input type="number" name="total" id="total" step="0.01" readonly style="background:#f9fafb;">
+              </div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Additional Info</div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Valid Until</label>
+                <input type="date" name="validUntil">
+              </div>
+              <div class="form-group">
+                <label>Notes</label>
+                <textarea name="notes" rows="3"></textarea>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>Terms and Conditions</label>
+              <textarea name="terms" rows="6">${escapeHtml(DEFAULT_TERMS)}</textarea>
+            </div>
+          </div>
+
+          <div style="text-align:right;">
+            <button type="submit" class="btn btn-primary" style="font-size:16px;padding:12px 32px;">Generate Quote</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  `;
+
+  const extraHead = `
+  <script>
+    function addRow() {
+      const tbody = document.getElementById('itemsBody');
+      const first = tbody.querySelector('tr');
+      const clone = first.cloneNode(true);
+      clone.querySelectorAll('input').forEach(i => { i.value = i.name.includes('qty') ? '1' : ''; });
+      tbody.appendChild(clone);
+    }
+    function removeRow(btn) {
+      const tbody = document.getElementById('itemsBody');
+      if (tbody.querySelectorAll('tr').length <= 1) return;
+      btn.closest('tr').remove();
+      recalcSubtotal();
+    }
+    function recalcSubtotal() {
+      let sum = 0;
+      document.querySelectorAll('.amount-input').forEach(i => { sum += parseFloat(i.value) || 0; });
+      document.getElementById('subtotal').value = sum.toFixed(2);
+      recalcTotal();
+    }
+    function recalcRow(qtyInput) { recalcSubtotal(); }
+    function recalcTotal() {
+      const sub = parseFloat(document.getElementById('subtotal').value) || 0;
+      const disc = parseFloat(document.getElementById('discount').value);
+      const d = isNaN(disc) ? 1 : disc;
+      document.getElementById('total').value = (sub * d).toFixed(2);
+    }
+    recalcSubtotal();
+  </script>`;
+
+  res.send(renderPage('Create Quote', content, extraHead));
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /quote/create
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/quote/create', async (req: Request, res: Response) => {
   try {
-    const { contactName, phone, contactMethod, contactHandle, itemsJson, subtotal, discount, total, descriptionSummary, notes, terms, validUntil } = req.body;
-    
-    // Validate JSON
-    try {
-      JSON.parse(itemsJson);
-    } catch (e) {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Invalid Items JSON format.</div><a href="/quote/create">Back</a>'));
-    }
+    const b = req.body;
+
+    // Build items array from table inputs
+    const types: string[] = [].concat(b['item_type[]'] || []);
+    const fors: string[] = [].concat(b['item_for[]'] || []);
+    const interLs: string[] = [].concat(b['item_inter_l[]'] || []);
+    const interDs: string[] = [].concat(b['item_inter_d[]'] || []);
+    const interHs: string[] = [].concat(b['item_inter_h[]'] || []);
+    const outerLs: string[] = [].concat(b['item_outer_l[]'] || []);
+    const outerDs: string[] = [].concat(b['item_outer_d[]'] || []);
+    const outerHs: string[] = [].concat(b['item_outer_h[]'] || []);
+    const levels: string[] = [].concat(b['item_levels[]'] || []);
+    const levelHeights: string[] = [].concat(b['item_level_heights[]'] || []);
+    const accessories: string[] = [].concat(b['item_accessories[]'] || []);
+    const descriptions: string[] = [].concat(b['item_description[]'] || []);
+    const qtys: string[] = [].concat(b['item_qty[]'] || []);
+    const amounts: string[] = [].concat(b['item_amount[]'] || []);
+
+    const items = types.map((_, i) => ({
+      itemType: types[i] || '',
+      forWhat: fors[i] || '',
+      interL: interLs[i] || '',
+      interD: interDs[i] || '',
+      interH: interHs[i] || '',
+      outerL: outerLs[i] || '',
+      outerD: outerDs[i] || '',
+      outerH: outerHs[i] || '',
+      noOfLevels: levels[i] ? parseInt(levels[i], 10) : null,
+      levelHeights: levelHeights[i] || '',
+      accessories: accessories[i] || '',
+      description: descriptions[i] || '',
+      qty: qtys[i] ? parseInt(qtys[i], 10) : 1,
+      amount: amounts[i] ? parseFloat(amounts[i]) : 0,
+    })).filter(item => item.itemType || item.description || item.amount);
+
+    const itemsJson = JSON.stringify(items);
+    const subtotal = parseFloat(b.subtotal) || 0;
+    const discountRate = parseFloat(b.discount) || 1;
+    const total = parseFloat(b.total) || subtotal * discountRate;
 
     const quoteNumber = await getNextNumber(tableQuotes, 'Quote Number', 'QT');
     const publicToken = generateToken();
     const quoteDate = new Date().toISOString().split('T')[0];
 
-    await tableQuotes.create([
-      {
-        fields: {
-          'Quote Number': quoteNumber,
-          'Quote Date': quoteDate,
-          'Status': 'Draft',
-          'Public Token': publicToken,
-          'Valid Until': validUntil || null,
-          'Contact Name': contactName,
-          'Phone': phone,
-          'Contact Method': contactMethod,
-          'Contact Handle / Reference': contactHandle,
-          'Sub Total': parseFloat(subtotal),
-          'Discount': parseFloat(discount) || 0,
-          'Total': parseFloat(total),
-          'Description Summary': descriptionSummary,
-          'Quote Items JSON': itemsJson,
-          'Notes': notes,
-          'Terms and Conditions': terms,
-          'Created At': new Date().toISOString()
-        }
+    await tableQuotes.create([{
+      fields: {
+        'Quote Number': quoteNumber,
+        'Quote Date': quoteDate,
+        'Status': 'Draft',
+        'Public Token': publicToken,
+        'Valid Until': b.validUntil || null,
+        'Contact Name': b.contactName,
+        'Phone': b.phone,
+        'Contact Method': b.contactMethod,
+        'Contact Handle / Reference': b.contactHandle || '',
+        'Sub Total': subtotal,
+        'Discount': discountRate,
+        'Total': total,
+        'Quote Items JSON': itemsJson,
+        'Notes': b.notes || '',
+        'Terms and Conditions': b.terms || '',
+        'Created At': new Date().toISOString(),
       }
-    ]);
+    }]);
 
     const publicLink = `${PUBLIC_BASE_URL}/quote/${publicToken}`;
+    const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${publicToken}/customer-info`;
+
     res.send(renderPage('Quote Created', `
-      <div class="alert alert-success">Quote Created Successfully!</div>
-      <p><strong>Quote Number:</strong> ${quoteNumber}</p>
-      <p><strong>Public Link:</strong> <a href="${publicLink}" target="_blank">${publicLink}</a></p>
-      <br>
-      <a href="/quote/create">Create Another Quote</a>
+      <div class="doc-card">
+        ${docHeader('報價單已建立', 'Quote Created')}
+        <div class="doc-body">
+          <div class="alert alert-success">Quote created successfully!</div>
+          <div class="info-grid info-grid-2" style="margin-bottom:20px;">
+            <div class="info-block"><div class="lbl">Quote Number</div><div class="val">${escapeHtml(quoteNumber)}</div></div>
+            <div class="info-block"><div class="lbl">Date</div><div class="val">${quoteDate}</div></div>
+          </div>
+          <div class="section">
+            <div class="section-title">Links</div>
+            <p style="margin-bottom:8px;"><strong>Quote (Customer View):</strong><br>
+              <a href="${publicLink}" target="_blank">${publicLink}</a>
+            </p>
+            <p><strong>Customer Info Form:</strong><br>
+              <a href="${customerInfoLink}" target="_blank">${customerInfoLink}</a>
+            </p>
+          </div>
+          <div style="margin-top:20px;display:flex;gap:10px;">
+            <a href="/quotes" class="btn btn-secondary">Back to Dashboard</a>
+            <a href="/quote/create" class="btn btn-outline">Create Another</a>
+          </div>
+        </div>
+      </div>
     `));
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error creating quote: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error creating quote: ${escapeHtml(error.message)}</div><a href="/quote/create" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
   }
 });
 
-// GET /quote/:token
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /quote/:token  — Public Quote View
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/quote/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', 'Quote not found.'));
-    
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+
     const quote = records[0].fields;
-    const status = quote['Status'] as string;
-    const itemsJson = quote['Quote Items JSON'] as string;
-    let items = [];
-    try { items = JSON.parse(itemsJson); } catch (e) { console.error('Error parsing items JSON'); }
+    const status = (quote['Status'] as string) || 'Draft';
 
-    let itemsHtml = items.map((item: any) => `
-      <tr>
-        <td>
-          ${escapeHtml(item.description)}
-          ${item.size ? `<br><small>Size: ${escapeHtml(item.size)}</small>` : ''}
-          ${item.accessories ? `<br><small>Accessories: ${escapeHtml(item.accessories)}</small>` : ''}
-        </td>
-        <td>${item.qty}</td>
-        <td>$${item.price}</td>
-        <td>$${item.amount}</td>
-      </tr>
-    `).join('');
+    // Parse items
+    let items: any[] = [];
+    try { items = JSON.parse((quote['Quote Items JSON'] as string) || '[]'); } catch (_) { /* ignore */ }
 
-    let statusBadge = 'badge-draft';
-    if (status === 'Pending Order') statusBadge = 'badge-pending';
-    else if (status === 'Converted to Invoice') statusBadge = 'badge-converted';
+    const subtotal = (quote['Sub Total'] as number) || 0;
+    const discountRate = (quote['Discount'] as number) ?? 1;
+    const total = (quote['Total'] as number) || 0;
+    const discountAmount = subtotal - total;
 
-    let content = `
-      <div class="header">
-        <h1>Quote ${escapeHtml(quote['Quote Number'] as string)} <span class="badge ${statusBadge}">${escapeHtml(status)}</span></h1>
-        <div class="company-info">
-          <p><strong>${process.env.COMPANY_NAME}</strong><br>
-          Phone: ${process.env.COMPANY_PHONE}<br>
-          Email: ${process.env.COMPANY_EMAIL}<br>
-          Address: ${process.env.COMPANY_ADDRESS}</p>
+    // Items table rows
+    const itemRows = items.length === 0
+      ? '<tr><td colspan="10" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+      : items.map((item: any, idx: number) => {
+          const interSize = [item.interL, item.interD, item.interH].filter(Boolean).join(' x ');
+          const outerSize = [item.outerL, item.outerD, item.outerH].filter(Boolean).join(' x ');
+          return `<tr>
+            <td>${idx + 1}</td>
+            <td>${escapeHtml(item.itemType)}</td>
+            <td>${escapeHtml(item.forWhat)}</td>
+            <td>${escapeHtml(interSize) || '-'}</td>
+            <td>${escapeHtml(outerSize) || '-'}</td>
+            <td style="text-align:center;">${item.noOfLevels || '-'}</td>
+            <td>${escapeHtml(item.levelHeights) || '-'}</td>
+            <td>${renderAccTags(item.accessories)}</td>
+            <td>${escapeHtml(item.description) || '-'}</td>
+            <td style="text-align:center;">${item.qty || 1}</td>
+            <td style="text-align:right;">$${item.amount || 0}</td>
+          </tr>`;
+        }).join('');
+
+    // Customer info block
+    const custName = (quote['Customer Name'] as string) || '';
+    const custPhone = (quote['Customer Phone'] as string) || '';
+    const custEmail = (quote['Customer Email'] as string) || '';
+    const custAddr = (quote['Chinese Delivery Address'] as string) || '';
+    const hasCustomer = custName || custPhone || custEmail || custAddr;
+
+    const customerBlock = hasCustomer ? `
+      <div class="section">
+        <div class="section-title">Customer Information</div>
+        <div class="info-grid info-grid-2">
+          <div class="info-block"><div class="lbl">Name</div><div class="val-sm">${escapeHtml(custName) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${escapeHtml(custPhone) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Email</div><div class="val-sm">${escapeHtml(custEmail) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">Delivery Address</div><div class="val-sm">${escapeHtml(custAddr) || 'N/A'}</div></div>
         </div>
-        <p><strong>Date:</strong> ${escapeHtml(quote['Quote Date'] as string)}</p>
-        ${quote['Valid Until'] ? `<p><strong>Valid Until:</strong> ${escapeHtml(quote['Valid Until'] as string)}</p>` : ''}
+      </div>` : '';
+
+    const content = `
+      <div class="doc-card">
+        ${docHeader('報價單', 'Quotation')}
+        <div class="doc-body">
+
+          <div class="info-grid info-grid-3" style="margin-bottom:16px;">
+            <div class="info-block">
+              <div class="lbl">Quote Number</div>
+              <div class="val">${escapeHtml(quote['Quote Number'] as string)}</div>
+            </div>
+            <div class="info-block">
+              <div class="lbl">Date</div>
+              <div class="val-sm">${escapeHtml(quote['Quote Date'] as string)}</div>
+            </div>
+            ${quote['Valid Until'] ? `<div class="info-block"><div class="lbl">Valid Until</div><div class="val-sm">${escapeHtml(quote['Valid Until'] as string)}</div></div>` : '<div></div>'}
+          </div>
+
+          ${customerBlock}
+
+          <div class="section">
+            <div class="section-title">Items</div>
+            <div style="overflow-x:auto;">
+              <table class="items-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Item Type</th>
+                    <th>For What</th>
+                    <th>Inter Size (cm)</th>
+                    <th>Outer Size (cm)</th>
+                    <th>Levels</th>
+                    <th>Level Heights</th>
+                    <th>Accessories</th>
+                    <th>Description</th>
+                    <th>QTY</th>
+                    <th>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>${itemRows}</tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="totals-box">
+            <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
+            ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
+            <div class="row total-row"><span>Total</span><span>$${total.toFixed(2)}</span></div>
+          </div>
+
+          ${quote['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:14px;">${nl2br(quote['Notes'])}</p></div>` : ''}
+          ${quote['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:13px;color:#374151;">${nl2br(quote['Terms and Conditions'])}</p></div>` : ''}
+
+          <div class="thank-you">Thank you!</div>
+
+          <hr class="divider">
+
+          <div style="text-align:center;margin-top:12px;">
+            <a href="/quote/${token}/customer-info" class="btn btn-primary" style="font-size:15px;padding:12px 32px;">
+              Confirm Order &amp; Fill In Details →
+            </a>
+            <p style="margin-top:10px;font-size:12px;color:#9ca3af;">
+              Please contact us via WhatsApp / IG if you have any questions before confirming.
+            </p>
+          </div>
+        </div>
       </div>
-
-      <h3>Items</h3>
-      <table class="items-table">
-        <thead>
-          <tr>
-            <th>Description</th>
-            <th>Qty</th>
-            <th>Price</th>
-            <th>Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${itemsHtml}
-        </tbody>
-      </table>
-
-      <div class="totals">
-        <p>Subtotal: $${quote['Sub Total']}</p>
-        ${quote['Discount'] ? `<p>Discount: -$${quote['Discount']}</p>` : ''}
-        <p><strong>Total: $${quote['Total']}</strong></p>
-      </div>
-
-      ${quote['Notes'] ? `<div><h3>Notes</h3><p>${escapeHtml(quote['Notes'] as string).replace(/\\n/g, '<br>')}</p></div>` : ''}
-      ${quote['Terms and Conditions'] ? `<div><h3>Terms and Conditions</h3><p>${escapeHtml(quote['Terms and Conditions'] as string).replace(/\\n/g, '<br>')}</p></div>` : ''}
     `;
-
-    if (status === 'Draft') {
-      content += `
-        <hr>
-        <h2>Confirm Order</h2>
-        <form action="/quote/${token}/submit" method="POST">
-          <div class="form-group">
-            <label>Name</label>
-            <input type="text" name="customerName" required>
-          </div>
-          <div class="form-group">
-            <label>Phone</label>
-            <input type="text" name="customerPhone" required>
-          </div>
-          <div class="form-group">
-            <label>Email</label>
-            <input type="email" name="customerEmail" required>
-          </div>
-          <div class="form-group">
-            <label>Chinese Delivery Address</label>
-            <textarea name="chineseDeliveryAddress" rows="3" required></textarea>
-          </div>
-          <div class="form-group">
-            <label>Payment Method</label>
-            <select name="paymentMethod" required>
-              <option value="FPS">FPS</option>
-              <option value="Bank Transfer">Bank Transfer</option>
-              <option value="PayMe">PayMe</option>
-            </select>
-          </div>
-          <div class="form-group">
-            <label>How did you know us? (Optional)</label>
-            <select name="howDidYouKnowUs">
-              <option value="">-- Select --</option>
-              <option value="朋友介紹">朋友介紹</option>
-              <option value="Facebook">Facebook</option>
-              <option value="IG">IG</option>
-              <option value="網站搜尋 Google">網站搜尋 Google</option>
-            </select>
-          </div>
-          <button type="submit">Confirm Order</button>
-        </form>
-      `;
-    } else {
-      content += `<div class="alert alert-success">This quote has been submitted and is currently: <strong>${status}</strong>.</div>`;
-    }
 
     res.send(renderPage(`Quote ${quote['Quote Number']}`, content));
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error fetching quote: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
   }
 });
 
-// POST /quote/:token/submit
-app.post('/quote/:token/submit', async (req: Request, res: Response) => {
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /quote/:token/customer-info  — Customer fills in details
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
+  try {
+    const { token } = req.params;
+    const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+
+    const quote = records[0].fields;
+    const status = (quote['Status'] as string) || 'Draft';
+    const qNum = escapeHtml(quote['Quote Number'] as string);
+
+    // If already submitted, show read-only view
+    if (status === 'Ready to Convert' || status === 'Converted to Invoice' || status === 'Paid') {
+      const custName = escapeHtml((quote['Customer Name'] as string) || 'N/A');
+      const custPhone = escapeHtml((quote['Customer Phone'] as string) || 'N/A');
+      const custEmail = escapeHtml((quote['Customer Email'] as string) || 'N/A');
+      const custAddr = escapeHtml((quote['Chinese Delivery Address'] as string) || 'N/A');
+      const payMethod = escapeHtml((quote['Payment Method'] as string) || 'N/A');
+      const howKnow = escapeHtml((quote['How Did You Know Us'] as string) || 'N/A');
+
+      const content = `
+        <div class="doc-card">
+          ${docHeader('客戶資料', 'Customer Information')}
+          <div class="doc-body">
+            <div class="alert alert-info">Quote ${qNum} — Customer info has been submitted.</div>
+            <div class="info-grid info-grid-2">
+              <div class="info-block"><div class="lbl">Name</div><div class="val-sm">${custName}</div></div>
+              <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${custPhone}</div></div>
+              <div class="info-block"><div class="lbl">Email</div><div class="val-sm">${custEmail}</div></div>
+              <div class="info-block"><div class="lbl">Delivery Address</div><div class="val-sm">${custAddr}</div></div>
+              <div class="info-block"><div class="lbl">Payment Method</div><div class="val-sm">${payMethod}</div></div>
+              <div class="info-block"><div class="lbl">How Did You Know Us</div><div class="val-sm">${howKnow}</div></div>
+            </div>
+            <div style="margin-top:20px;display:flex;gap:10px;">
+              <a href="/quotes" class="btn btn-secondary">Back to Dashboard</a>
+              <a href="/quote/${token}" class="btn btn-outline" target="_blank">View Quote</a>
+            </div>
+          </div>
+        </div>`;
+      return res.send(renderPage(`Customer Info — ${qNum}`, content));
+    }
+
+    // Show form for Draft / Pending Customer Info
+    const prefillName = escapeHtml((quote['Customer Name'] as string) || '');
+    const prefillPhone = escapeHtml((quote['Customer Phone'] as string) || (quote['Phone'] as string) || '');
+    const prefillEmail = escapeHtml((quote['Customer Email'] as string) || '');
+    const prefillAddr = escapeHtml((quote['Chinese Delivery Address'] as string) || '');
+
+    const content = `
+      <div class="doc-card">
+        ${docHeader('確認訂單', 'Confirm Order')}
+        <div class="doc-body">
+          <div class="alert alert-info">
+            You are confirming order for <strong>Quote ${qNum}</strong>.
+            Please fill in your details below.
+          </div>
+
+          <form action="/quote/${token}/customer-info" method="POST">
+            <div class="section">
+              <div class="section-title">Your Information</div>
+              <div class="form-row form-row-2">
+                <div class="form-group">
+                  <label>Full Name *</label>
+                  <input type="text" name="customerName" value="${prefillName}" required>
+                </div>
+                <div class="form-group">
+                  <label>Phone *</label>
+                  <input type="text" name="customerPhone" value="${prefillPhone}" required>
+                </div>
+              </div>
+              <div class="form-group">
+                <label>Email *</label>
+                <input type="email" name="customerEmail" value="${prefillEmail}" required>
+              </div>
+              <div class="form-group">
+                <label>Chinese Delivery Address *</label>
+                <textarea name="chineseDeliveryAddress" rows="3" required>${prefillAddr}</textarea>
+              </div>
+              <div class="form-row form-row-2">
+                <div class="form-group">
+                  <label>Payment Method *</label>
+                  <select name="paymentMethod" required>
+                    <option value="FPS">FPS 轉數快</option>
+                    <option value="Bank Transfer">Bank Transfer 銀行轉帳</option>
+                    <option value="PayMe">PayMe</option>
+                  </select>
+                </div>
+                <div class="form-group">
+                  <label>How did you know us? (Optional)</label>
+                  <select name="howDidYouKnowUs">
+                    <option value="">-- Select --</option>
+                    <option value="朋友介紹">朋友介紹</option>
+                    <option value="Facebook">Facebook</option>
+                    <option value="IG">IG</option>
+                    <option value="網站搜尋 Google">網站搜尋 Google</option>
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            <div class="privacy-notice">
+              閣下所提供的個人資料僅作訂單跟進、送貨安排及客戶聯絡之用途，所有資料將予以保密，並不會向第三方公開或作其他未經授權之用途。
+            </div>
+
+            <div style="margin-top:20px;text-align:right;">
+              <a href="/quote/${token}" class="btn btn-outline" style="margin-right:10px;">← Back to Quote</a>
+              <button type="submit" class="btn btn-primary" style="font-size:15px;padding:12px 28px;">Submit &amp; Confirm Order</button>
+            </div>
+          </form>
+        </div>
+      </div>`;
+
+    res.send(renderPage(`Confirm Order — ${qNum}`, content));
+  } catch (error: any) {
+    console.error(error);
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /quote/:token/customer-info
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const { customerName, customerPhone, customerEmail, chineseDeliveryAddress, paymentMethod, howDidYouKnowUs } = req.body;
 
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', 'Quote not found.'));
-    
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+
     const record = records[0];
-    if (record.fields['Status'] !== 'Draft') {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been submitted or converted.</div>'));
+    const currentStatus = record.fields['Status'] as string;
+    if (currentStatus === 'Converted to Invoice' || currentStatus === 'Paid') {
+      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
     await tableQuotes.update([{
@@ -382,68 +1101,72 @@ app.post('/quote/:token/submit', async (req: Request, res: Response) => {
         'Customer Email': customerEmail,
         'Chinese Delivery Address': chineseDeliveryAddress,
         'Payment Method': paymentMethod,
-        'How Did You Know Us': howDidYouKnowUs || null,
-        'Status': 'Pending Order',
-        'Customer Submitted At': new Date().toISOString()
+        'How Did You Know Us': howDidYouKnowUs || '',
+        'Status': 'Ready to Convert',
+        'Customer Submitted At': new Date().toISOString(),
       }
     }]);
 
     res.send(renderPage('Order Confirmed', `
-      <div class="alert alert-success">
-        <h2>Thank you for your order!</h2>
-        <p>Your order has been confirmed. We will review it and send you an invoice shortly.</p>
-        <p><a href="/quote/${token}">Back to Quote</a></p>
+      <div class="doc-card">
+        ${docHeader('訂單已確認', 'Order Confirmed')}
+        <div class="doc-body">
+          <div class="alert alert-success">
+            <strong>Thank you, ${escapeHtml(customerName)}!</strong><br>
+            Your order has been confirmed. We will review it and send you an invoice shortly.
+          </div>
+          <p style="margin-bottom:16px;color:#374151;">
+            If you have any questions, please contact us via WhatsApp or IG.<br>
+            <strong>Phone:</strong> ${COMPANY.phone} &nbsp;|&nbsp; <strong>Email:</strong> ${COMPANY.email}
+          </p>
+          <a href="/quote/${token}" class="btn btn-outline">← Back to Quote</a>
+        </div>
       </div>
     `));
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error submitting quote: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
   }
 });
 
-// POST /admin/quote/:token/convert
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /admin/quote/:token/convert
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', 'Quote not found.'));
-    
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+
     const quote = records[0];
-    if (quote.fields['Status'] !== 'Pending Order') {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Only Pending Order quotes can be converted.</div>'));
+    const qf = quote.fields;
+
+    if (qf['Status'] !== 'Ready to Convert') {
+      return res.status(400).send(renderPage('Error', `<div class="alert alert-danger">Quote status must be "Ready to Convert". Current: ${escapeHtml(qf['Status'] as string)}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back to Dashboard</a>`));
     }
 
-    const customerPhone = quote.fields['Customer Phone'] as string;
-    const customerName = quote.fields['Customer Name'] as string;
-    const customerEmail = quote.fields['Customer Email'] as string;
-    const customerAddress = quote.fields['Chinese Delivery Address'] as string;
+    const customerPhone = qf['Customer Phone'] as string;
+    const customerName = qf['Customer Name'] as string;
+    const customerEmail = qf['Customer Email'] as string;
+    const customerAddress = qf['Chinese Delivery Address'] as string;
 
     if (!customerPhone || !customerName) {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Missing customer phone or name.</div>'));
+      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Missing customer phone or name. Please ensure customer info is filled in.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
-    // A. Customers
+    // A. Customers — upsert by phone
     let customerRecordId: string;
     const existingCustomers = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
-    
+
     if (existingCustomers.length > 0) {
       customerRecordId = existingCustomers[0].id;
       await tableCustomers.update([{
         id: customerRecordId,
-        fields: {
-          'Customer Name': customerName,
-          'Email': customerEmail,
-          'Address': customerAddress
-        }
+        fields: { 'Customer Name': customerName, 'Email': customerEmail, 'Address': customerAddress }
       }]);
     } else {
       const newCustomer = await tableCustomers.create([{
-        fields: {
-          'Customer Name': customerName,
-          'Phone': customerPhone,
-          'Email': customerEmail,
-          'Address': customerAddress
-        }
+        fields: { 'Customer Name': customerName, 'Phone': customerPhone, 'Email': customerEmail, 'Address': customerAddress }
       }]);
       customerRecordId = newCustomer[0].id;
     }
@@ -460,41 +1183,45 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         'Invoice Number': invoiceNumber,
         'Invoice Public Token': invoicePublicToken,
         'Customer Ref': [customerRecordId],
-        'Product Amount': quote.fields['Sub Total'],
-        'Discount': quote.fields['Discount'],
-        'Final Amount': quote.fields['Total'],
-        'Payment Method': quote.fields['Payment Method'],
+        'Product Amount': qf['Sub Total'],
+        'Discount': qf['Discount'],
+        'Final Amount': qf['Total'],
+        'Payment Method': qf['Payment Method'],
         'Invoice Date': invoiceDate,
         'Status': 'Unpaid',
-        'Description': quote.fields['Description Summary'],
-        'Notes': quote.fields['Notes'],
-        'Terms and Conditions': quote.fields['Terms and Conditions'],
-        'Source Quote Ref': [quote.id]
+        'Notes': qf['Notes'] || '',
+        'Terms and Conditions': qf['Terms and Conditions'] || '',
+        'Source Quote Ref': [quote.id],
       }
     }]);
-
     const orderRecordId = newOrder[0].id;
 
     // C. Order Items
-    const itemsJson = quote.fields['Quote Items JSON'] as string;
-    let items = [];
-    try { items = JSON.parse(itemsJson); } catch (e) { console.error('Error parsing items JSON'); }
+    let items: any[] = [];
+    try { items = JSON.parse((qf['Quote Items JSON'] as string) || '[]'); } catch (_) { /* ignore */ }
 
-    const orderItemsPromises = items.map((item: any) => {
-      const fields: any = {
-        'Order Ref': [orderRecordId],
-        'Description': item.description,
-        'Qty': parseInt(item.qty, 10),
-        'Price': parseFloat(item.price),
-        'Amount': parseFloat(item.amount)
-      };
-      if (item.size) fields['尺寸'] = item.size;
-      if (item.accessories) fields['Accessories'] = item.accessories;
-      return { fields };
-    });
-
-    if (orderItemsPromises.length > 0) {
-      await tableOrderItems.create(orderItemsPromises);
+    if (items.length > 0) {
+      const orderItemsPayload = items.map((item: any) => {
+        const fields: FieldSet = {
+          'Order Ref': [orderRecordId],
+          'Description': [item.itemType, item.forWhat, item.description].filter(Boolean).join(' / '),
+          'Qty': item.qty || 1,
+          'Price': item.amount || 0,
+          'Amount': item.amount || 0,
+          'Item Type': item.itemType || '',
+          'Inter L': item.interL ? String(item.interL) : '',
+          'Inter D': item.interD ? String(item.interD) : '',
+          'Inter H': item.interH ? String(item.interH) : '',
+          'No. of Levels': item.noOfLevels || null,
+          'Level Heights': item.levelHeights || '',
+          'Accessories': item.accessories || '',
+        };
+        if (item.outerL) fields['Outer L'] = String(item.outerL);
+        if (item.outerD) fields['Outer D'] = String(item.outerD);
+        if (item.outerH) fields['Outer H'] = String(item.outerH);
+        return { fields };
+      });
+      await tableOrderItems.create(orderItemsPayload);
     }
 
     // D. Update Quote
@@ -506,129 +1233,155 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         'Converted Invoice No': invoiceNumber,
         'Customer Ref': [customerRecordId],
         'Order Ref': [orderRecordId],
-        'Converted At': new Date().toISOString()
+        'Converted At': new Date().toISOString(),
+        'Invoice Public Token': invoicePublicToken,
       }
     }]);
 
-    res.send(renderPage('Quote Converted', `
-      <div class="alert alert-success">Successfully converted to Invoice!</div>
-      <p><strong>Invoice Number:</strong> ${invoiceNumber}</p>
-      <p><strong>Invoice Link:</strong> <a href="/invoice/${invoicePublicToken}" target="_blank">/invoice/${invoicePublicToken}</a></p>
-      <p><a href="/quote/${token}">Back to Quote</a></p>
-    `));
+    res.redirect(`/quotes?converted=${invoiceNumber}`);
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error converting quote: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error converting quote: ${escapeHtml(error.message)}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
   }
 });
 
-// GET /invoice/:token
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /invoice/:token
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/invoice/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', 'Invoice not found.'));
-    
-    const order = records[0].fields;
-    const customerRef = order['Customer Ref'] as string[];
-    
-    let customerHtml = '';
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Invoice not found.</div>'));
+
+    const order = records[0];
+    const of = order.fields;
+    const status = (of['Status'] as string) || 'Unpaid';
+
+    // Customer info via Customer Ref
+    let customer: Record<string, unknown> = {};
+    const customerRef = of['Customer Ref'] as string[] | undefined;
     if (customerRef && customerRef.length > 0) {
-      const customerRecord = await tableCustomers.find(customerRef[0]);
-      if (customerRecord) {
-        customerHtml = `
-          <h3>Customer Information</h3>
-          <p>
-            <strong>Name:</strong> ${escapeHtml(customerRecord.fields['Customer Name'] as string)}<br>
-            <strong>Phone:</strong> ${escapeHtml(customerRecord.fields['Phone'] as string)}<br>
-            <strong>Email:</strong> ${escapeHtml(customerRecord.fields['Email'] as string)}<br>
-            <strong>Address:</strong> ${escapeHtml(customerRecord.fields['Address'] as string)}
-          </p>
-        `;
-      }
+      const cr = await tableCustomers.find(customerRef[0]);
+      if (cr) customer = cr.fields as Record<string, unknown>;
     }
 
-    const orderId = records[0].id;
-    const itemRecords = await tableOrderItems.select({ filterByFormula: `SEARCH('${orderId}', ARRAYJOIN({Order Ref})) > 0` }).firstPage();
-    
-    let itemsHtml = itemRecords.map((item: any) => `
-      <tr>
-        <td>
-          ${escapeHtml(item.fields['Description'] as string)}
-          ${item.fields['尺寸'] ? `<br><small>Size: ${escapeHtml(item.fields['尺寸'] as string)}</small>` : ''}
-          ${item.fields['Accessories'] ? `<br><small>Accessories: ${escapeHtml(item.fields['Accessories'] as string)}</small>` : ''}
-        </td>
-        <td>${item.fields['Qty']}</td>
-        <td>$${item.fields['Price']}</td>
-        <td>$${item.fields['Amount']}</td>
-      </tr>
-    `).join('');
+    // Order items
+    const itemRecords = await tableOrderItems
+      .select({ filterByFormula: `SEARCH('${order.id}', ARRAYJOIN({Order Ref})) > 0` })
+      .firstPage();
 
-    const status = order['Status'] as string;
-    let statusBadge = 'badge-unpaid';
-    if (status === 'Paid') statusBadge = 'badge-paid';
+    const itemRows = itemRecords.length === 0
+      ? '<tr><td colspan="8" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+      : itemRecords.map((item: any, idx: number) => {
+          const f = item.fields;
+          const interSize = [f['Inter L'], f['Inter D'], f['Inter H']].filter(Boolean).join(' x ');
+          return `<tr>
+            <td>${idx + 1}</td>
+            <td>${escapeHtml(f['Item Type'] || f['Description'] || '')}</td>
+            <td>${escapeHtml(interSize) || '-'}</td>
+            <td style="text-align:center;">${f['No. of Levels'] || '-'}</td>
+            <td>${escapeHtml(f['Level Heights'] || '')}</td>
+            <td>${renderAccTags(f['Accessories'])}</td>
+            <td style="text-align:center;">${f['Qty'] || 1}</td>
+            <td style="text-align:right;">$${f['Amount'] || 0}</td>
+          </tr>`;
+        }).join('');
 
-    let content = `
-      <div class="header">
-        <h1>Invoice ${escapeHtml(order['Invoice Number'] as string)} <span class="badge ${statusBadge}">${escapeHtml(status)}</span></h1>
-        <div class="company-info">
-          <p><strong>${process.env.COMPANY_NAME}</strong><br>
-          Phone: ${process.env.COMPANY_PHONE}<br>
-          Email: ${process.env.COMPANY_EMAIL}<br>
-          Address: ${process.env.COMPANY_ADDRESS}</p>
+    const subtotal = (of['Product Amount'] as number) || 0;
+    const discountRate = (of['Discount'] as number) ?? 1;
+    const total = (of['Final Amount'] as number) || 0;
+    const discountAmount = subtotal - total;
+    const balanceDue = status === 'Paid' ? 0 : total;
+
+    const content = `
+      <div class="doc-card">
+        ${docHeader('發票', 'Invoice')}
+        <div class="doc-body">
+
+          <div class="info-grid info-grid-3" style="margin-bottom:16px;">
+            <div class="info-block">
+              <div class="lbl">Invoice Number</div>
+              <div class="val">${escapeHtml(of['Invoice Number'] as string)}</div>
+            </div>
+            <div class="info-block">
+              <div class="lbl">Invoice Date</div>
+              <div class="val-sm">${escapeHtml(of['Invoice Date'] as string)}</div>
+            </div>
+            <div class="info-block">
+              <div class="lbl">Due Date</div>
+              <div class="val-sm">${escapeHtml(of['Invoice Date'] as string)}</div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Customer Information</div>
+            <div class="info-grid info-grid-2">
+              <div class="info-block"><div class="lbl">Name</div><div class="val-sm">${escapeHtml(customer['Customer Name'] as string || 'N/A')}</div></div>
+              <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${escapeHtml(customer['Phone'] as string || 'N/A')}</div></div>
+              <div class="info-block"><div class="lbl">Email</div><div class="val-sm">${escapeHtml(customer['Email'] as string || 'N/A')}</div></div>
+              <div class="info-block"><div class="lbl">Address</div><div class="val-sm">${escapeHtml(customer['Address'] as string || 'N/A')}</div></div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Items</div>
+            <div style="overflow-x:auto;">
+              <table class="items-table">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Item Type</th>
+                    <th>Inter Size (cm)</th>
+                    <th>Levels</th>
+                    <th>Level Heights</th>
+                    <th>Accessories</th>
+                    <th>QTY</th>
+                    <th>Amount</th>
+                  </tr>
+                </thead>
+                <tbody>${itemRows}</tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="totals-box">
+            <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
+            ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
+            <div class="row total-row"><span>Total</span><span>$${total.toFixed(2)}</span></div>
+            <div class="row balance-row" style="color:${status === 'Paid' ? '#10b981' : '#ef4444'};">
+              <span>Balance Due</span><span>$${balanceDue.toFixed(2)}</span>
+            </div>
+          </div>
+
+          ${of['Payment Method'] ? `<p style="margin-top:12px;"><strong>Payment Method:</strong> ${escapeHtml(of['Payment Method'] as string)}</p>` : ''}
+          ${of['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:13px;">${nl2br(of['Notes'])}</p></div>` : ''}
+          ${of['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:12px;color:#374151;">${nl2br(of['Terms and Conditions'])}</p></div>` : ''}
+
+          <div class="thank-you">Thank you for your business!</div>
         </div>
-        <p><strong>Invoice Date:</strong> ${escapeHtml(order['Invoice Date'] as string)}</p>
-        <p><strong>Due Date:</strong> ${escapeHtml(order['Invoice Date'] as string)}</p>
       </div>
-
-      ${customerHtml}
-
-      <h3>Items</h3>
-      <table class="items-table">
-        <thead>
-          <tr>
-            <th>Description</th>
-            <th>Qty</th>
-            <th>Price</th>
-            <th>Amount</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${itemsHtml}
-        </tbody>
-      </table>
-
-      <div class="totals">
-        <p>Subtotal: $${order['Product Amount']}</p>
-        ${order['Discount'] ? `<p>Discount: -$${order['Discount']}</p>` : ''}
-        <p><strong>Total: $${order['Final Amount']}</strong></p>
-        <p style="font-size: 1.3em; color: ${status === 'Paid' ? '#28a745' : '#dc3545'};">
-          <strong>Balance Due: $${status === 'Paid' ? '0.00' : order['Final Amount']}</strong>
-        </p>
-      </div>
-
-      ${order['Payment Method'] ? `<p><strong>Payment Method:</strong> ${escapeHtml(order['Payment Method'] as string)}</p>` : ''}
-      ${order['Notes'] ? `<div><h3>Notes</h3><p>${escapeHtml(order['Notes'] as string).replace(/\\n/g, '<br>')}</p></div>` : ''}
-      ${order['Terms and Conditions'] ? `<div><h3>Terms and Conditions</h3><p>${escapeHtml(order['Terms and Conditions'] as string).replace(/\\n/g, '<br>')}</p></div>` : ''}
     `;
 
-    res.send(renderPage(`Invoice ${order['Invoice Number']}`, content));
+    res.send(renderPage(`Invoice ${of['Invoice Number']}`, content));
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error fetching invoice: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
   }
 });
 
-// POST /admin/invoice/:token/mark-paid
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: POST /admin/invoice/:token/mark-paid
+// ═══════════════════════════════════════════════════════════════════════════
 app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', 'Invoice not found.'));
-    
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Invoice not found.</div>'));
+
     const order = records[0];
     if (order.fields['Status'] === 'Paid') {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Invoice is already paid.</div>'));
+      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Invoice is already paid.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
     const receiptNumber = await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
@@ -641,80 +1394,110 @@ app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) 
         'Status': 'Paid',
         'Pay Date': payDate,
         'Receipt Number': receiptNumber,
-        'Receipt Public Token': receiptPublicToken
+        'Receipt Public Token': receiptPublicToken,
       }
     }]);
 
-    res.send(renderPage('Marked as Paid', `
-      <div class="alert alert-success">Invoice marked as paid successfully!</div>
-      <p><strong>Receipt Number:</strong> ${receiptNumber}</p>
-      <p><strong>Receipt Link:</strong> <a href="/receipt/${receiptPublicToken}" target="_blank">/receipt/${receiptPublicToken}</a></p>
-      <p><a href="/invoice/${token}">Back to Invoice</a></p>
-    `));
+    // Also update the linked Quote status
+    const sourceQuoteRef = order.fields['Source Quote Ref'] as string[] | undefined;
+    if (sourceQuoteRef && sourceQuoteRef.length > 0) {
+      await tableQuotes.update([{
+        id: sourceQuoteRef[0],
+        fields: {
+          'Status': 'Paid',
+          'Receipt Public Token': receiptPublicToken,
+        }
+      }]);
+    }
+
+    res.redirect('/quotes');
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error marking as paid: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error marking as paid: ${escapeHtml(error.message)}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
   }
 });
 
-// GET /receipt/:token
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /receipt/:token
+// ═══════════════════════════════════════════════════════════════════════════
 app.get('/receipt/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableOrders.select({ filterByFormula: `{Receipt Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', 'Receipt not found.'));
-    
-    const order = records[0].fields;
-    const customerRef = order['Customer Ref'] as string[];
-    
-    let customerHtml = '';
+    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Receipt not found.</div>'));
+
+    const order = records[0];
+    const of = order.fields;
+
+    // Customer info via Customer Ref
+    let customer: Record<string, unknown> = {};
+    const customerRef = of['Customer Ref'] as string[] | undefined;
     if (customerRef && customerRef.length > 0) {
-      const customerRecord = await tableCustomers.find(customerRef[0]);
-      if (customerRecord) {
-        customerHtml = `
-          <h3>Customer Information</h3>
-          <p>
-            <strong>Name:</strong> ${escapeHtml(customerRecord.fields['Customer Name'] as string)}<br>
-            <strong>Phone:</strong> ${escapeHtml(customerRecord.fields['Phone'] as string)}<br>
-            <strong>Email:</strong> ${escapeHtml(customerRecord.fields['Email'] as string)}<br>
-            <strong>Address:</strong> ${escapeHtml(customerRecord.fields['Address'] as string)}
-          </p>
-        `;
-      }
+      const cr = await tableCustomers.find(customerRef[0]);
+      if (cr) customer = cr.fields as Record<string, unknown>;
     }
 
-    let content = `
-      <div class="header">
-        <h1>Receipt ${escapeHtml(order['Receipt Number'] as string)} <span class="badge badge-paid">Paid</span></h1>
-        <div class="company-info">
-          <p><strong>${process.env.COMPANY_NAME}</strong><br>
-          Phone: ${process.env.COMPANY_PHONE}<br>
-          Email: ${process.env.COMPANY_EMAIL}<br>
-          Address: ${process.env.COMPANY_ADDRESS}</p>
+    const total = (of['Final Amount'] as number) || 0;
+
+    const content = `
+      <div class="doc-card">
+        ${docHeader('收據', 'Receipt')}
+        <div class="doc-body">
+
+          <div class="info-grid info-grid-3" style="margin-bottom:16px;">
+            <div class="info-block">
+              <div class="lbl">Receipt Number</div>
+              <div class="val">${escapeHtml(of['Receipt Number'] as string)}</div>
+            </div>
+            <div class="info-block">
+              <div class="lbl">Paid Date</div>
+              <div class="val-sm">${escapeHtml(of['Pay Date'] as string)}</div>
+            </div>
+            <div class="info-block">
+              <div class="lbl">Related Invoice</div>
+              <div class="val-sm">${escapeHtml(of['Invoice Number'] as string)}</div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Customer Information</div>
+            <div class="info-grid info-grid-2">
+              <div class="info-block"><div class="lbl">Name</div><div class="val-sm">${escapeHtml(customer['Customer Name'] as string || 'N/A')}</div></div>
+              <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${escapeHtml(customer['Phone'] as string || 'N/A')}</div></div>
+              <div class="info-block"><div class="lbl">Email</div><div class="val-sm">${escapeHtml(customer['Email'] as string || 'N/A')}</div></div>
+              <div class="info-block"><div class="lbl">Address</div><div class="val-sm">${escapeHtml(customer['Address'] as string || 'N/A')}</div></div>
+            </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">Payment Details</div>
+            <div style="background:#f0fdf4;border:1px solid #6ee7b7;border-radius:6px;padding:20px;text-align:center;">
+              <div style="font-size:13px;color:#065f46;margin-bottom:6px;">PAID IN FULL</div>
+              <div style="font-size:32px;font-weight:700;color:#10b981;">$${total.toFixed(2)}</div>
+              ${of['Payment Method'] ? `<div style="margin-top:8px;color:#374151;font-size:14px;">via ${escapeHtml(of['Payment Method'] as string)}</div>` : ''}
+            </div>
+          </div>
+
+          ${of['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:12px;color:#374151;">${nl2br(of['Terms and Conditions'])}</p></div>` : ''}
+
+          <div class="thank-you">Thank you for your payment!</div>
         </div>
-        <p><strong>Paid Date:</strong> ${escapeHtml(order['Pay Date'] as string)}</p>
-        <p><strong>Related Invoice No:</strong> ${escapeHtml(order['Invoice Number'] as string)}</p>
       </div>
-
-      ${customerHtml}
-
-      <div class="totals" style="text-align: left; background: #f9fafb; padding: 20px; border-radius: 8px; margin-top: 20px;">
-        <h3>Payment Details</h3>
-        <p><strong>Paid Amount:</strong> $${order['Final Amount']}</p>
-        <p><strong>Payment Method:</strong> ${escapeHtml(order['Payment Method'] as string)}</p>
-      </div>
-
-      ${order['Terms and Conditions'] ? `<div><h3>Terms and Conditions</h3><p>${escapeHtml(order['Terms and Conditions'] as string).replace(/\\n/g, '<br>')}</p></div>` : ''}
     `;
 
-    res.send(renderPage(`Receipt ${order['Receipt Number']}`, content));
+    res.send(renderPage(`Receipt ${of['Receipt Number']}`, content));
   } catch (error: any) {
     console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error fetching receipt: ${error.message}</div>`));
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
   }
 });
 
+// ─── Root redirect ───────────────────────────────────────────────────────────
+app.get('/', (_req: Request, res: Response) => res.redirect('/quotes'));
+
+// ─── Start server ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
-  console.log(`Server is running on port ${PORT}`);
+  console.log(`LKS Quote System running on port ${PORT}`);
   console.log(`Public Base URL: ${PUBLIC_BASE_URL}`);
+  console.log(`Dashboard: ${PUBLIC_BASE_URL}/quotes`);
 });
