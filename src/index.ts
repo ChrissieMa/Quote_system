@@ -14,13 +14,48 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 
+// ─── Helpers ───────────────────────────────────────────────────────────────
+const generateToken = () => crypto.randomBytes(16).toString('hex');
+
+const cleanEnv = (value: string | undefined, fallback: string): string => {
+  const v = (value || '').trim();
+  if (!v) return fallback;
+  const placeholders = [
+    '+852 1234 5678', '12345678', 'info@lksdisplaybox.com', 'your company address here',
+    'your_airtable_api_key_here', 'your_airtable_base_id_here'
+  ].map(s => s.toLowerCase());
+  return placeholders.includes(v.toLowerCase()) ? fallback : v;
+};
+
+const parseQuoteItems = (raw: unknown): any[] => {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw as any[];
+  if (typeof raw === 'object') {
+    const obj = raw as Record<string, unknown>;
+    if (Array.isArray(obj.items)) return obj.items as any[];
+    return [];
+  }
+  if (typeof raw === 'string') {
+    const s = raw.trim();
+    if (!s) return [];
+    try {
+      const parsed = JSON.parse(s);
+      return Array.isArray(parsed) ? parsed : [];
+    } catch {
+      return [];
+    }
+  }
+  return [];
+};
+
 const COMPANY = {
-  name: process.env.COMPANY_NAME || 'LKS Display Box',
+  name: cleanEnv(process.env.COMPANY_NAME, 'LKS Display Box'),
   address1: '香港九龍觀塘成業街7號',
   address2: '寧晉中心35樓G1室',
-  phone: process.env.COMPANY_PHONE || '68983722',
-  email: process.env.COMPANY_EMAIL || 'lksdisplaybox@gmail.com',
+  phone: cleanEnv(process.env.COMPANY_PHONE, '68983722'),
+  email: cleanEnv(process.env.COMPANY_EMAIL, 'lksdisplaybox@gmail.com'),
 };
+
 
 const DEFAULT_TERMS = `1. 由送貨起計，三天內包補板，過左三天後才發現有爆板請再購買壞板。
 2. 如發現強行安裝而弄花或損壞，恕不會補發！
@@ -50,9 +85,6 @@ const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS!);
 const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
-
-// ─── Helpers ───────────────────────────────────────────────────────────────
-const generateToken = () => crypto.randomBytes(16).toString('hex');
 
 const escapeHtml = (unsafe: unknown): string =>
   String(unsafe ?? '')
@@ -778,12 +810,13 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     // Items are sent as JSON from the hidden field serialized by JS
     let items: any[] = [];
     try {
-      items = JSON.parse(b.itemsJson || '[]');
+      items = parseQuoteItems(b.itemsJson || '[]');
     } catch (_) {
       items = [];
     }
 
     const itemsJson = JSON.stringify(items);
+    const descriptionSummary = items.map((item: any) => [item.itemType, item.forWhat, item.description].filter(Boolean).join(' / ')).filter(Boolean).join('\n');
     const subtotal = parseFloat(b.subtotal) || 0;
     const discountRate = parseFloat(b.discount) || 1;
     const total = Math.ceil(parseFloat(b.total) || subtotal * discountRate);
@@ -807,6 +840,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Discount': discountRate,
         'Total': total,
         'Quote Items JSON': itemsJson,
+        'Description Summary': descriptionSummary,
         'Notes': b.notes || '',
         'Terms and Conditions': b.terms || '',
         'Created At': new Date().toISOString(),
@@ -861,7 +895,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     // Parse items
     let items: any[] = [];
-    try { items = JSON.parse((quote['Quote Items JSON'] as string) || '[]'); } catch (_) { /* ignore */ }
+    items = parseQuoteItems(quote['Quote Items JSON']);
 
     const subtotal = (quote['Sub Total'] as number) || 0;
     const discountRate = (quote['Discount'] as number) ?? 1;
@@ -870,7 +904,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     // Items table rows
     const itemRows = items.length === 0
-      ? '<tr><td colspan="13" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+      ? '<tr><td colspan="15" style="text-align:center;color:#9ca3af;">No items</td></tr>'
       : items.map((item: any, idx: number) => {
           return `<tr>
             <td>${idx + 1}</td>
@@ -1114,13 +1148,29 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
-    // Step 1: Write customer info to Customers table ONLY
+    // Save customer info back to Quote first
+    await tableQuotes.update([{
+      id: record.id,
+      fields: {
+        'Customer Name': customerName,
+        'Customer Phone': customerPhone,
+        'Customer Email': customerEmail,
+        'Chinese Delivery Address': chineseDeliveryAddress,
+        'Payment Method': paymentMethod,
+        'How Did You Know Us': howDidYouKnowUs || '',
+        'Customer Submitted At': new Date().toISOString(),
+        'Status': 'Ready to Convert'
+      } as FieldSet
+    }]);
+
+    // Also upsert customer master for easier conversion later
     const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
     if (existingByPhone.length > 0) {
       await tableCustomers.update([{
         id: existingByPhone[0].id,
         fields: {
           'Customer Name': customerName,
+          'Phone': customerPhone,
           'Email': customerEmail,
           'Address': chineseDeliveryAddress,
         } as FieldSet
@@ -1135,9 +1185,6 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
         } as FieldSet
       }]);
     }
-
-    // Step 2: Only update Status on Quotes table — no customer fields written here
-    await tableQuotes.update([{ id: record.id, fields: { 'Status': 'Ready to Convert' } as FieldSet }]);
 
     res.send(renderPage('已收到資料', `
       <div class="doc-card">
@@ -1175,13 +1222,15 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     const quote = records[0];
     const qf = quote.fields;
 
-    // Use Quote's Phone field to look up customer in Customers table
+    // Use submitted customer phone first; fall back to quote phone
+    const submittedPhone = (qf['Customer Phone'] as string) || '';
     const quotePhone = (qf['Phone'] as string) || '';
-    if (!quotePhone) {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Quote has no Phone number. Cannot find customer.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
+    const lookupPhone = submittedPhone || quotePhone;
+    if (!lookupPhone) {
+      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Quote has no customer phone number. Please ask customer to fill in the form first.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
-    // A. Customers — look up by phone from Customers table
+    // A. Customers — look up by submitted phone from Customers table
     let customerRecordId: string;
     const existingCustomers = await tableCustomers.select({ filterByFormula: `{Phone} = '${quotePhone}'` }).firstPage();
 
@@ -1202,38 +1251,38 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     const invoicePublicToken = generateToken();
     const invoiceDate = new Date().toISOString().split('T')[0];
 
-    const newOrder = await tableOrders.create([{
-      fields: {
-        'Internal Order No': internalOrderNo,
-        'Invoice Number': invoiceNumber,
-        'Invoice Public Token': invoicePublicToken,
-        'Customer Ref': [customerRecordId],
-        'Product Amount': qf['Sub Total'],
-        'Discount': qf['Discount'],
-        'Final Amount': qf['Total'],
-        'Payment Method': qf['Payment Method'],
-        'Invoice Date': invoiceDate,
-        'Status': 'Unpaid',
-        'Notes': qf['Notes'] || '',
-        'Terms and Conditions': qf['Terms and Conditions'] || '',
-        'Source Quote Ref': [quote.id],
-      }
-    }]);
+    const orderFields: FieldSet = {
+      'Internal Order No': internalOrderNo,
+      'Invoice Number': invoiceNumber,
+      'Invoice Public Token': invoicePublicToken,
+      'Customer': [customerRecordId],
+      'Product Amount': qf['Sub Total'],
+      'Discount': qf['Discount'],
+      'Final Amount': qf['Total'],
+      'Payment Method': qf['Payment Method'],
+      'Invoice Date': invoiceDate,
+      'Status': 'Unpaid',
+      'Description': qf['Description Summary'] || '',
+      'Notes': qf['Notes'] || '',
+      'Terms and Conditions': qf['Terms and Conditions'] || '',
+      'Source Quote Ref': [quote.id],
+    };
+    const newOrder = await tableOrders.create([{ fields: orderFields }]);
     const orderRecordId = newOrder[0].id;
 
     // C. Order Items
     let items: any[] = [];
-    try { items = JSON.parse((qf['Quote Items JSON'] as string) || '[]'); } catch (_) { /* ignore */ }
+    items = parseQuoteItems(qf['Quote Items JSON']);
 
     if (items.length > 0) {
       const orderItemsPayload = items.map((item: any) => {
         const fields: FieldSet = {
-          'Order Ref': [orderRecordId],
+          'Order': [orderRecordId],
           'Description': [item.itemType, item.forWhat, item.description].filter(Boolean).join(' / '),
-          'Qty': item.qty || 1,
-          'Price': item.amount || 0,
-          'Amount': item.amount || 0,
+          'QTY': item.qty || 1,
+          'Product Amount': item.amount || 0,
           'Item Type': item.itemType || '',
+          'For What': item.forWhat || '',
           'Inter L': item.interL ? String(item.interL) : '',
           'Inter D': item.interD ? String(item.interD) : '',
           'Inter H': item.interH ? String(item.interH) : '',
@@ -1256,7 +1305,6 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         'Status': 'Converted to Invoice',
         'Converted Order No': internalOrderNo,
         'Converted Invoice No': invoiceNumber,
-        'Customer Ref': [customerRecordId],
         'Order Ref': [orderRecordId],
         'Converted At': new Date().toISOString(),
         'Invoice Public Token': invoicePublicToken,
@@ -1285,7 +1333,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     // Customer info via Customer Ref
     let customer: Record<string, unknown> = {};
-    const customerRef = of['Customer Ref'] as string[] | undefined;
+    const customerRef = (of['Customer'] as string[] | undefined) || (of['Customer Ref'] as string[] | undefined);
     if (customerRef && customerRef.length > 0) {
       const cr = await tableCustomers.find(customerRef[0]);
       if (cr) customer = cr.fields as Record<string, unknown>;
@@ -1293,7 +1341,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     // Order items
     const itemRecords = await tableOrderItems
-      .select({ filterByFormula: `SEARCH('${order.id}', ARRAYJOIN({Order Ref})) > 0` })
+      .select({ filterByFormula: `OR(SEARCH('${order.id}', ARRAYJOIN({Order})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order Ref})) > 0)` })
       .firstPage();
 
     const itemRows = itemRecords.length === 0
@@ -1308,8 +1356,8 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             <td style="text-align:center;">${f['No. of Levels'] || '-'}</td>
             <td>${escapeHtml(f['Level Heights'] || '')}</td>
             <td>${renderAccTags(f['Accessories'])}</td>
-            <td style="text-align:center;">${f['Qty'] || 1}</td>
-            <td style="text-align:right;">$${f['Amount'] || 0}</td>
+            <td style="text-align:center;">${f['QTY'] || f['Qty'] || 1}</td>
+            <td style="text-align:right;">$${f['Product Amount'] || f['Amount'] || 0}</td>
           </tr>`;
         }).join('');
 
@@ -1456,7 +1504,7 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
 
     // Customer info via Customer Ref
     let customer: Record<string, unknown> = {};
-    const customerRef = of['Customer Ref'] as string[] | undefined;
+    const customerRef = (of['Customer'] as string[] | undefined) || (of['Customer Ref'] as string[] | undefined);
     if (customerRef && customerRef.length > 0) {
       const cr = await tableCustomers.find(customerRef[0]);
       if (cr) customer = cr.fields as Record<string, unknown>;
