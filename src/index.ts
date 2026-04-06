@@ -49,11 +49,11 @@ const parseQuoteItems = (raw: unknown): any[] => {
 };
 
 const COMPANY = {
-  name: cleanEnv(process.env.COMPANY_NAME, 'LKS Display Box'),
+  name: process.env.COMPANY_NAME || 'LKS Display Box',
   address1: '香港九龍觀塘成業街7號',
   address2: '寧晉中心35樓G1室',
-  phone: cleanEnv(process.env.COMPANY_PHONE, '68983722'),
-  email: cleanEnv(process.env.COMPANY_EMAIL, 'lksdisplaybox@gmail.com'),
+  phone: process.env.COMPANY_PHONE || '68983722',
+  email: process.env.COMPANY_EMAIL || 'lksdisplaybox@gmail.com',
 };
 
 
@@ -518,7 +518,7 @@ app.get('/quotes', async (req: Request, res: Response) => {
           actions += `<a href="/quote/${token}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
 
           // 2. Copy Customer Info Link
-          actions += ` <button type="button" class="btn btn-secondary btn-sm" onclick="copyLink('${customerInfoLink}', this)">Copy Customer Info Link</button>`;
+          actions += ` <button type="button" class="btn btn-secondary btn-sm" onclick="copyLink('${customerInfoLink}', this)">Copy Customer Info Form Link</button>`;
 
           // 3. Convert to Invoice (always shown)
           actions += `
@@ -816,7 +816,23 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     }
 
     const itemsJson = JSON.stringify(items);
-    const descriptionSummary = items.map((item: any) => [item.itemType, item.forWhat, item.description].filter(Boolean).join(' / ')).filter(Boolean).join('\n');
+    const descriptionSummary = items
+      .map((item: any) => {
+        const parts = [
+          item.itemType,
+          item.forWhat,
+          item.description,
+          item.interL && item.interD && item.interH ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}` : '',
+          item.outerL && item.outerD && item.outerH ? `外尺寸 ${item.outerL}*${item.outerD}*${item.outerH}` : '',
+          item.noOfLevels ? `${item.noOfLevels}層` : '',
+          item.levelHeights ? `層高 ${item.levelHeights}` : '',
+          item.accessories ? `配件 ${Array.isArray(item.accessories) ? item.accessories.join(', ') : item.accessories}` : '',
+          item.qty ? `QTY ${item.qty}` : '',
+          item.amount ? `$${item.amount}` : '',
+        ].filter(Boolean);
+        return parts.join(' | ');
+      })
+      .join('\n');
     const subtotal = parseFloat(b.subtotal) || 0;
     const discountRate = parseFloat(b.discount) || 1;
     const total = Math.ceil(parseFloat(b.total) || subtotal * discountRate);
@@ -903,8 +919,17 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     const discountAmount = subtotal - total;
 
     // Items table rows
+    const descriptionSummary = (quote['Description Summary'] as string) || '';
+
     const itemRows = items.length === 0
-      ? '<tr><td colspan="15" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+      ? (
+          descriptionSummary
+            ? `<tr>
+                <td>1</td>
+                <td colspan="14" style="white-space:pre-line;">${nl2br(descriptionSummary)}</td>
+              </tr>`
+            : '<tr><td colspan="15" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+        )
       : items.map((item: any, idx: number) => {
           return `<tr>
             <td>${idx + 1}</td>
@@ -1258,7 +1283,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       'Customer': [customerRecordId],
       'Product Amount': qf['Sub Total'],
       'Discount': qf['Discount'],
-      'Final Amount': qf['Total'],
+      // 'Final Amount' is a computed field in Airtable — do NOT write it
       'Payment Method': qf['Payment Method'],
       'Invoice Date': invoiceDate,
       'Status': 'Unpaid',
@@ -1363,7 +1388,9 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     const subtotal = (of['Product Amount'] as number) || 0;
     const discountRate = (of['Discount'] as number) ?? 1;
-    const total = (of['Final Amount'] as number) || 0;
+    const total =
+      (of['Final Amount'] as number) ||
+      Math.ceil(subtotal * discountRate);
     const discountAmount = subtotal - total;
     const balanceDue = status === 'Paid' ? 0 : total;
 
