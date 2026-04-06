@@ -676,7 +676,24 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                     <td><input type="number" class="f-oh" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
                     <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
-                    <td><input type="text" class="f-acc" placeholder="e.g. LED, Door"></td>
+                    <td>
+                      <div class="f-acc-wrap" style="min-width:140px;max-height:120px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:4px;font-size:12px;">
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="獨立燈板 - 上燈"> 獨立燈板 - 上燈</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="獨立燈板 - 下燈"> 獨立燈板 - 下燈</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="獨立燈板 - 上下燈"> 獨立燈板 - 上下燈</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="上下燈"> 上下燈</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="背燈"> 胍燈</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="白色刻字"> 白色刻字</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="彩色刻字"> 彩色刻字</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="背景"> 胍景</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="樓梯"> 樓梯</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="鏡面"> 鏡面</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="趣門"> 趣門</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="磁石門"> 磁石門</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="黑底板"> 黑底板</label>
+                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="透明底板"> 透明底板</label>
+                      </div>
+                    </td>
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
                     <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
                     <td><input type="number" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
@@ -740,9 +757,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       const tbody = document.getElementById('itemsBody');
       const first = tbody.querySelector('tr');
       const clone = first.cloneNode(true);
-      clone.querySelectorAll('input').forEach(i => {
+      clone.querySelectorAll('input[type=text], input[type=number]').forEach(i => {
         i.value = i.classList.contains('f-qty') ? '1' : '';
       });
+      clone.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = false; });
       tbody.appendChild(clone);
     }
     function removeRow(btn) {
@@ -762,6 +780,11 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       const disc = parseFloat(document.getElementById('discount').value);
       const d = isNaN(disc) ? 1 : disc;
       document.getElementById('total').value = Math.ceil(sub * d);
+    }
+    function getCheckedAccessories(row) {
+      const checked = [];
+      row.querySelectorAll('.f-acc-cb:checked').forEach(cb => checked.push(cb.value));
+      return checked;
     }
     function serializeItems() {
       const rows = document.querySelectorAll('#itemsBody tr');
@@ -783,17 +806,18 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           outerH: get('f-oh'),
           noOfLevels: parseInt(get('f-lv')) || null,
           levelHeights: get('f-lh'),
-          accessories: get('f-acc'),
+          accessories: getCheckedAccessories(row),
           description: get('f-desc'),
           qty: qty,
           amount: amt,
         });
       });
       document.getElementById('itemsJsonField').value = JSON.stringify(items);
+      return true;
     }
-    document.getElementById('quoteForm').addEventListener('submit', function() {
-      serializeItems();
-    });
+    document.getElementById('quoteForm').onsubmit = function() {
+      return serializeItems();
+    };
     recalcSubtotal();
   </script>`;
 
@@ -1283,14 +1307,14 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       'Customer': [customerRecordId],
       'Product Amount': qf['Sub Total'],
       'Discount': qf['Discount'],
-      // 'Final Amount' is a computed field in Airtable — do NOT write it
-      'Payment Method': qf['Payment Method'],
+      // 'Final Amount' is computed — do NOT write
+      // 'Description' is computed — do NOT write
+      'Payment Method': qf['Payment Method'] || '',
       'Invoice Date': invoiceDate,
       'Status': 'Unpaid',
-      'Description': qf['Description Summary'] || '',
       'Notes': qf['Notes'] || '',
       'Terms and Conditions': qf['Terms and Conditions'] || '',
-      'Source Quote Ref': [quote.id],
+      'Source Quote Ref': (qf['Quote Number'] as string) || '',
     };
     const newOrder = await tableOrders.create([{ fields: orderFields }]);
     const orderRecordId = newOrder[0].id;
@@ -1301,8 +1325,13 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
 
     if (items.length > 0) {
       const orderItemsPayload = items.map((item: any) => {
+        // Accessories: Airtable Multiple Select requires an array of strings
+        const accArray: string[] = Array.isArray(item.accessories)
+          ? item.accessories.filter(Boolean)
+          : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+
         const fields: FieldSet = {
-          'Order': [orderRecordId],
+          'Order Link': [orderRecordId],
           'Description': [item.itemType, item.forWhat, item.description].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
@@ -1313,8 +1342,8 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
           'Inter H': item.interH ? String(item.interH) : '',
           'No. of Levels': item.noOfLevels || null,
           'Level Heights': item.levelHeights || '',
-          'Accessories': item.accessories || '',
         };
+        if (accArray.length > 0) fields['Accessories'] = accArray;
         if (item.outerL) fields['Outer L'] = String(item.outerL);
         if (item.outerD) fields['Outer D'] = String(item.outerD);
         if (item.outerH) fields['Outer H'] = String(item.outerH);
@@ -1364,9 +1393,9 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       if (cr) customer = cr.fields as Record<string, unknown>;
     }
 
-    // Order items
+    // Order items — filter by Order Link (linked record)
     const itemRecords = await tableOrderItems
-      .select({ filterByFormula: `OR(SEARCH('${order.id}', ARRAYJOIN({Order})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order Ref})) > 0)` })
+      .select({ filterByFormula: `OR(SEARCH('${order.id}', ARRAYJOIN({Order Link})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order Ref})) > 0)` })
       .firstPage();
 
     const itemRows = itemRecords.length === 0
