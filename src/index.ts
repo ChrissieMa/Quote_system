@@ -1401,16 +1401,22 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
     }
 
     const itemRows = items.length === 0
-      ? '<tr><td colspan="8" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+      ? '<tr><td colspan="15" style="text-align:center;color:#9ca3af;">No items</td></tr>'
       : items.map((item: any, idx: number) => {
-          const interSize = [item.interL, item.interD, item.interH].filter(Boolean).join(' x ');
           return `<tr>
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
-            <td>${escapeHtml(interSize) || '-'}</td>
+            <td>${escapeHtml(item.forWhat) || '-'}</td>
+            <td style="text-align:center;">${item.interL || '-'}</td>
+            <td style="text-align:center;">${item.interD || '-'}</td>
+            <td style="text-align:center;">${item.interH || '-'}</td>
+            <td style="text-align:center;">${item.outerL || '-'}</td>
+            <td style="text-align:center;">${item.outerD || '-'}</td>
+            <td style="text-align:center;">${item.outerH || '-'}</td>
             <td style="text-align:center;">${item.noOfLevels || '-'}</td>
             <td>${escapeHtml(item.levelHeights) || '-'}</td>
             <td>${renderAccTags(item.accessories)}</td>
+            <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>
           </tr>`;
@@ -1462,10 +1468,17 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
                   <tr>
                     <th>#</th>
                     <th>Item Type</th>
-                    <th>Inter Size (cm)</th>
+                    <th>For What</th>
+                    <th>Inter L</th>
+                    <th>Inter D</th>
+                    <th>Inter H</th>
+                    <th>Outer L</th>
+                    <th>Outer D</th>
+                    <th>Outer H</th>
                     <th>Levels</th>
                     <th>Level Heights</th>
                     <th>Accessories</th>
+                    <th>Description</th>
                     <th>QTY</th>
                     <th>Amount</th>
                   </tr>
