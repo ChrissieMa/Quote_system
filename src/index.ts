@@ -434,10 +434,8 @@ const renderAccTags = (raw: string | undefined): string => {
 const statusBadgeClass = (status: string): string => {
   const map: Record<string, string> = {
     'Draft': 'badge-draft',
-    'Pending Customer Info': 'badge-pending',
     'Ready to Convert': 'badge-ready',
-    'Converted to Invoice': 'badge-converted',
-    'Paid': 'badge-paid',
+    'Mark as Paid': 'badge-paid',
     'Unpaid': 'badge-unpaid',
   };
   return map[status] || 'badge-draft';
@@ -461,10 +459,8 @@ app.get('/quotes', async (req: Request, res: Response) => {
     if (filterStatus !== 'all') {
       const statusMap: Record<string, string[]> = {
         draft: ['Draft'],
-        pending: ['Pending Customer Info'],
         ready: ['Ready to Convert'],
-        invoiced: ['Converted to Invoice'],
-        paid: ['Paid'],
+        paid: ['Mark as Paid'],
       };
       const allowed = statusMap[filterStatus] || [];
       records = records.filter(r => allowed.includes(r.fields['Status'] as string));
@@ -484,10 +480,8 @@ app.get('/quotes', async (req: Request, res: Response) => {
     const tabs = [
       { key: 'all', label: 'All' },
       { key: 'draft', label: 'Draft' },
-      { key: 'pending', label: 'Pending Info' },
       { key: 'ready', label: 'Ready' },
-      { key: 'invoiced', label: 'Invoiced' },
-      { key: 'paid', label: 'Paid' },
+      { key: 'paid', label: 'Mark as Paid' },
     ];
 
     const tabsHtml = tabs.map(t => {
@@ -638,9 +632,6 @@ app.get('/quote/create', (_req: Request, res: Response) => {
             </div>
           </div>
 
-          <!-- Hidden field to store items as JSON -->
-          <input type="hidden" name="itemsJson" id="itemsJsonField">
-
           <div class="section">
             <div class="section-title">Items</div>
             <div style="overflow-x:auto;">
@@ -666,37 +657,37 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 </thead>
                 <tbody id="itemsBody">
                   <tr>
-                    <td><input type="text" class="f-type" placeholder="e.g. Display Case"></td>
-                    <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
-                    <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-ih" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-ol" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-od" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-oh" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
-                    <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
+                    <td><input type="text" name="items[0][itemType]" class="f-type" placeholder="e.g. Display Case"></td>
+                    <td><input type="text" name="items[0][forWhat]" class="f-for" placeholder="e.g. Shoes"></td>
+                    <td><input type="number" name="items[0][interL]" class="f-il" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="items[0][interD]" class="f-id" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="items[0][interH]" class="f-ih" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="items[0][outerL]" class="f-ol" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="items[0][outerD]" class="f-od" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="items[0][outerH]" class="f-oh" step="0.1" style="width:60px"></td>
+                    <td><input type="number" name="items[0][noOfLevels]" class="f-lv" min="1" style="width:50px"></td>
+                    <td><input type="text" name="items[0][levelHeights]" class="f-lh" placeholder="e.g. 20,30"></td>
                     <td>
                       <div class="f-acc-wrap" style="min-width:140px;max-height:120px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:4px;font-size:12px;">
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="獨立燈板 - 上燈"> 獨立燈板 - 上燈</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="獨立燈板 - 下燈"> 獨立燈板 - 下燈</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="獨立燈板 - 上下燈"> 獨立燈板 - 上下燈</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="上下燈"> 上下燈</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="背燈"> 胍燈</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="白色刻字"> 白色刻字</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="彩色刻字"> 彩色刻字</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="背景"> 胍景</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="樓梯"> 樓梯</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="鏡面"> 鏡面</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="趣門"> 趣門</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="磁石門"> 磁石門</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="黑底板"> 黑底板</label>
-                        <label style="display:block;"><input type="checkbox" class="f-acc-cb" value="透明底板"> 透明底板</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="獨立燈板 - 上燈"> 獨立燈板 - 上燈</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="獨立燈板 - 下燈"> 獨立燈板 - 下燈</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="獨立燈板 - 上下燈"> 獨立燈板 - 上下燈</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="上下燈"> 上下燈</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="背燈"> 背燈</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="白色刻字"> 白色刻字</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="彩色刻字"> 彩色刻字</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="背景"> 背景</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="樓梯"> 樓梯</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="鏡面"> 鏡面</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="趟門"> 趟門</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="磁石門"> 磁石門</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="黑底板"> 黑底板</label>
+                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="透明底板"> 透明底板</label>
                       </div>
                     </td>
-                    <td><input type="text" class="f-desc" placeholder="Remarks"></td>
-                    <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
-                    <td><input type="number" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
+                    <td><input type="text" name="items[0][description]" class="f-desc" placeholder="Remarks"></td>
+                    <td><input type="number" name="items[0][qty]" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
+                    <td><input type="number" name="items[0][amount]" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
                   </tr>
                 </tbody>
@@ -755,18 +746,36 @@ app.get('/quote/create', (_req: Request, res: Response) => {
   <script>
     function addRow() {
       const tbody = document.getElementById('itemsBody');
-      const first = tbody.querySelector('tr');
+      const rows = tbody.querySelectorAll('tr');
+      const newIndex = rows.length;
+      const first = rows[0];
       const clone = first.cloneNode(true);
-      clone.querySelectorAll('input[type=text], input[type=number]').forEach(i => {
-        i.value = i.classList.contains('f-qty') ? '1' : '';
+      clone.querySelectorAll('input, select, textarea').forEach(function(el) {
+        if (el.name) {
+          el.name = el.name.replace(/items\[\d+\]/, 'items[' + newIndex + ']');
+        }
+        if (el.type === 'checkbox') {
+          el.checked = false;
+        } else if (el.type === 'number') {
+          el.value = el.classList.contains('f-qty') ? '1' : '';
+        } else {
+          el.value = '';
+        }
       });
-      clone.querySelectorAll('input[type=checkbox]').forEach(cb => { cb.checked = false; });
       tbody.appendChild(clone);
     }
     function removeRow(btn) {
       const tbody = document.getElementById('itemsBody');
       if (tbody.querySelectorAll('tr').length <= 1) return;
       btn.closest('tr').remove();
+      // Re-index all rows
+      tbody.querySelectorAll('tr').forEach(function(row, idx) {
+        row.querySelectorAll('input, select, textarea').forEach(function(el) {
+          if (el.name) {
+            el.name = el.name.replace(/items\[\d+\]/, 'items[' + idx + ']');
+          }
+        });
+      });
       recalcSubtotal();
     }
     function recalcSubtotal() {
@@ -781,43 +790,6 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       const d = isNaN(disc) ? 1 : disc;
       document.getElementById('total').value = Math.ceil(sub * d);
     }
-    function getCheckedAccessories(row) {
-      const checked = [];
-      row.querySelectorAll('.f-acc-cb:checked').forEach(cb => checked.push(cb.value));
-      return checked;
-    }
-    function serializeItems() {
-      const rows = document.querySelectorAll('#itemsBody tr');
-      const items = [];
-      rows.forEach(row => {
-        const get = cls => (row.querySelector('.' + cls) || {}).value || '';
-        const amt = parseFloat(get('f-amt')) || 0;
-        const qty = parseInt(get('f-qty')) || 1;
-        const type = get('f-type');
-        if (!type && !amt) return; // skip empty rows
-        items.push({
-          itemType: type,
-          forWhat: get('f-for'),
-          interL: get('f-il'),
-          interD: get('f-id'),
-          interH: get('f-ih'),
-          outerL: get('f-ol'),
-          outerD: get('f-od'),
-          outerH: get('f-oh'),
-          noOfLevels: parseInt(get('f-lv')) || null,
-          levelHeights: get('f-lh'),
-          accessories: getCheckedAccessories(row),
-          description: get('f-desc'),
-          qty: qty,
-          amount: amt,
-        });
-      });
-      document.getElementById('itemsJsonField').value = JSON.stringify(items);
-      return true;
-    }
-    document.getElementById('quoteForm').onsubmit = function() {
-      return serializeItems();
-    };
     recalcSubtotal();
   </script>`;
 
@@ -831,13 +803,26 @@ app.post('/quote/create', async (req: Request, res: Response) => {
   try {
     const b = req.body;
 
-    // Items are sent as JSON from the hidden field serialized by JS
+    // Express extended:true will parse items[0][itemType] into nested objects
     let items: any[] = [];
-    try {
-      items = parseQuoteItems(b.itemsJson || '[]');
-    } catch (_) {
-      items = [];
+    if (b.items) {
+      if (Array.isArray(b.items)) {
+        items = b.items;
+      } else if (typeof b.items === 'object') {
+        // Express sometimes parses as { '0': {...}, '1': {...} }
+        items = Object.values(b.items);
+      }
     }
+    // Filter empty rows
+    items = items.filter((item: any) => item && (item.itemType || item.amount));
+    // Normalize accessories, qty, amount
+    items = items.map((item: any) => ({
+      ...item,
+      accessories: item.accessories ? (Array.isArray(item.accessories) ? item.accessories : [item.accessories]) : [],
+      qty: parseInt(item.qty) || 1,
+      amount: parseFloat(item.amount) || 0,
+      noOfLevels: item.noOfLevels ? parseInt(item.noOfLevels) : null,
+    }));
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
@@ -1073,7 +1058,7 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
     const qNum = escapeHtml(quote['Quote Number'] as string);
 
     // If already submitted, show read-only view
-    if (status === 'Ready to Convert' || status === 'Converted to Invoice' || status === 'Paid') {
+    if (status === 'Ready to Convert' || status === 'Mark as Paid') {
       const custName = escapeHtml((quote['Customer Name'] as string) || 'N/A');
       const custPhone = escapeHtml((quote['Customer Phone'] as string) || 'N/A');
       const custEmail = escapeHtml((quote['Customer Email'] as string) || 'N/A');
@@ -1193,7 +1178,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
 
     const record = records[0];
     const currentStatus = record.fields['Status'] as string;
-    if (currentStatus === 'Converted to Invoice' || currentStatus === 'Paid') {
+    if (currentStatus === 'Mark as Paid') {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
@@ -1212,6 +1197,15 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       } as FieldSet
     }]);
 
+    // Map howDidYouKnowUs to valid singleSelect options for Customers table
+    const howKnowUsMapping: Record<string, string> = {
+      '朋友介紹': '朋友介紹',
+      'Facebook': 'Facebook',
+      'IG': 'IG',
+      '網站搜尋 Google': '網站搜尋 Google',
+    };
+    const howKnowUsValue = howKnowUsMapping[howDidYouKnowUs] || undefined;
+
     // Also upsert customer master for easier conversion later
     const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
     if (existingByPhone.length > 0) {
@@ -1222,6 +1216,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
           'Phone': customerPhone,
           'Email': customerEmail,
           'Address': chineseDeliveryAddress,
+          ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
         } as FieldSet
       }]);
     } else {
@@ -1231,6 +1226,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
           'Phone': customerPhone,
           'Email': customerEmail,
           'Address': chineseDeliveryAddress,
+          ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
         } as FieldSet
       }]);
     }
@@ -1356,10 +1352,10 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     await tableQuotes.update([{
       id: quote.id,
       fields: {
-        'Status': 'Converted to Invoice',
+        'Status': 'Mark as Paid',
         'Converted Order No': internalOrderNo,
         'Converted Invoice No': invoiceNumber,
-        'Order Ref': [orderRecordId],
+        'Order Ref': orderRecordId,
         'Converted At': new Date().toISOString(),
         'Invoice Public Token': invoicePublicToken,
       }
@@ -1395,7 +1391,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     // Order items — filter by Order Link (linked record)
     const itemRecords = await tableOrderItems
-      .select({ filterByFormula: `OR(SEARCH('${order.id}', ARRAYJOIN({Order Link})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order Ref})) > 0)` })
+      .select({ filterByFormula: `OR(SEARCH('${order.id}', ARRAYJOIN({Order Link})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order})) > 0)` })
       .firstPage();
 
     const itemRows = itemRecords.length === 0
@@ -1528,15 +1524,20 @@ app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) 
     }]);
 
     // Also update the linked Quote status
-    const sourceQuoteRef = order.fields['Source Quote Ref'] as string[] | undefined;
-    if (sourceQuoteRef && sourceQuoteRef.length > 0) {
-      await tableQuotes.update([{
-        id: sourceQuoteRef[0],
-        fields: {
-          'Status': 'Paid',
-          'Receipt Public Token': receiptPublicToken,
-        }
-      }]);
+    const sourceQuoteNumber = order.fields['Source Quote Ref'] as string;
+    if (sourceQuoteNumber) {
+      const quoteRecords = await tableQuotes.select({
+        filterByFormula: `{Quote Number} = '${sourceQuoteNumber}'`
+      }).firstPage();
+      if (quoteRecords.length > 0) {
+        await tableQuotes.update([{
+          id: quoteRecords[0].id,
+          fields: {
+            'Status': 'Mark as Paid',
+            'Receipt Public Token': receiptPublicToken,
+          }
+        }]);
+      }
     }
 
     res.redirect('/quotes');
@@ -1566,7 +1567,9 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
       if (cr) customer = cr.fields as Record<string, unknown>;
     }
 
-    const total = (of['Final Amount'] as number) || 0;
+    const subtotal = (of['Product Amount'] as number) || 0;
+    const discountRate = (of['Discount'] as number) ?? 1;
+    const total = (of['Final Amount'] as number) || Math.ceil(subtotal * discountRate);
 
     const content = `
       <div class="doc-card">
