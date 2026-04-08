@@ -843,20 +843,35 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       if (Array.isArray(b.items)) {
         items = b.items;
       } else if (typeof b.items === 'object') {
-        // Express sometimes parses as { '0': {...}, '1': {...} }
-        items = Object.values(b.items);
+        // Express parses as { '0': {...}, '1': {...} } — convert by numeric keys in order
+        const keys = Object.keys(b.items).sort((a, b) => Number(a) - Number(b));
+        items = keys.map(k => b.items[k]);
       }
     }
+    console.log('Raw items from body:', JSON.stringify(b.items));
+    console.log('Parsed items array:', JSON.stringify(items));
     // Filter empty rows
     items = items.filter((item: any) => item && (item.itemType || item.amount));
-    // Normalize accessories, qty, amount
-    items = items.map((item: any) => ({
-      ...item,
-      accessories: item.accessories ? (Array.isArray(item.accessories) ? item.accessories : [item.accessories]) : [],
-      qty: parseInt(item.qty) || 1,
-      amount: parseFloat(item.amount) || 0,
-      noOfLevels: item.noOfLevels ? parseInt(item.noOfLevels) : null,
-    }));
+    // Normalize: ensure all fields are primitive values (not objects/arrays from Express parsing)
+    items = items.map((item: any) => {
+      const str = (v: any) => (v && typeof v === 'object' && !Array.isArray(v)) ? String(Object.values(v)[0] || '') : (v ? String(v) : '');
+      return {
+        itemType: str(item.itemType),
+        forWhat: str(item.forWhat),
+        interL: str(item.interL),
+        interD: str(item.interD),
+        interH: str(item.interH),
+        outerL: str(item.outerL),
+        outerD: str(item.outerD),
+        outerH: str(item.outerH),
+        noOfLevels: item.noOfLevels ? parseInt(str(item.noOfLevels)) : null,
+        levelHeights: str(item.levelHeights),
+        accessories: item.accessories ? (Array.isArray(item.accessories) ? item.accessories.map((a: any) => String(a)) : [String(item.accessories)]) : [],
+        description: str(item.description),
+        qty: parseInt(str(item.qty)) || 1,
+        amount: parseFloat(str(item.amount)) || 0,
+      };
+    });
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
@@ -1346,23 +1361,24 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
           ? item.accessories.filter(Boolean)
           : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
 
+        const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
         const fields: FieldSet = {
           'Order Link': [orderRecordId],
-          'Description': [item.itemType, item.forWhat, item.description].filter(Boolean).join(' / '),
+          'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
-          'Item Type': item.itemType || '',
-          'For What': item.forWhat || '',
-          'Inter L': item.interL ? String(item.interL) : '',
-          'Inter D': item.interD ? String(item.interD) : '',
-          'Inter H': item.interH ? String(item.interH) : '',
+          'Item Type': safeStr(item.itemType),
+          'For What': safeStr(item.forWhat),
+          'Inter L': safeStr(item.interL),
+          'Inter D': safeStr(item.interD),
+          'Inter H': safeStr(item.interH),
           'No. of Levels': item.noOfLevels || null,
-          'Level Heights': item.levelHeights || '',
+          'Level Heights': safeStr(item.levelHeights),
         };
         if (accArray.length > 0) fields['Accessories'] = accArray;
-        if (item.outerL) fields['Outer L'] = String(item.outerL);
-        if (item.outerD) fields['Outer D'] = String(item.outerD);
-        if (item.outerH) fields['Outer H'] = String(item.outerH);
+        if (item.outerL) fields['Outer L'] = safeStr(item.outerL);
+        if (item.outerD) fields['Outer D'] = safeStr(item.outerD);
+        if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
         return { fields };
       });
       await tableOrderItems.create(orderItemsPayload);
