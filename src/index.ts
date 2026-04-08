@@ -1304,7 +1304,6 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       // 'Description' is computed — do NOT write
       'Payment Method': qf['Payment Method'] || '',
       'Invoice Date': invoiceDate,
-      'Status': 'Unpaid',
       'Notes': qf['Notes'] || '',
       'Terms and Conditions': qf['Terms and Conditions'] || '',
       'Source Quote Ref': (qf['Quote Number'] as string) || '',
@@ -1349,7 +1348,6 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     await tableQuotes.update([{
       id: quote.id,
       fields: {
-        'Status': 'Mark as Paid',
         'Converted Order No': internalOrderNo,
         'Converted Invoice No': invoiceNumber,
         'Order Ref': orderRecordId,
@@ -1513,7 +1511,6 @@ app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) 
     await tableOrders.update([{
       id: order.id,
       fields: {
-        'Status': 'Paid',
         'Pay Date': payDate,
         'Receipt Number': receiptNumber,
         'Receipt Public Token': receiptPublicToken,
@@ -1530,7 +1527,6 @@ app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) 
         await tableQuotes.update([{
           id: quoteRecords[0].id,
           fields: {
-            'Status': 'Mark as Paid',
             'Receipt Public Token': receiptPublicToken,
           }
         }]);
