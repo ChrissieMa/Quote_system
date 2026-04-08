@@ -1631,8 +1631,6 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
             </div>
           </div>
 
-          <div class="section"><div class="section-title">Payment Terms</div><p style="font-size:12px;color:#374151;">${nl2br(DEFAULT_PAYMENT_TERMS)}</p></div>
-
           <div class="thank-you">Thank you for your payment!</div>
         </div>
       </div>
