@@ -1390,25 +1390,29 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       if (cr) customer = cr.fields as Record<string, unknown>;
     }
 
-    // Order items — filter by Order Link or Order (linked record)
-    const itemRecords = await tableOrderItems
-      .select({ filterByFormula: `OR(FIND('${order.id}', ARRAYJOIN({Order Link}, ',')) > 0, FIND('${order.id}', ARRAYJOIN({Order}, ',')) > 0)` })
-      .firstPage();
+    // Items — read from Source Quote's Quote Items JSON (same as Quote view)
+    let items: any[] = [];
+    const sourceQuoteRef = (of['Source Quote Ref'] as string) || '';
+    if (sourceQuoteRef) {
+      const quoteRecords = await tableQuotes.select({ filterByFormula: `{Quote Number} = '${sourceQuoteRef}'` }).firstPage();
+      if (quoteRecords.length > 0) {
+        items = parseQuoteItems(quoteRecords[0].fields['Quote Items JSON']);
+      }
+    }
 
-    const itemRows = itemRecords.length === 0
+    const itemRows = items.length === 0
       ? '<tr><td colspan="8" style="text-align:center;color:#9ca3af;">No items</td></tr>'
-      : itemRecords.map((item: any, idx: number) => {
-          const f = item.fields;
-          const interSize = [f['Inter L'], f['Inter D'], f['Inter H']].filter(Boolean).join(' x ');
+      : items.map((item: any, idx: number) => {
+          const interSize = [item.interL, item.interD, item.interH].filter(Boolean).join(' x ');
           return `<tr>
             <td>${idx + 1}</td>
-            <td>${escapeHtml(f['Item Type'] || f['Description'] || '')}</td>
+            <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(interSize) || '-'}</td>
-            <td style="text-align:center;">${f['No. of Levels'] || '-'}</td>
-            <td>${escapeHtml(f['Level Heights'] || '')}</td>
-            <td>${renderAccTags(f['Accessories'])}</td>
-            <td style="text-align:center;">${f['QTY'] || f['Qty'] || 1}</td>
-            <td style="text-align:right;">$${f['Product Amount'] || f['Amount'] || 0}</td>
+            <td style="text-align:center;">${item.noOfLevels || '-'}</td>
+            <td>${escapeHtml(item.levelHeights) || '-'}</td>
+            <td>${renderAccTags(item.accessories)}</td>
+            <td style="text-align:center;">${item.qty || 1}</td>
+            <td style="text-align:right;">$${item.amount || 0}</td>
           </tr>`;
         }).join('');
 
