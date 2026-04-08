@@ -507,6 +507,23 @@ app.get('/quotes', async (req: Request, res: Response) => {
       return `<a href="${url}" class="filter-tab${isActive ? ' active' : ''}">${t.label}</a>`;
     }).join('');
 
+    // Pre-fetch receipt tokens from Order_2026 for quotes that have been converted
+    const receiptTokenMap: Record<string, string> = {};
+    const convertedRecords = records.filter(r => r.fields['Order Ref']);
+    if (convertedRecords.length > 0) {
+      for (const cr of convertedRecords) {
+        const orderRecordId = cr.fields['Order Ref'] as string;
+        if (orderRecordId) {
+          try {
+            const orderRecord = await tableOrders.find(orderRecordId);
+            if (orderRecord && orderRecord.fields['Receipt Public Token']) {
+              receiptTokenMap[cr.id] = orderRecord.fields['Receipt Public Token'] as string;
+            }
+          } catch { /* order not found, skip */ }
+        }
+      }
+    }
+
     const cardsHtml = records.length === 0
       ? '<div style="text-align:center;padding:40px;color:#9ca3af;">No quotes found.</div>'
       : records.map(r => {
@@ -519,7 +536,7 @@ app.get('/quotes', async (req: Request, res: Response) => {
           const phone = escapeHtml((f['Customer Phone'] as string) || (f['Phone'] as string) || '');
           const total = f['Total'] ? `$${f['Total']}` : '-';
           const invoiceToken = f['Invoice Public Token'] as string | undefined;
-          const receiptToken = f['Receipt Public Token'] as string | undefined;
+          const receiptToken = receiptTokenMap[r.id] || undefined;
 
           // Build action buttons — ALL always shown
           const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${token}/customer-info`;
