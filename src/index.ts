@@ -1541,21 +1541,8 @@ app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) 
       }
     }]);
 
-    // Also update the linked Quote status
-    const sourceQuoteNumber = order.fields['Source Quote Ref'] as string;
-    if (sourceQuoteNumber) {
-      const quoteRecords = await tableQuotes.select({
-        filterByFormula: `{Quote Number} = '${sourceQuoteNumber}'`
-      }).firstPage();
-      if (quoteRecords.length > 0) {
-        await tableQuotes.update([{
-          id: quoteRecords[0].id,
-          fields: {
-            'Receipt Public Token': receiptPublicToken,
-          }
-        }]);
-      }
-    }
+    // Note: Quotes table does not have 'Receipt Public Token' field,
+    // so we skip updating the Quote record here.
 
     res.redirect('/quotes');
   } catch (error: any) {
