@@ -622,7 +622,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                   <option value="WhatsApp">WhatsApp</option>
                   <option value="IG">IG</option>
                   <option value="Facebook">Facebook</option>
-                  <option value="Phone">Phone</option>
+                  <option value="網頁搜尋">網頁搜尋</option>
                 </select>
               </div>
               <div class="form-group">
@@ -856,7 +856,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Quote Date': quoteDate,
         'Status': 'Draft',
         'Public Token': publicToken,
-        'Valid Until': b.validUntil || null,
+        'Valid Until': b.validUntil && b.validUntil.trim() ? b.validUntil.trim() : null,
         'Contact Name': b.contactName,
         'Phone': b.phone,
         'Contact Method': b.contactMethod,
