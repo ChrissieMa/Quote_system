@@ -68,6 +68,12 @@ const DEFAULT_TERMS = `1. 本報價僅供參考，所有尺寸、設計及細節
 9. 展示盒為亞加力製品，於生產過程中可能出現輕微加工痕跡，屬正常情況，並不影響使用。
 10. LKS Display Box 保留最終報價及訂單之決定權。`;
 
+const DEFAULT_PAYMENT_TERMS = `1. 所有訂單均需於確認後支付全數貨款，本公司將於收到全數付款後開始生產。
+2. 完成製作後，本公司將根據貨物及包裝後之實際重量計算運費，並另行發出運費發票（Invoice）。
+3. 客戶需於送貨前支付相關運費，否則本公司有權暫停或延遲送貨安排。
+4. 運費會因貨物重量、尺寸及送貨地點而有所不同，實際金額以最終發出之運費發票為準。
+5. 本公司保留最終收費及送貨安排之決定權。`;
+
 // Check required env vars
 const requiredEnvVars = [
   'AIRTABLE_API_KEY',
@@ -1384,9 +1390,9 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       if (cr) customer = cr.fields as Record<string, unknown>;
     }
 
-    // Order items — filter by Order Link (linked record)
+    // Order items — filter by Order Link or Order (linked record)
     const itemRecords = await tableOrderItems
-      .select({ filterByFormula: `OR(SEARCH('${order.id}', ARRAYJOIN({Order Link})) > 0, SEARCH('${order.id}', ARRAYJOIN({Order})) > 0)` })
+      .select({ filterByFormula: `OR(FIND('${order.id}', ARRAYJOIN({Order Link}, ',')) > 0, FIND('${order.id}', ARRAYJOIN({Order}, ',')) > 0)` })
       .firstPage();
 
     const itemRows = itemRecords.length === 0
@@ -1476,7 +1482,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
           ${of['Payment Method'] ? `<p style="margin-top:12px;"><strong>Payment Method:</strong> ${escapeHtml(of['Payment Method'] as string)}</p>` : ''}
           ${of['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:13px;">${nl2br(of['Notes'])}</p></div>` : ''}
-          ${of['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:12px;color:#374151;">${nl2br(of['Terms and Conditions'])}</p></div>` : ''}
+          <div class="section"><div class="section-title">Payment Terms</div><p style="font-size:12px;color:#374151;">${nl2br(DEFAULT_PAYMENT_TERMS)}</p></div>
 
           <div class="thank-you">Thank you for your business!</div>
         </div>
@@ -1603,7 +1609,7 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
             </div>
           </div>
 
-          ${of['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:12px;color:#374151;">${nl2br(of['Terms and Conditions'])}</p></div>` : ''}
+          <div class="section"><div class="section-title">Payment Terms</div><p style="font-size:12px;color:#374151;">${nl2br(DEFAULT_PAYMENT_TERMS)}</p></div>
 
           <div class="thank-you">Thank you for your payment!</div>
         </div>
