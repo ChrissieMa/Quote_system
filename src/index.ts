@@ -635,7 +635,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     <div class="doc-card">
       ${docHeader('建立報價單', 'Create Quote')}
       <div class="doc-body">
-        <form id="quoteForm" action="/quote/create" method="POST">
+        <form id="quoteForm">
 
           <div class="section">
             <div class="section-title">Contact Information</div>
@@ -691,37 +691,37 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 </thead>
                 <tbody id="itemsBody">
                   <tr>
-                    <td><input type="text" name="items[0][itemType]" class="f-type" placeholder="e.g. Display Case"></td>
-                    <td><input type="text" name="items[0][forWhat]" class="f-for" placeholder="e.g. Shoes"></td>
-                    <td><input type="number" name="items[0][interL]" class="f-il" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="items[0][interD]" class="f-id" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="items[0][interH]" class="f-ih" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="items[0][outerL]" class="f-ol" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="items[0][outerD]" class="f-od" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="items[0][outerH]" class="f-oh" step="0.1" style="width:60px"></td>
-                    <td><input type="number" name="items[0][noOfLevels]" class="f-lv" min="1" style="width:50px"></td>
-                    <td><input type="text" name="items[0][levelHeights]" class="f-lh" placeholder="e.g. 20,30"></td>
+                    <td><input type="text" class="f-type" placeholder="e.g. Display Case"></td>
+                    <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
+                    <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-ih" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-ol" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-od" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-oh" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
+                    <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
                     <td>
                       <div class="f-acc-wrap" style="min-width:140px;max-height:120px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:4px;font-size:12px;">
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="獨立燈板 - 上燈"> 獨立燈板 - 上燈</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="獨立燈板 - 下燈"> 獨立燈板 - 下燈</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="獨立燈板 - 上下燈"> 獨立燈板 - 上下燈</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="上下燈"> 上下燈</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="背燈"> 背燈</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="白色刻字"> 白色刻字</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="彩色刻字"> 彩色刻字</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="背景"> 背景</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="樓梯"> 樓梯</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="鏡面"> 鏡面</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="趟門"> 趟門</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="磁石門"> 磁石門</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="黑底板"> 黑底板</label>
-                        <label style="display:block;"><input type="checkbox" name="items[0][accessories][]" value="透明底板"> 透明底板</label>
+                        <label style="display:block;"><input type="checkbox" value="獨立燈板 - 上燈"> 獨立燈板 - 上燈</label>
+                        <label style="display:block;"><input type="checkbox" value="獨立燈板 - 下燈"> 獨立燈板 - 下燈</label>
+                        <label style="display:block;"><input type="checkbox" value="獨立燈板 - 上下燈"> 獨立燈板 - 上下燈</label>
+                        <label style="display:block;"><input type="checkbox" value="上下燈"> 上下燈</label>
+                        <label style="display:block;"><input type="checkbox" value="背燈"> 背燈</label>
+                        <label style="display:block;"><input type="checkbox" value="白色刻字"> 白色刻字</label>
+                        <label style="display:block;"><input type="checkbox" value="彩色刻字"> 彩色刻字</label>
+                        <label style="display:block;"><input type="checkbox" value="背景"> 背景</label>
+                        <label style="display:block;"><input type="checkbox" value="樓梯"> 樓梯</label>
+                        <label style="display:block;"><input type="checkbox" value="鏡面"> 鏡面</label>
+                        <label style="display:block;"><input type="checkbox" value="趟門"> 趟門</label>
+                        <label style="display:block;"><input type="checkbox" value="磁石門"> 磁石門</label>
+                        <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
+                        <label style="display:block;"><input type="checkbox" value="透明底板"> 透明底板</label>
                       </div>
                     </td>
-                    <td><input type="text" name="items[0][description]" class="f-desc" placeholder="Remarks"></td>
-                    <td><input type="number" name="items[0][qty]" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
-                    <td><input type="number" name="items[0][amount]" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
+                    <td><input type="text" class="f-desc" placeholder="Remarks"></td>
+                    <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
+                    <td><input type="number" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
                   </tr>
                 </tbody>
@@ -779,15 +779,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
   const extraHead = `
   <script>
     function addRow() {
-      const tbody = document.getElementById('itemsBody');
-      const rows = tbody.querySelectorAll('tr');
-      const newIndex = rows.length;
-      const first = rows[0];
-      const clone = first.cloneNode(true);
-      clone.querySelectorAll('input, select, textarea').forEach(function(el) {
-        if (el.name) {
-          el.name = el.name.replace(/items\[\d+\]/, 'items[' + newIndex + ']');
-        }
+      var tbody = document.getElementById('itemsBody');
+      var first = tbody.querySelector('tr');
+      var clone = first.cloneNode(true);
+      clone.querySelectorAll('input').forEach(function(el) {
         if (el.type === 'checkbox') {
           el.checked = false;
         } else if (el.type === 'number') {
@@ -799,31 +794,79 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       tbody.appendChild(clone);
     }
     function removeRow(btn) {
-      const tbody = document.getElementById('itemsBody');
+      var tbody = document.getElementById('itemsBody');
       if (tbody.querySelectorAll('tr').length <= 1) return;
       btn.closest('tr').remove();
-      // Re-index all rows
-      tbody.querySelectorAll('tr').forEach(function(row, idx) {
-        row.querySelectorAll('input, select, textarea').forEach(function(el) {
-          if (el.name) {
-            el.name = el.name.replace(/items\[\d+\]/, 'items[' + idx + ']');
-          }
-        });
-      });
       recalcSubtotal();
     }
     function recalcSubtotal() {
-      let sum = 0;
-      document.querySelectorAll('.f-amt').forEach(i => { sum += parseFloat(i.value) || 0; });
+      var sum = 0;
+      document.querySelectorAll('.f-amt').forEach(function(i) { sum += parseFloat(i.value) || 0; });
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
     }
     function recalcTotal() {
-      const sub = parseFloat(document.getElementById('subtotal').value) || 0;
-      const disc = parseFloat(document.getElementById('discount').value);
-      const d = isNaN(disc) ? 1 : disc;
+      var sub = parseFloat(document.getElementById('subtotal').value) || 0;
+      var disc = parseFloat(document.getElementById('discount').value);
+      var d = isNaN(disc) ? 1 : disc;
       document.getElementById('total').value = Math.ceil(sub * d);
     }
+    function collectItems() {
+      var items = [];
+      document.querySelectorAll('#itemsBody tr').forEach(function(row) {
+        var acc = [];
+        row.querySelectorAll('.f-acc-wrap input[type=checkbox]:checked').forEach(function(cb) {
+          acc.push(cb.value);
+        });
+        items.push({
+          itemType: (row.querySelector('.f-type') || {}).value || '',
+          forWhat: (row.querySelector('.f-for') || {}).value || '',
+          interL: (row.querySelector('.f-il') || {}).value || '',
+          interD: (row.querySelector('.f-id') || {}).value || '',
+          interH: (row.querySelector('.f-ih') || {}).value || '',
+          outerL: (row.querySelector('.f-ol') || {}).value || '',
+          outerD: (row.querySelector('.f-od') || {}).value || '',
+          outerH: (row.querySelector('.f-oh') || {}).value || '',
+          noOfLevels: (row.querySelector('.f-lv') || {}).value || '',
+          levelHeights: (row.querySelector('.f-lh') || {}).value || '',
+          accessories: acc,
+          description: (row.querySelector('.f-desc') || {}).value || '',
+          qty: (row.querySelector('.f-qty') || {}).value || '1',
+          amount: (row.querySelector('.f-amt') || {}).value || '0'
+        });
+      });
+      return items;
+    }
+    document.addEventListener('DOMContentLoaded', function() {
+      document.getElementById('quoteForm').addEventListener('submit', function(e) {
+        e.preventDefault();
+        var form = e.target;
+        var payload = {
+          contactName: form.querySelector('[name=contactName]').value,
+          phone: form.querySelector('[name=phone]').value,
+          contactMethod: form.querySelector('[name=contactMethod]').value,
+          contactHandle: form.querySelector('[name=contactHandle]').value,
+          subtotal: document.getElementById('subtotal').value,
+          discount: document.getElementById('discount').value,
+          total: document.getElementById('total').value,
+          validUntil: form.querySelector('[name=validUntil]').value,
+          notes: form.querySelector('[name=notes]').value,
+          terms: form.querySelector('[name=terms]').value,
+          items: collectItems()
+        };
+        fetch('/quote/create', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        }).then(function(res) { return res.text(); })
+          .then(function(html) {
+            document.open();
+            document.write(html);
+            document.close();
+          })
+          .catch(function(err) { alert('Error: ' + err.message); });
+      });
+    });
     recalcSubtotal();
   </script>`;
 
@@ -837,41 +880,27 @@ app.post('/quote/create', async (req: Request, res: Response) => {
   try {
     const b = req.body;
 
-    // Express extended:true will parse items[0][itemType] into nested objects
-    let items: any[] = [];
-    if (b.items) {
-      if (Array.isArray(b.items)) {
-        items = b.items;
-      } else if (typeof b.items === 'object') {
-        // Express parses as { '0': {...}, '1': {...} } — convert by numeric keys in order
-        const keys = Object.keys(b.items).sort((a, b) => Number(a) - Number(b));
-        items = keys.map(k => b.items[k]);
-      }
-    }
-    console.log('Raw items from body:', JSON.stringify(b.items));
-    console.log('Parsed items array:', JSON.stringify(items));
+    // Body is JSON from fetch — items is already a clean array
+    let items: any[] = Array.isArray(b.items) ? b.items : [];
     // Filter empty rows
     items = items.filter((item: any) => item && (item.itemType || item.amount));
-    // Normalize: ensure all fields are primitive values (not objects/arrays from Express parsing)
-    items = items.map((item: any) => {
-      const str = (v: any) => (v && typeof v === 'object' && !Array.isArray(v)) ? String(Object.values(v)[0] || '') : (v ? String(v) : '');
-      return {
-        itemType: str(item.itemType),
-        forWhat: str(item.forWhat),
-        interL: str(item.interL),
-        interD: str(item.interD),
-        interH: str(item.interH),
-        outerL: str(item.outerL),
-        outerD: str(item.outerD),
-        outerH: str(item.outerH),
-        noOfLevels: item.noOfLevels ? parseInt(str(item.noOfLevels)) : null,
-        levelHeights: str(item.levelHeights),
-        accessories: item.accessories ? (Array.isArray(item.accessories) ? item.accessories.map((a: any) => String(a)) : [String(item.accessories)]) : [],
-        description: str(item.description),
-        qty: parseInt(str(item.qty)) || 1,
-        amount: parseFloat(str(item.amount)) || 0,
-      };
-    });
+    // Normalize
+    items = items.map((item: any) => ({
+      itemType: String(item.itemType || ''),
+      forWhat: String(item.forWhat || ''),
+      interL: String(item.interL || ''),
+      interD: String(item.interD || ''),
+      interH: String(item.interH || ''),
+      outerL: String(item.outerL || ''),
+      outerD: String(item.outerD || ''),
+      outerH: String(item.outerH || ''),
+      noOfLevels: item.noOfLevels ? parseInt(String(item.noOfLevels)) : null,
+      levelHeights: String(item.levelHeights || ''),
+      accessories: Array.isArray(item.accessories) ? item.accessories.map((a: any) => String(a)) : [],
+      description: String(item.description || ''),
+      qty: parseInt(String(item.qty)) || 1,
+      amount: parseFloat(String(item.amount)) || 0,
+    }));
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
