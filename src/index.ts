@@ -1133,25 +1133,15 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
                 <label>Chinese Delivery Address *</label>
                 <textarea name="chineseDeliveryAddress" rows="3" required>${prefillAddr}</textarea>
               </div>
-              <div class="form-row form-row-2">
-                <div class="form-group">
-                  <label>Payment Method *</label>
-                  <select name="paymentMethod" required>
-                    <option value="FPS">FPS 轉數快</option>
-                    <option value="Bank Transfer">Bank Transfer 銀行轉帳</option>
-                    <option value="PayMe">PayMe</option>
-                  </select>
-                </div>
-                <div class="form-group">
-                  <label>How did you know us? (Optional)</label>
-                  <select name="howDidYouKnowUs">
-                    <option value="">-- Select --</option>
-                    <option value="朋友介紹">朋友介紹</option>
-                    <option value="Facebook">Facebook</option>
-                    <option value="IG">IG</option>
-                    <option value="網站搜尋 Google">網站搜尋 Google</option>
-                  </select>
-                </div>
+              <div class="form-group">
+                <label>How did you know us? (Optional)</label>
+                <select name="howDidYouKnowUs">
+                  <option value="">-- Select --</option>
+                  <option value="朋友介紹">朋友介紹</option>
+                  <option value="Facebook">Facebook</option>
+                  <option value="IG">IG</option>
+                  <option value="網站搜尋 Google">網站搜尋 Google</option>
+                </select>
               </div>
             </div>
 
@@ -1180,7 +1170,7 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
 app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
-    const { customerName, customerPhone, customerEmail, chineseDeliveryAddress, paymentMethod, howDidYouKnowUs } = req.body;
+    const { customerName, customerPhone, customerEmail, chineseDeliveryAddress, howDidYouKnowUs } = req.body;
 
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
     if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
@@ -1191,7 +1181,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
-    // Save customer info back to Quote first
+    // Save customer info back to Quote
     await tableQuotes.update([{
       id: record.id,
       fields: {
@@ -1199,10 +1189,8 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
         'Customer Phone': customerPhone,
         'Customer Email': customerEmail,
         'Chinese Delivery Address': chineseDeliveryAddress,
-        'Payment Method': paymentMethod,
         'How Did You Know Us': howDidYouKnowUs || '',
         'Customer Submitted At': new Date().toISOString(),
-        'Status': 'Ready to Convert'
       } as FieldSet
     }]);
 
