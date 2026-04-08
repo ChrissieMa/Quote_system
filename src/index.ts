@@ -854,7 +854,6 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       fields: {
         'Quote Number': quoteNumber,
         'Quote Date': quoteDate,
-        'Status': 'Draft',
         'Public Token': publicToken,
         'Valid Until': b.validUntil && b.validUntil.trim() ? b.validUntil.trim() : null,
         'Contact Name': b.contactName,
