@@ -420,12 +420,17 @@ const docHeader = (titleZh: string, titleEn: string): string => `
   </div>
 </div>`;
 
-const parseAccessories = (raw: string | undefined): string[] => {
-  if (!raw || raw.trim() === '' || raw.trim() === '-') return [];
-  return raw.split(/[,，;\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+const parseAccessories = (raw: unknown): string[] => {
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw.map(String).filter(s => s.length > 0);
+  if (typeof raw === 'string') {
+    if (raw.trim() === '' || raw.trim() === '-') return [];
+    return raw.split(/[,，;\n]+/).map(s => s.trim()).filter(s => s.length > 0);
+  }
+  return [];
 };
 
-const renderAccTags = (raw: string | undefined): string => {
+const renderAccTags = (raw: unknown): string => {
   const tags = parseAccessories(raw);
   if (tags.length === 0) return '<span style="color:#9ca3af">-</span>';
   return `<div class="acc-tags">${tags.map(t => `<span class="acc-tag">${escapeHtml(t)}</span>`).join('')}</div>`;
