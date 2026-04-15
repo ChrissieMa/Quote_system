@@ -54,6 +54,7 @@ const COMPANY = {
   address2: '寧晉中心35樓G1室',
   phone: process.env.COMPANY_PHONE || '68983722',
   email: process.env.COMPANY_EMAIL || 'lksdisplaybox@gmail.com',
+  website: process.env.COMPANY_WEBSITE || 'https://lksdisplaybox.online',
 };
 
 
@@ -74,6 +75,45 @@ const DEFAULT_PAYMENT_TERMS = `1. 所有訂單均需於確認後支付全數貨�
 3. 客戶需於送貨前支付相關運費，否則本公司有權暫停或延遲送貨安排。
 4. 運費會因貨物重量、尺寸及送貨地點而有所不同，實際金額以最終發出之運費發票為準。
 5. 本公司保留最終收費及送貨安排之決定權。`;
+
+const DEFAULT_QUOTE_NOTES = `LKS 自家物流🚛「運費到付」
+🚛💰運費按貨物重量計算
+大部分地區運費相若☺️
+🌟偏遠地區除外🌟
+
+🎊 新客戶優惠 🎊
+🔽 首次購買即享 85 折
+💡 必須 Like Facebook Page 並分享指定 Post 💡
+
+❌❌❌ 不接急單 ❌❌❌
+
+展示盒介紹
+🤏🏻 全港少數採用 5MM 高清厚板製作展示盒及展示櫃 🤏🏻
+💫 購買任何展示盒或展示櫃，附送趟門或磁石門。💫
+➕ 加購優惠 ➕ 如加購背景或刻字，即免費設計及修圖。
+💡 獨立燈板 💡 獨立燈板與展示盒分體設計，方便日後升級成疊高展示櫃，燈板亦可靈活轉為上燈或下燈 🚪
+💰 新客戶專屬優惠 💰 首次購買即享 85 折優惠 🫶🏻`;
+
+const MATERIAL_NOTE = '本公司全線展示盒及展示櫃均採用 5MM 高清亞加力厚板製作';
+const PAYMENT_METHOD_HTML = `
+  <div class="section">
+    <div class="section-title">Payment Method</div>
+    <div class="payment-grid">
+      <div class="payment-card">
+        <div class="payment-title">銀行轉帳</div>
+        <div>銀行：HSBC</div>
+        <div>帳號：582 664 967 838</div>
+      </div>
+      <div class="payment-card">
+        <div class="payment-title">轉數快 (FPS)</div>
+        <div>電話號碼：68983722</div>
+      </div>
+      <div class="payment-card">
+        <div class="payment-title">PayMe</div>
+        <div><a href="https://qr.payme.hsbc.com.hk/2/EjV1LxhqMwvqL6h5MN9n3r" target="_blank" rel="noopener noreferrer">按此即時付款</a></div>
+      </div>
+    </div>
+  </div>`;
 
 // Check required env vars
 const requiredEnvVars = [
@@ -257,6 +297,19 @@ const SHARED_CSS = `
   .badge-converted { background: #10b981; }
   .badge-paid { background: #10b981; }
   .badge-unpaid { background: #ef4444; }
+  .material-banner {
+    background: #d8833b;
+    color: #fff;
+    padding: 8px 12px;
+    border-radius: 6px;
+    font-size: 13px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    text-align: center;
+  }
+  .payment-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; }
+  .payment-card { border: 1px solid #f0e0d0; border-radius: 6px; padding: 12px; background: #fffaf6; font-size: 13px; }
+  .payment-card .payment-title { font-weight: 700; color: #d8833b; margin-bottom: 6px; }
 
   /* ── Buttons ── */
   .btn {
@@ -428,7 +481,8 @@ const docHeader = (titleZh: string, titleEn: string): string => `
     ${COMPANY.address1}<br>
     ${COMPANY.address2}<br>
     ${COMPANY.phone}<br>
-    ${COMPANY.email}
+    ${COMPANY.email}<br>
+    <a href="${COMPANY.website}" target="_blank" rel="noopener noreferrer">${COMPANY.website.replace(/^https?:\/\//, '')}</a>
   </div>
 </div>`;
 
@@ -691,7 +745,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 </thead>
                 <tbody id="itemsBody">
                   <tr>
-                    <td><input type="text" class="f-type" placeholder="e.g. Display Case"></td>
+                    <td><select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option></select></td>
                     <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
                     <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
@@ -759,7 +813,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
               </div>
               <div class="form-group">
                 <label>Notes</label>
-                <textarea name="notes" rows="3"></textarea>
+                <textarea name="notes" rows="14">${escapeHtml(DEFAULT_QUOTE_NOTES)}</textarea>
               </div>
             </div>
             <div class="form-group">
@@ -782,9 +836,11 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       var tbody = document.getElementById('itemsBody');
       var first = tbody.querySelector('tr');
       var clone = first.cloneNode(true);
-      clone.querySelectorAll('input').forEach(function(el) {
+      clone.querySelectorAll('input, select').forEach(function(el) {
         if (el.type === 'checkbox') {
           el.checked = false;
+        } else if (el.tagName === 'SELECT') {
+          el.selectedIndex = 0;
         } else if (el.type === 'number') {
           el.value = el.classList.contains('f-qty') ? '1' : '';
         } else {
@@ -946,6 +1002,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Notes': b.notes || '',
         'Terms and Conditions': b.terms || '',
         'Created At': new Date().toISOString(),
+        'Status': 'Draft',
       }
     }]);
 
@@ -1075,7 +1132,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           <div class="section">
             <div class="section-title">Items</div>
             <div style="overflow-x:auto;">
-              <table class="items-table">
+              <div class="material-banner">${escapeHtml(MATERIAL_NOTE)}</div><table class="items-table">
                 <thead>
                   <tr>
                     <th>#</th>
@@ -1259,6 +1316,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
         'Chinese Delivery Address': chineseDeliveryAddress,
         'How Did You Know Us': howDidYouKnowUs || '',
         'Customer Submitted At': new Date().toISOString(),
+        'Status': 'Ready to Convert',
       } as FieldSet
     }]);
 
@@ -1422,6 +1480,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         'Order Ref': orderRecordId,
         'Converted At': new Date().toISOString(),
         'Invoice Public Token': invoicePublicToken,
+        'Status': 'Mark as Paid',
       }
     }]);
 
@@ -1560,7 +1619,8 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             </div>
           </div>
 
-          ${of['Payment Method'] ? `<p style="margin-top:12px;"><strong>Payment Method:</strong> ${escapeHtml(of['Payment Method'] as string)}</p>` : ''}
+          ${of['Payment Method'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Selected Payment Method</div><p style="font-size:13px;">${escapeHtml(of['Payment Method'] as string)}</p></div>` : ''}
+          ${PAYMENT_METHOD_HTML}
           ${of['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:13px;">${nl2br(of['Notes'])}</p></div>` : ''}
           <div class="section"><div class="section-title">Payment Terms</div><p style="font-size:12px;color:#374151;">${nl2br(DEFAULT_PAYMENT_TERMS)}</p></div>
 
@@ -1600,11 +1660,9 @@ app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) 
         'Pay Date': payDate,
         'Receipt Number': receiptNumber,
         'Receipt Public Token': receiptPublicToken,
+        'Status': 'Paid',
       }
     }]);
-
-    // Note: Quotes table does not have 'Receipt Public Token' field,
-    // so we skip updating the Quote record here.
 
     res.redirect('/quotes');
   } catch (error: any) {
