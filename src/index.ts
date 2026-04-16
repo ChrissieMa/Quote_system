@@ -954,14 +954,14 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       var backImageCount = qtyMap['背板圖片'] || 0;
       if (backImageCount > 0) {
         accessoryRmb += calcBackPanelRmb(l, h) * backImageCount;
-        hkdAddons += 50 * backImageCount;
+        hkdAddons += 100 * backImageCount;
       }
 
       ['左板圖片','右板圖片','底板圖片','頂板圖片'].forEach(function(name) {
         var c = qtyMap[name] || 0;
         if (c > 0) {
           accessoryRmb += calcLdPanelRmb(l, d) * c;
-          hkdAddons += 50 * c;
+          hkdAddons += 100 * c;
         }
       });
 
