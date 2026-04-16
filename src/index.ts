@@ -739,6 +739,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                     <th>Accessories</th>
                     <th>Description</th>
                     <th>QTY</th>
+                    <th>運費 ($)</th>
+                    <th>利潤 ($)</th>
                     <th>Amount ($)</th>
                     <th></th>
                   </tr>
@@ -765,6 +767,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                         <label style="display:block;"><input type="checkbox" value="白色刻字"> 白色刻字</label>
                         <label style="display:block;"><input type="checkbox" value="彩色刻字"> 彩色刻字</label>
                         <label style="display:block;"><input type="checkbox" value="背景"> 背景</label>
+                        <label style="display:block;"><input type="checkbox" value="左圖"> 左圖</label>
+                        <label style="display:block;"><input type="checkbox" value="右圖"> 右圖</label>
+                        <label style="display:block;"><input type="checkbox" value="底圖"> 底圖</label>
                         <label style="display:block;"><input type="checkbox" value="樓梯"> 樓梯</label>
                         <label style="display:block;"><input type="checkbox" value="鏡面"> 鏡面</label>
                         <label style="display:block;"><input type="checkbox" value="趟門"> 趟門</label>
@@ -774,8 +779,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                       </div>
                     </td>
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
-                    <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px" oninput="recalcSubtotal()"></td>
-                    <td><input type="number" class="f-amt amount-input" step="0.01" style="width:80px" oninput="recalcSubtotal()"></td>
+                    <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px"></td>
+                    <td><input type="number" class="f-freight amount-input" step="0.01" style="width:80px"></td>
+                    <td><input type="number" class="f-profit amount-input" step="0.01" style="width:80px"></td>
+                    <td><input type="number" class="f-amt amount-input" step="0.01" style="width:90px;background:#f9fafb;" readonly></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
                   </tr>
                 </tbody>
@@ -832,6 +839,141 @@ app.get('/quote/create', (_req: Request, res: Response) => {
 
   const extraHead = `
   <script>
+    var RMB_DIVISOR = 0.85;
+
+    function parseNum(val) {
+      var n = parseFloat(val);
+      return isNaN(n) ? 0 : n;
+    }
+
+    function getDims(row) {
+      var outerL = parseNum((row.querySelector('.f-ol') || {}).value);
+      var outerD = parseNum((row.querySelector('.f-od') || {}).value);
+      var outerH = parseNum((row.querySelector('.f-oh') || {}).value);
+      if (outerL > 0 && outerD > 0 && outerH > 0) {
+        return { l: outerL, d: outerD, h: outerH };
+      }
+      return {
+        l: parseNum((row.querySelector('.f-il') || {}).value),
+        d: parseNum((row.querySelector('.f-id') || {}).value),
+        h: parseNum((row.querySelector('.f-ih') || {}).value)
+      };
+    }
+
+    function getAccessories(row) {
+      var acc = [];
+      row.querySelectorAll('.f-acc-wrap input[type=checkbox]:checked').forEach(function(cb) {
+        acc.push(cb.value);
+      });
+      return acc;
+    }
+
+    function calcDisplayBoxRmb(l, d, h) {
+      var fiveSideArea = (l * d) + ((l * h + d * h) * 2);
+      return (fiveSideArea * 0.025) + (l * d * 0.013) + (l * d * 0.013) + 20;
+    }
+
+    function calcLightBoardRmb(l, d) {
+      return ((l * d + d * 2 + l * 2) * 2 * 0.023) + l + d;
+    }
+
+    function calcBackLightRmb(l, h) {
+      return ((l * h + h * 2 + l * 2) * 2 * 0.02) + l + h;
+    }
+
+    function calcBackgroundRmb(l, h) {
+      return l * h * 0.025;
+    }
+
+    function calcSideOrBottomRmb(l, d) {
+      return l * d * 0.025;
+    }
+
+    function calcPowerRmb() {
+      return 15;
+    }
+
+    function calcRowAmount(row) {
+      var dims = getDims(row);
+      var l = dims.l, d = dims.d, h = dims.h;
+      var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
+      var freight = parseNum((row.querySelector('.f-freight') || {}).value);
+      var profit = parseNum((row.querySelector('.f-profit') || {}).value);
+      var acc = getAccessories(row);
+
+      if (!(l > 0 && d > 0 && h > 0)) {
+        (row.querySelector('.f-amt') || {}).value = '';
+        return 0;
+      }
+
+      var rmbTotal = calcDisplayBoxRmb(l, d, h);
+      var hkdAddons = 0;
+
+      var hasTop = acc.indexOf('獨立燈板 - 上燈') !== -1;
+      var hasBottom = acc.indexOf('獨立燈板 - 下燈') !== -1;
+      var hasTopBottomSingle = acc.indexOf('獨立燈板 - 上下燈') !== -1 || acc.indexOf('上下燈') !== -1;
+      var lightBoardCount = (hasTop ? 1 : 0) + (hasBottom ? 1 : 0) + (hasTopBottomSingle ? 2 : 0);
+      if (lightBoardCount > 0) {
+        rmbTotal += calcLightBoardRmb(l, d) * lightBoardCount;
+      }
+
+      var hasBackLight = acc.indexOf('背燈') !== -1;
+      if (hasBackLight) {
+        rmbTotal += calcBackLightRmb(l, h);
+        if (acc.indexOf('背景') === -1) {
+          rmbTotal += calcBackgroundRmb(l, h);
+          hkdAddons += 100;
+        }
+      }
+
+      if (acc.indexOf('背景') !== -1) {
+        rmbTotal += calcBackgroundRmb(l, h);
+        hkdAddons += 100;
+      }
+      if (acc.indexOf('左圖') !== -1) {
+        rmbTotal += calcSideOrBottomRmb(l, d);
+        hkdAddons += 50;
+      }
+      if (acc.indexOf('右圖') !== -1) {
+        rmbTotal += calcSideOrBottomRmb(l, d);
+        hkdAddons += 50;
+      }
+      if (acc.indexOf('底圖') !== -1) {
+        rmbTotal += calcSideOrBottomRmb(l, d);
+        hkdAddons += 50;
+      }
+      if (acc.indexOf('鏡面') !== -1) {
+        rmbTotal += calcSideOrBottomRmb(l, d);
+      }
+      if (acc.indexOf('白色刻字') !== -1) {
+        hkdAddons += 70;
+      }
+      if (acc.indexOf('彩色刻字') !== -1) {
+        hkdAddons += 90;
+      }
+
+      if (lightBoardCount > 0 || hasBackLight) {
+        rmbTotal += calcPowerRmb();
+      }
+
+      var unitAmount = (rmbTotal / RMB_DIVISOR) + hkdAddons + freight + profit;
+      var lineAmount = unitAmount * qty;
+      var amountInput = row.querySelector('.f-amt');
+      if (amountInput) amountInput.value = lineAmount.toFixed(2);
+      return lineAmount;
+    }
+
+    function bindRowEvents(row) {
+      row.querySelectorAll('input, select').forEach(function(el) {
+        if (el.classList.contains('f-amt')) return;
+        var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
+        el.addEventListener(evt, function() {
+          calcRowAmount(row);
+          recalcSubtotal();
+        });
+      });
+    }
+
     function addRow() {
       var tbody = document.getElementById('itemsBody');
       var first = tbody.querySelector('tr');
@@ -842,12 +984,18 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         } else if (el.tagName === 'SELECT') {
           el.selectedIndex = 0;
         } else if (el.type === 'number') {
-          el.value = el.classList.contains('f-qty') ? '1' : '';
+          if (el.classList.contains('f-qty')) {
+            el.value = '1';
+          } else {
+            el.value = '';
+          }
         } else {
           el.value = '';
         }
       });
       tbody.appendChild(clone);
+      bindRowEvents(clone);
+      recalcSubtotal();
     }
     function removeRow(btn) {
       var tbody = document.getElementById('itemsBody');
@@ -857,7 +1005,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     }
     function recalcSubtotal() {
       var sum = 0;
-      document.querySelectorAll('.f-amt').forEach(function(i) { sum += parseFloat(i.value) || 0; });
+      document.querySelectorAll('#itemsBody tr').forEach(function(row) {
+        sum += calcRowAmount(row);
+      });
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
     }
@@ -870,10 +1020,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     function collectItems() {
       var items = [];
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
-        var acc = [];
-        row.querySelectorAll('.f-acc-wrap input[type=checkbox]:checked').forEach(function(cb) {
-          acc.push(cb.value);
-        });
+        var acc = getAccessories(row);
         items.push({
           itemType: (row.querySelector('.f-type') || {}).value || '',
           forWhat: (row.querySelector('.f-for') || {}).value || '',
@@ -888,12 +1035,15 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           accessories: acc,
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
+          freight: (row.querySelector('.f-freight') || {}).value || '0',
+          profit: (row.querySelector('.f-profit') || {}).value || '0',
           amount: (row.querySelector('.f-amt') || {}).value || '0'
         });
       });
       return items;
     }
     document.addEventListener('DOMContentLoaded', function() {
+      document.querySelectorAll('#itemsBody tr').forEach(function(row) { bindRowEvents(row); });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
         e.preventDefault();
         var form = e.target;
@@ -922,8 +1072,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           })
           .catch(function(err) { alert('Error: ' + err.message); });
       });
+      recalcSubtotal();
     });
-    recalcSubtotal();
   </script>`;
 
   res.send(renderPage('Create Quote', content, extraHead));
@@ -955,6 +1105,8 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       accessories: Array.isArray(item.accessories) ? item.accessories.map((a: any) => String(a)) : [],
       description: String(item.description || ''),
       qty: parseInt(String(item.qty)) || 1,
+      freight: parseFloat(String(item.freight)) || 0,
+      profit: parseFloat(String(item.profit)) || 0,
       amount: parseFloat(String(item.amount)) || 0,
     }));
 
@@ -971,6 +1123,8 @@ app.post('/quote/create', async (req: Request, res: Response) => {
           item.levelHeights ? `層高 ${item.levelHeights}` : '',
           item.accessories ? `配件 ${Array.isArray(item.accessories) ? item.accessories.join(', ') : item.accessories}` : '',
           item.qty ? `QTY ${item.qty}` : '',
+          item.freight ? `運費 $${item.freight}` : '',
+          item.profit ? `利潤 $${item.profit}` : '',
           item.amount ? `$${item.amount}` : '',
         ].filter(Boolean);
         return parts.join(' | ');
