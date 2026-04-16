@@ -758,24 +758,35 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                     <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
                     <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
                     <td>
-                      <div class="f-acc-wrap" style="min-width:140px;max-height:120px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:4px;font-size:12px;">
-                        <label style="display:block;"><input type="checkbox" value="獨立燈板 - 上燈"> 獨立燈板 - 上燈</label>
-                        <label style="display:block;"><input type="checkbox" value="獨立燈板 - 下燈"> 獨立燈板 - 下燈</label>
-                        <label style="display:block;"><input type="checkbox" value="獨立燈板 - 上下燈"> 獨立燈板 - 上下燈</label>
-                        <label style="display:block;"><input type="checkbox" value="上下燈"> 上下燈</label>
-                        <label style="display:block;"><input type="checkbox" value="背燈"> 背燈</label>
-                        <label style="display:block;"><input type="checkbox" value="白色刻字"> 白色刻字</label>
-                        <label style="display:block;"><input type="checkbox" value="彩色刻字"> 彩色刻字</label>
-                        <label style="display:block;"><input type="checkbox" value="背景"> 背景</label>
-                        <label style="display:block;"><input type="checkbox" value="左圖"> 左圖</label>
-                        <label style="display:block;"><input type="checkbox" value="右圖"> 右圖</label>
-                        <label style="display:block;"><input type="checkbox" value="底圖"> 底圖</label>
-                        <label style="display:block;"><input type="checkbox" value="樓梯"> 樓梯</label>
-                        <label style="display:block;"><input type="checkbox" value="鏡面"> 鏡面</label>
-                        <label style="display:block;"><input type="checkbox" value="趟門"> 趟門</label>
-                        <label style="display:block;"><input type="checkbox" value="磁石門"> 磁石門</label>
-                        <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
-                        <label style="display:block;"><input type="checkbox" value="透明底板"> 透明底板</label>
+                      <div style="min-width:300px;max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;font-size:12px;background:#fff;">
+                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">單次配件</div>
+                        <div class="f-acc-wrap" style="margin-bottom:8px;">
+                          <label style="display:block;"><input type="checkbox" value="樓梯"> 樓梯</label>
+                          <label style="display:block;"><input type="checkbox" value="趟門"> 趟門</label>
+                          <label style="display:block;"><input type="checkbox" value="磁石門"> 磁石門</label>
+                          <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
+                          <label style="display:block;"><input type="checkbox" value="透明底板"> 透明底板</label>
+                        </div>
+                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">數量配件</div>
+                        <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
+                          <label>獨立燈板 - 上燈</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
+                          <label>獨立燈板 - 下燈</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
+                          <label>獨立燈板 - 上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
+                          <label>上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="上下燈" value="0" style="width:58px;">
+                          <label>背燈</label><input type="number" min="0" class="f-acc-qty" data-name="背燈" value="0" style="width:58px;">
+                          <label>前板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="前板白色刻字" value="0" style="width:58px;">
+                          <label>前板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="前板彩色刻字" value="0" style="width:58px;">
+                          <label>左板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="左板圖片" value="0" style="width:58px;">
+                          <label>右板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="右板圖片" value="0" style="width:58px;">
+                          <label>底板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="底板圖片" value="0" style="width:58px;">
+                          <label>頂板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="頂板圖片" value="0" style="width:58px;">
+                          <label>背板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="背板圖片" value="0" style="width:58px;">
+                          <label>左板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="左板鏡面" value="0" style="width:58px;">
+                          <label>右板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="右板鏡面" value="0" style="width:58px;">
+                          <label>底板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="底板鏡面" value="0" style="width:58px;">
+                          <label>頂板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="頂板鏡面" value="0" style="width:58px;">
+                          <label>背板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="背板鏡面" value="0" style="width:58px;">
+                        </div>
                       </div>
                     </td>
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
@@ -847,12 +858,6 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     }
 
     function getDims(row) {
-      var outerL = parseNum((row.querySelector('.f-ol') || {}).value);
-      var outerD = parseNum((row.querySelector('.f-od') || {}).value);
-      var outerH = parseNum((row.querySelector('.f-oh') || {}).value);
-      if (outerL > 0 && outerD > 0 && outerH > 0) {
-        return { l: outerL, d: outerD, h: outerH };
-      }
       return {
         l: parseNum((row.querySelector('.f-il') || {}).value),
         d: parseNum((row.querySelector('.f-id') || {}).value),
@@ -860,12 +865,31 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       };
     }
 
-    function getAccessories(row) {
+    function getSingleAccessories(row) {
       var acc = [];
       row.querySelectorAll('.f-acc-wrap input[type=checkbox]:checked').forEach(function(cb) {
         acc.push(cb.value);
       });
       return acc;
+    }
+
+    function getAccessoryQtyMap(row) {
+      var map = {};
+      row.querySelectorAll('.f-acc-qty').forEach(function(input) {
+        var name = input.getAttribute('data-name') || '';
+        var qty = Math.max(0, parseInt(input.value, 10) || 0);
+        if (name && qty > 0) map[name] = qty;
+      });
+      return map;
+    }
+
+    function getAccessories(row) {
+      var single = getSingleAccessories(row);
+      var qtyMap = getAccessoryQtyMap(row);
+      Object.keys(qtyMap).forEach(function(name) {
+        single.push(name + ' x' + qtyMap[name]);
+      });
+      return single;
     }
 
     function calcDisplayBoxRmb(l, d, h) {
@@ -881,16 +905,16 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       return ((l * h + h * 2 + l * 2) * 2 * 0.02) + l + h;
     }
 
-    function calcBackgroundRmb(l, h) {
+    function calcBackPanelRmb(l, h) {
       return l * h * 0.025;
     }
 
-    function calcSideOrBottomRmb(l, d) {
+    function calcLdPanelRmb(l, d) {
       return l * d * 0.025;
     }
 
     function calcPowerRmb() {
-      return 15;
+      return 30;
     }
 
     function calcRowAmount(row) {
@@ -899,64 +923,68 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
       var freight = parseNum((row.querySelector('.f-freight') || {}).value);
       var profit = parseNum((row.querySelector('.f-profit') || {}).value);
-      var acc = getAccessories(row);
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+      var qtyMap = getAccessoryQtyMap(row);
 
       if (!(l > 0 && d > 0 && h > 0)) {
         (row.querySelector('.f-amt') || {}).value = '';
         return 0;
       }
 
-      var rmbTotal = calcDisplayBoxRmb(l, d, h);
+      var baseRmb = calcDisplayBoxRmb(l, d, h);
+      var sizeRmb = itemType.indexOf('Display Case') !== -1 ? (baseRmb * levels) : baseRmb;
+      var accessoryRmb = 0;
       var hkdAddons = 0;
 
-      var hasTop = acc.indexOf('獨立燈板 - 上燈') !== -1;
-      var hasBottom = acc.indexOf('獨立燈板 - 下燈') !== -1;
-      var hasTopBottomSingle = acc.indexOf('獨立燈板 - 上下燈') !== -1 || acc.indexOf('上下燈') !== -1;
-      var lightBoardCount = (hasTop ? 1 : 0) + (hasBottom ? 1 : 0) + (hasTopBottomSingle ? 2 : 0);
+      var lightBoardCount = 0;
+      lightBoardCount += (qtyMap['獨立燈板 - 上燈'] || 0);
+      lightBoardCount += (qtyMap['獨立燈板 - 下燈'] || 0);
+      lightBoardCount += ((qtyMap['獨立燈板 - 上下燈'] || 0) * 2);
+      lightBoardCount += ((qtyMap['上下燈'] || 0) * 2);
       if (lightBoardCount > 0) {
-        rmbTotal += calcLightBoardRmb(l, d) * lightBoardCount;
+        accessoryRmb += calcLightBoardRmb(l, d) * lightBoardCount;
       }
 
-      var hasBackLight = acc.indexOf('背燈') !== -1;
-      if (hasBackLight) {
-        rmbTotal += calcBackLightRmb(l, h);
-        if (acc.indexOf('背景') === -1) {
-          rmbTotal += calcBackgroundRmb(l, h);
-          hkdAddons += 100;
+      var backLightCount = qtyMap['背燈'] || 0;
+      if (backLightCount > 0) {
+        accessoryRmb += calcBackLightRmb(l, h) * backLightCount;
+      }
+
+      var backImageCount = qtyMap['背板圖片'] || 0;
+      if (backImageCount > 0) {
+        accessoryRmb += calcBackPanelRmb(l, h) * backImageCount;
+        hkdAddons += 50 * backImageCount;
+      }
+
+      ['左板圖片','右板圖片','底板圖片','頂板圖片'].forEach(function(name) {
+        var c = qtyMap[name] || 0;
+        if (c > 0) {
+          accessoryRmb += calcLdPanelRmb(l, d) * c;
+          hkdAddons += 50 * c;
         }
+      });
+
+      ['左板鏡面','右板鏡面','底板鏡面','頂板鏡面'].forEach(function(name) {
+        var c = qtyMap[name] || 0;
+        if (c > 0) {
+          accessoryRmb += calcLdPanelRmb(l, d) * c;
+        }
+      });
+
+      var backMirrorCount = qtyMap['背板鏡面'] || 0;
+      if (backMirrorCount > 0) {
+        accessoryRmb += calcBackPanelRmb(l, h) * backMirrorCount;
       }
 
-      if (acc.indexOf('背景') !== -1) {
-        rmbTotal += calcBackgroundRmb(l, h);
-        hkdAddons += 100;
-      }
-      if (acc.indexOf('左圖') !== -1) {
-        rmbTotal += calcSideOrBottomRmb(l, d);
-        hkdAddons += 50;
-      }
-      if (acc.indexOf('右圖') !== -1) {
-        rmbTotal += calcSideOrBottomRmb(l, d);
-        hkdAddons += 50;
-      }
-      if (acc.indexOf('底圖') !== -1) {
-        rmbTotal += calcSideOrBottomRmb(l, d);
-        hkdAddons += 50;
-      }
-      if (acc.indexOf('鏡面') !== -1) {
-        rmbTotal += calcSideOrBottomRmb(l, d);
-      }
-      if (acc.indexOf('白色刻字') !== -1) {
-        hkdAddons += 70;
-      }
-      if (acc.indexOf('彩色刻字') !== -1) {
-        hkdAddons += 90;
+      hkdAddons += (qtyMap['前板白色刻字'] || 0) * 70;
+      hkdAddons += (qtyMap['前板彩色刻字'] || 0) * 90;
+
+      if (lightBoardCount > 0 || backLightCount > 0) {
+        accessoryRmb += calcPowerRmb();
       }
 
-      if (lightBoardCount > 0 || hasBackLight) {
-        rmbTotal += calcPowerRmb();
-      }
-
-      var unitAmount = (rmbTotal / RMB_DIVISOR) + hkdAddons + freight + profit;
+      var unitAmount = ((sizeRmb + accessoryRmb) / RMB_DIVISOR) + hkdAddons + freight + profit;
       var lineAmount = unitAmount * qty;
       var amountInput = row.querySelector('.f-amt');
       if (amountInput) amountInput.value = lineAmount.toFixed(2);
@@ -986,6 +1014,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         } else if (el.type === 'number') {
           if (el.classList.contains('f-qty')) {
             el.value = '1';
+          } else if (el.classList.contains('f-acc-qty')) {
+            el.value = '0';
           } else {
             el.value = '';
           }
@@ -1033,6 +1063,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           noOfLevels: (row.querySelector('.f-lv') || {}).value || '',
           levelHeights: (row.querySelector('.f-lh') || {}).value || '',
           accessories: acc,
+          accessoryQty: getAccessoryQtyMap(row),
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
           freight: (row.querySelector('.f-freight') || {}).value || '0',
@@ -1103,6 +1134,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       noOfLevels: item.noOfLevels ? parseInt(String(item.noOfLevels)) : null,
       levelHeights: String(item.levelHeights || ''),
       accessories: Array.isArray(item.accessories) ? item.accessories.map((a: any) => String(a)) : [],
+      accessoryQty: (item.accessoryQty && typeof item.accessoryQty === 'object') ? item.accessoryQty : {},
       description: String(item.description || ''),
       qty: parseInt(String(item.qty)) || 1,
       freight: parseFloat(String(item.freight)) || 0,
@@ -1598,9 +1630,10 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     if (items.length > 0) {
       const orderItemsPayload = items.map((item: any) => {
         // Accessories: Airtable Multiple Select requires an array of strings
-        const accArray: string[] = Array.isArray(item.accessories)
+        const rawAccArray: string[] = Array.isArray(item.accessories)
           ? item.accessories.filter(Boolean)
           : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+        const accArray: string[] = Array.from(new Set(rawAccArray.map((s: string) => s.replace(/\s*x\d+$/i, '').trim()).filter(Boolean)));
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
         const fields: FieldSet = {
