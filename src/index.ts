@@ -752,9 +752,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                     <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-ih" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-ol" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-od" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-oh" step="0.1" style="width:60px"></td>
+                    <td><input type="number" class="f-ol" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
+                    <td><input type="number" class="f-od" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
+                    <td><input type="number" class="f-oh" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
                     <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
                     <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
                     <td>
@@ -917,6 +917,59 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       return 30;
     }
 
+    function getOuterDimensionIncrease(row) {
+      var qtyMap = getAccessoryQtyMap(row);
+      var hasTopStandard = (qtyMap['上下燈'] || 0) > 0;
+      var hasTopSingleStandard = false;
+      var hasTopIndependentSingle = (qtyMap['獨立燈板 - 上燈'] || 0) > 0 || (qtyMap['獨立燈板 - 下燈'] || 0) > 0;
+      var hasTopIndependentDouble = (qtyMap['獨立燈板 - 上下燈'] || 0) > 0;
+      var hasBack = (qtyMap['背燈'] || 0) > 0;
+
+      var topLikeCount = 0;
+      if (hasTopStandard) topLikeCount += 1;
+      if (hasTopSingleStandard) topLikeCount += 1;
+      if (hasTopIndependentSingle) topLikeCount += 1;
+      if (hasTopIndependentDouble) topLikeCount += 1;
+
+      var outerLengthIncrease = 2;
+      var outerDepthIncrease = hasBack ? 3.5 : 2;
+      var outerHeightIncrease = 1;
+
+      if (hasTopIndependentDouble) {
+        outerHeightIncrease = 6;
+      } else if (hasTopStandard) {
+        outerHeightIncrease = 5;
+      } else if (hasTopIndependentSingle || hasTopSingleStandard) {
+        outerHeightIncrease = 3.5;
+      }
+
+      return {
+        outerLengthIncrease: outerLengthIncrease,
+        outerDepthIncrease: outerDepthIncrease,
+        outerHeightIncrease: outerHeightIncrease
+      };
+    }
+
+    function updateOuterDimensions(row) {
+      var dims = getDims(row);
+      var l = dims.l, d = dims.d, h = dims.h;
+      var outerLInput = row.querySelector('.f-ol');
+      var outerDInput = row.querySelector('.f-od');
+      var outerHInput = row.querySelector('.f-oh');
+
+      if (!(l > 0 && d > 0 && h > 0)) {
+        if (outerLInput) outerLInput.value = '';
+        if (outerDInput) outerDInput.value = '';
+        if (outerHInput) outerHInput.value = '';
+        return;
+      }
+
+      var inc = getOuterDimensionIncrease(row);
+      if (outerLInput) outerLInput.value = (l + inc.outerLengthIncrease).toFixed(1);
+      if (outerDInput) outerDInput.value = (d + inc.outerDepthIncrease).toFixed(1);
+      if (outerHInput) outerHInput.value = (h + inc.outerHeightIncrease).toFixed(1);
+    }
+
     function calcRowAmount(row) {
       var dims = getDims(row);
       var l = dims.l, d = dims.d, h = dims.h;
@@ -996,6 +1049,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         if (el.classList.contains('f-amt')) return;
         var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
+          updateOuterDimensions(row);
           calcRowAmount(row);
           recalcSubtotal();
         });
@@ -1025,6 +1079,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       });
       tbody.appendChild(clone);
       bindRowEvents(clone);
+      updateOuterDimensions(clone);
       recalcSubtotal();
     }
     function removeRow(btn) {
@@ -1074,7 +1129,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       return items;
     }
     document.addEventListener('DOMContentLoaded', function() {
-      document.querySelectorAll('#itemsBody tr').forEach(function(row) { bindRowEvents(row); });
+      document.querySelectorAll('#itemsBody tr').forEach(function(row) {
+        bindRowEvents(row);
+        updateOuterDimensions(row);
+      });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
         e.preventDefault();
         var form = e.target;
