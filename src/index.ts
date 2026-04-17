@@ -1494,6 +1494,17 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
       <div class="doc-card">
         ${docHeader('填寫資料', '請填寫以下資料以便後續安排')}
         <div class="doc-body">
+          <div class="info-grid info-grid-2" style="margin-bottom:16px;">
+            <div class="info-block">
+              <div class="lbl">製作及發貨安排</div>
+              <div class="val-sm">由於訂單數量持續增加，<br>一般需約 <strong>45 個工作天內發貨</strong> ☺️<br><br>如遇長假期，<br>需再加約 <strong>10–15 個工作天</strong> 🙏🏻<br><br>如完成製作，我哋會盡快安排發貨。<br><br>❗️<strong>不接急單</strong>❗️</div>
+            </div>
+            <div class="info-block">
+              <div class="lbl">安裝須知</div>
+              <div class="val-sm">每個展示盒及樓梯均需自行安裝，<br>安裝方式簡單易明，一般情況下 <strong>不需要使用大力</strong>，亦 <strong>不需要使用膠水</strong>，之後如有需要亦可自行拆卸☺️<br><br>🌟 如選用 <strong>開門式設計</strong>，則需要使用膠水固定。<br><br>送貨時亦會附上 <strong>電子版安裝說明書</strong> 😎<br><br>使用 <strong>LKS 車隊送貨</strong>，可享 <strong>三天內包補板</strong> 安排。<br>🌟 <strong>人為損壞除外</strong> 🌟</div>
+            </div>
+          </div>
+
           <div class="alert alert-info">
             您正在確認 <strong>報價單 ${qNum}</strong> 的訂單。
             請填寫以下資料以便後續安排。
@@ -1537,7 +1548,6 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
             </div>
 
             <div style="margin-top:20px;text-align:right;">
-              <a href="/quote/${token}" class="btn btn-outline" style="margin-right:10px;">← Back to Quote</a>
               <button type="submit" class="btn btn-primary" style="font-size:15px;padding:12px 28px;">Submit &amp; Confirm Order</button>
             </div>
           </form>
