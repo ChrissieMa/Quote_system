@@ -950,7 +950,24 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       };
     }
 
+    function updateOuterDimensionMode(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
+      ['.f-ol', '.f-od', '.f-oh'].forEach(function(selector) {
+        var input = row.querySelector(selector);
+        if (!input) return;
+        input.readOnly = !isDisplayCase;
+        input.style.background = isDisplayCase ? '#fff' : '#f9fafb';
+      });
+      return isDisplayCase;
+    }
+
     function updateOuterDimensions(row) {
+      var isDisplayCase = updateOuterDimensionMode(row);
+      if (isDisplayCase) {
+        return;
+      }
+
       var dims = getDims(row);
       var l = dims.l, d = dims.d, h = dims.h;
       var outerLInput = row.querySelector('.f-ol');
@@ -1079,6 +1096,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       });
       tbody.appendChild(clone);
       bindRowEvents(clone);
+      updateOuterDimensionMode(clone);
       updateOuterDimensions(clone);
       recalcSubtotal();
     }
