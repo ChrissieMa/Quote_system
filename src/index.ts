@@ -138,6 +138,17 @@ const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 
+const normalizePhone = (value: unknown): string =>
+  String(value ?? '').replace(/\D/g, '').replace(/^852(?=\d{8}$)/, '');
+
+const findCustomerByPhone = async (phone: unknown) => {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+
+  const records = await tableCustomers.select({ fields: ['Phone'] }).all();
+  return records.find(record => normalizePhone(record.fields['Phone']) === normalized) || null;
+};
+
 const escapeHtml = (unsafe: unknown): string =>
   String(unsafe ?? '')
     .replace(/&/g, '&amp;')
@@ -1601,29 +1612,22 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
     };
     const howKnowUsValue = howKnowUsMapping[howDidYouKnowUs] || undefined;
 
-    // Also upsert customer master for easier conversion later
-    const existingByPhone = await tableCustomers.select({ filterByFormula: `{Phone} = '${customerPhone}'` }).firstPage();
-    if (existingByPhone.length > 0) {
-      await tableCustomers.update([{
-        id: existingByPhone[0].id,
-        fields: {
-          'Customer Name': customerName,
-          'Phone': customerPhone,
-          'Email': customerEmail,
-          'Address': chineseDeliveryAddress,
-          ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
-        } as FieldSet
-      }]);
+    // Upsert customer master using a normalized phone comparison.
+    // This treats 68983722, 6898 3722 and +852 6898 3722 as the same customer.
+    const normalizedCustomerPhone = normalizePhone(customerPhone);
+    const existingCustomer = await findCustomerByPhone(normalizedCustomerPhone);
+    const customerFields: FieldSet = {
+      'Customer Name': customerName,
+      'Phone': normalizedCustomerPhone || customerPhone,
+      'Email': customerEmail,
+      'Address': chineseDeliveryAddress,
+      ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
+    };
+
+    if (existingCustomer) {
+      await tableCustomers.update([{ id: existingCustomer.id, fields: customerFields }]);
     } else {
-      await tableCustomers.create([{
-        fields: {
-          'Customer Name': customerName,
-          'Phone': customerPhone,
-          'Email': customerEmail,
-          'Address': chineseDeliveryAddress,
-          ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
-        } as FieldSet
-      }]);
+      await tableCustomers.create([{ fields: customerFields }]);
     }
 
     res.send(renderPage('已收到資料', `
@@ -1670,18 +1674,26 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Quote has no customer phone number. Please ask customer to fill in the form first.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
-    // A. Customers — look up by submitted phone from Customers table
+    // A. Customers — use submitted details first and compare normalized phone numbers.
     let customerRecordId: string;
-    const existingCustomers = await tableCustomers.select({ filterByFormula: `{Phone} = '${quotePhone}'` }).firstPage();
+    const normalizedLookupPhone = normalizePhone(lookupPhone);
+    const customerName = (qf['Customer Name'] as string) || (qf['Contact Name'] as string) || '';
+    const customerEmail = (qf['Customer Email'] as string) || '';
+    const customerAddress = (qf['Chinese Delivery Address'] as string) || '';
+    const existingCustomer = await findCustomerByPhone(normalizedLookupPhone);
 
-    if (existingCustomers.length > 0) {
-      customerRecordId = existingCustomers[0].id;
+    const customerFields: FieldSet = {
+      'Customer Name': customerName,
+      'Phone': normalizedLookupPhone || lookupPhone,
+      ...(customerEmail ? { 'Email': customerEmail } : {}),
+      ...(customerAddress ? { 'Address': customerAddress } : {}),
+    };
+
+    if (existingCustomer) {
+      customerRecordId = existingCustomer.id;
+      await tableCustomers.update([{ id: customerRecordId, fields: customerFields }]);
     } else {
-      // Customer not found — create a minimal record using Contact Name from Quote
-      const contactName = (qf['Contact Name'] as string) || '';
-      const newCustomer = await tableCustomers.create([{
-        fields: { 'Customer Name': contactName, 'Phone': quotePhone } as FieldSet
-      }]);
+      const newCustomer = await tableCustomers.create([{ fields: customerFields }]);
       customerRecordId = newCustomer[0].id;
     }
 
@@ -1723,7 +1735,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
         const fields: FieldSet = {
-          'Order Link': [orderRecordId],
+          'Order': [orderRecordId],
           'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
