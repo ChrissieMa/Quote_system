@@ -162,7 +162,65 @@ const findCustomerByPhone = async (phone: unknown) => {
   if (!normalized) return null;
 
   const customers = await tableCustomers.select({ fields: ['Phone'] }).all();
-  return customers.find(customer => normalizePhone(customer.fields['Phone']) === normalized) || null;
+  return customers.find((customer: any) => normalizePhone(customer.fields['Phone']) === normalized) || null;
+};
+
+const getLinkedRecordId = (value: unknown): string | null => {
+  if (!Array.isArray(value) || value.length === 0) return null;
+  const first = value[0] as any;
+  if (typeof first === 'string') return first;
+  if (first && typeof first.id === 'string') return first.id;
+  return null;
+};
+
+const getCustomerText = (fields: FieldSet, fieldName: string): string =>
+  String(fields[fieldName] ?? '').trim();
+
+const buildCustomerSearchDisplay = (fields: FieldSet): string => {
+  const customerId = getCustomerText(fields, 'Customer ID') || getCustomerText(fields, 'Customer Display');
+  const name = getCustomerText(fields, 'Customer Name');
+  const phone = getCustomerText(fields, 'Phone');
+  return [customerId, name, phone].filter(Boolean).join(' | ');
+};
+
+const searchCustomers = async (query: unknown) => {
+  const q = String(query ?? '').trim().toLowerCase();
+  const normalizedQ = normalizePhone(q);
+  if (!q && !normalizedQ) return [];
+
+  const records = await tableCustomers.select({
+    fields: ['Customer Display', 'Customer ID', 'Customer Name', 'Phone', 'Email', 'Address']
+  }).all();
+
+  return records
+    .filter((record: any) => {
+      const f = record.fields;
+      const textFields = [
+        getCustomerText(f, 'Customer Display'),
+        getCustomerText(f, 'Customer ID'),
+        getCustomerText(f, 'Customer Name'),
+        getCustomerText(f, 'Phone'),
+        getCustomerText(f, 'Email'),
+        getCustomerText(f, 'Address'),
+      ].map(v => v.toLowerCase());
+
+      const textMatch = textFields.some(v => v.includes(q));
+      const phoneMatch = normalizedQ.length >= 4 && normalizePhone(getCustomerText(f, 'Phone')).includes(normalizedQ);
+      return textMatch || phoneMatch;
+    })
+    .slice(0, 10)
+    .map((record: any) => {
+      const f = record.fields;
+      return {
+        id: record.id,
+        display: buildCustomerSearchDisplay(f),
+        customerId: getCustomerText(f, 'Customer ID'),
+        name: getCustomerText(f, 'Customer Name'),
+        phone: getCustomerText(f, 'Phone'),
+        email: getCustomerText(f, 'Email'),
+        address: getCustomerText(f, 'Address'),
+      };
+    });
 };
 
 const getNextNumber = async (
@@ -528,6 +586,21 @@ const statusBadgeClass = (status: string): string => {
   return map[status] || 'badge-draft';
 };
 
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: GET /api/customers/search  — Search existing customers for Create Quote
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/customers/search', async (req: Request, res: Response) => {
+  try {
+    const q = (req.query.q as string) || '';
+    const customers = await searchCustomers(q);
+    res.json({ customers });
+  } catch (error: any) {
+    console.error(error);
+    res.status(500).json({ error: error.message || 'Customer search failed' });
+  }
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quotes  — Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
@@ -718,6 +791,24 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       ${docHeader('建立報價單', 'Create Quote')}
       <div class="doc-body">
         <form id="quoteForm">
+
+          <div class="section">
+            <div class="section-title">Existing Customer 客戶搜尋</div>
+            <input type="hidden" name="customerRecordId" id="customerRecordId">
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Search Customer ID / Name / Phone / Email</label>
+                <input type="text" id="customerSearchInput" placeholder="例如：L0759 / 91945953 / +852 9194 5953 / 客人名">
+              </div>
+              <div class="form-group" style="display:flex;align-items:flex-end;gap:8px;">
+                <button type="button" class="btn btn-secondary" onclick="searchExistingCustomers()">Search Customer</button>
+                <button type="button" class="btn btn-outline" onclick="clearSelectedCustomer()">Clear</button>
+              </div>
+            </div>
+            <div id="customerSearchResults" style="display:none;border:1px solid #e5e7eb;border-radius:6px;background:#fff;margin-top:8px;overflow:hidden;"></div>
+            <div id="selectedCustomerBox" style="display:none;margin-top:10px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;font-size:13px;color:#065f46;"></div>
+            <div style="font-size:12px;color:#6b7280;margin-top:6px;">如屬舊客，先搜尋並選擇客戶；選擇後會自動帶入姓名、電話、Email 及地址，並將 Quote 連結到 Customers。</div>
+          </div>
 
           <div class="section">
             <div class="section-title">Contact Information</div>
@@ -1174,6 +1265,82 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       });
       return items;
     }
+
+    var selectedCustomer = null;
+
+    function renderCustomerResults(customers) {
+      var box = document.getElementById('customerSearchResults');
+      if (!box) return;
+      if (!customers || customers.length === 0) {
+        box.style.display = 'block';
+        box.innerHTML = '<div style="padding:10px 12px;color:#6b7280;font-size:13px;">沒有找到客戶。可直接建立新客 Quote。</div>';
+        return;
+      }
+      box.style.display = 'block';
+      box.innerHTML = customers.map(function(c) {
+        var safe = function(v) { return String(v || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+        return '<button type="button" class="customer-result-row" data-id="' + safe(c.id) + '" style="display:block;width:100%;text-align:left;padding:10px 12px;border:0;border-bottom:1px solid #f3f4f6;background:#fff;cursor:pointer;">'
+          + '<div style="font-weight:700;color:#111827;">' + safe(c.display || c.name || c.phone || c.id) + '</div>'
+          + '<div style="font-size:12px;color:#6b7280;">' + safe([c.email, c.address].filter(Boolean).join(' · ')) + '</div>'
+          + '</button>';
+      }).join('');
+
+      box.querySelectorAll('.customer-result-row').forEach(function(btn, idx) {
+        btn.addEventListener('click', function() {
+          selectExistingCustomer(customers[idx]);
+        });
+      });
+    }
+
+    function searchExistingCustomers() {
+      var input = document.getElementById('customerSearchInput');
+      var q = input ? input.value.trim() : '';
+      if (!q) {
+        alert('請先輸入 Customer ID、姓名、電話或 Email。');
+        return;
+      }
+      fetch('/api/customers/search?q=' + encodeURIComponent(q))
+        .then(function(res) { return res.json(); })
+        .then(function(data) { renderCustomerResults(data.customers || []); })
+        .catch(function(err) { alert('Customer search error: ' + err.message); });
+    }
+
+    function selectExistingCustomer(customer) {
+      selectedCustomer = customer;
+      var idInput = document.getElementById('customerRecordId');
+      if (idInput) idInput.value = customer.id || '';
+
+      var form = document.getElementById('quoteForm');
+      if (form) {
+        if (customer.name) form.querySelector('[name=contactName]').value = customer.name;
+        if (customer.phone) form.querySelector('[name=phone]').value = customer.phone;
+      }
+
+      var results = document.getElementById('customerSearchResults');
+      if (results) results.style.display = 'none';
+      var selectedBox = document.getElementById('selectedCustomerBox');
+      if (selectedBox) {
+        selectedBox.style.display = 'block';
+        selectedBox.innerHTML = '<strong>已選擇客戶：</strong>'
+          + [customer.customerId, customer.name, customer.phone].filter(Boolean).join(' | ')
+          + (customer.email ? '<br>Email：' + customer.email : '')
+          + (customer.address ? '<br>Address：' + customer.address : '');
+      }
+    }
+
+    function clearSelectedCustomer() {
+      selectedCustomer = null;
+      var idInput = document.getElementById('customerRecordId');
+      if (idInput) idInput.value = '';
+      var results = document.getElementById('customerSearchResults');
+      if (results) results.style.display = 'none';
+      var selectedBox = document.getElementById('selectedCustomerBox');
+      if (selectedBox) {
+        selectedBox.style.display = 'none';
+        selectedBox.innerHTML = '';
+      }
+    }
+
     document.addEventListener('DOMContentLoaded', function() {
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
         bindRowEvents(row);
@@ -1183,6 +1350,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         e.preventDefault();
         var form = e.target;
         var payload = {
+          customerRecordId: (document.getElementById('customerRecordId') || {}).value || '',
           contactName: form.querySelector('[name=contactName]').value,
           phone: form.querySelector('[name=phone]').value,
           contactMethod: form.querySelector('[name=contactMethod]').value,
@@ -1274,8 +1442,24 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     const publicToken = generateToken();
     const quoteDate = new Date().toISOString().split('T')[0];
 
-    await tableQuotes.create([{
-      fields: {
+    let selectedCustomerId = String(b.customerRecordId || '').trim();
+    let selectedCustomerFields: FieldSet | null = null;
+    if (selectedCustomerId) {
+      try {
+        const selectedCustomerRecord = await tableCustomers.find(selectedCustomerId);
+        selectedCustomerFields = selectedCustomerRecord.fields;
+      } catch {
+        selectedCustomerId = '';
+        selectedCustomerFields = null;
+      }
+    }
+
+    const quoteCustomerName = selectedCustomerFields ? getCustomerText(selectedCustomerFields, 'Customer Name') : '';
+    const quoteCustomerPhone = selectedCustomerFields ? getCustomerText(selectedCustomerFields, 'Phone') : '';
+    const quoteCustomerEmail = selectedCustomerFields ? getCustomerText(selectedCustomerFields, 'Email') : '';
+    const quoteCustomerAddress = selectedCustomerFields ? getCustomerText(selectedCustomerFields, 'Address') : '';
+
+    const quoteFields: FieldSet = {
         'Quote Number': quoteNumber,
         'Quote Date': quoteDate,
         'Public Token': publicToken,
@@ -1293,8 +1477,16 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Terms and Conditions': b.terms || '',
         'Created At': new Date().toISOString(),
         'Status': 'Draft',
-      }
-    }]);
+        ...(selectedCustomerId ? {
+          'Customer': [selectedCustomerId],
+          'Customer Name': quoteCustomerName || b.contactName,
+          'Customer Phone': quoteCustomerPhone || b.phone,
+          'Customer Email': quoteCustomerEmail,
+          'Chinese Delivery Address': quoteCustomerAddress,
+        } : {}),
+      };
+
+    await tableQuotes.create([{ fields: quoteFields }]);
 
     const publicLink = `${PUBLIC_BASE_URL}/quote/${publicToken}`;
     const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${publicToken}/customer-info`;
@@ -1629,10 +1821,16 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
     };
     const howKnowUsValue = howKnowUsMapping[howDidYouKnowUs] || undefined;
 
-    // Upsert customer master using normalized phone matching.
-    // This prevents the same customer being duplicated because of spaces or +852.
-    const existingCustomer = await findCustomerByPhone(customerPhone);
+    // Upsert customer master. If the Quote is already linked to a Customer,
+    // update that exact Customer first. Otherwise use normalized phone matching.
+    const linkedCustomerId = getLinkedRecordId(record.fields['Customer']);
+    const existingCustomer = linkedCustomerId
+      ? await tableCustomers.find(linkedCustomerId)
+      : await findCustomerByPhone(customerPhone);
+
+    let customerRecordId = '';
     if (existingCustomer) {
+      customerRecordId = existingCustomer.id;
       await tableCustomers.update([{
         id: existingCustomer.id,
         fields: {
@@ -1644,7 +1842,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
         } as FieldSet
       }]);
     } else {
-      await tableCustomers.create([{
+      const newCustomer = await tableCustomers.create([{
         fields: {
           'Customer Name': customerName,
           'Phone': customerPhone,
@@ -1653,7 +1851,15 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
           ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
         } as FieldSet
       }]);
+      customerRecordId = newCustomer[0].id;
     }
+
+    await tableQuotes.update([{
+      id: record.id,
+      fields: {
+        'Customer': [customerRecordId],
+      } as FieldSet
+    }]);
 
     res.send(renderPage('已收到資料', `
       <div class="doc-card">
@@ -1699,12 +1905,24 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Quote has no customer phone number. Please ask customer to fill in the form first.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
-    // A. Customers — use normalized phone matching and prefer submitted customer details.
+    // A. Customers — use linked Customer first, then normalized phone matching.
     let customerRecordId: string;
     const submittedName = (qf['Customer Name'] as string) || (qf['Contact Name'] as string) || '';
     const submittedEmail = (qf['Customer Email'] as string) || '';
     const submittedAddress = (qf['Chinese Delivery Address'] as string) || '';
-    const existingCustomer = await findCustomerByPhone(lookupPhone);
+    const linkedCustomerId = getLinkedRecordId(qf['Customer']);
+
+    let existingCustomer: any = null;
+    if (linkedCustomerId) {
+      try {
+        existingCustomer = await tableCustomers.find(linkedCustomerId);
+      } catch {
+        existingCustomer = null;
+      }
+    }
+    if (!existingCustomer) {
+      existingCustomer = await findCustomerByPhone(lookupPhone);
+    }
 
     if (existingCustomer) {
       customerRecordId = existingCustomer.id;
@@ -1795,6 +2013,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         'Converted Order No': internalOrderNo,
         'Converted Invoice No': invoiceNumber,
         'Order Ref': orderRecordId,
+        'Customer': [customerRecordId],
         'Converted At': new Date().toISOString(),
         'Invoice Public Token': invoicePublicToken,
         'Status': 'Mark as Paid',
