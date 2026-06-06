@@ -1767,7 +1767,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
         const fields: FieldSet = {
-          'Order Link': [orderRecordId],
+          'Order': [orderRecordId],
           'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
