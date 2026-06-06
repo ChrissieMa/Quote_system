@@ -138,17 +138,6 @@ const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 
-const normalizePhone = (value: unknown): string =>
-  String(value ?? '').replace(/\D/g, '').replace(/^852(?=\d{8}$)/, '');
-
-const findCustomerByPhone = async (phone: unknown) => {
-  const normalized = normalizePhone(phone);
-  if (!normalized) return null;
-
-  const records = await tableCustomers.select({ fields: ['Phone'] }).all();
-  return records.find(record => normalizePhone(record.fields['Phone']) === normalized) || null;
-};
-
 const escapeHtml = (unsafe: unknown): string =>
   String(unsafe ?? '')
     .replace(/&/g, '&amp;')
@@ -159,6 +148,22 @@ const escapeHtml = (unsafe: unknown): string =>
 
 const nl2br = (str: unknown): string =>
   escapeHtml(str).replace(/\n/g, '<br>');
+
+// Normalize Hong Kong phone numbers so formats such as
+// 68983722, 6898 3722 and +852 6898 3722 are treated as the same number.
+const normalizePhone = (value: unknown): string => {
+  let digits = String(value ?? '').replace(/\D/g, '');
+  if (digits.length === 11 && digits.startsWith('852')) digits = digits.slice(3);
+  return digits;
+};
+
+const findCustomerByPhone = async (phone: unknown) => {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+
+  const customers = await tableCustomers.select({ fields: ['Phone'] }).all();
+  return customers.find(customer => normalizePhone(customer.fields['Phone']) === normalized) || null;
+};
 
 const getNextNumber = async (
   table: Airtable.Table<FieldSet>,
@@ -550,12 +555,24 @@ app.get('/quotes', async (req: Request, res: Response) => {
 
     // Search filter
     if (search) {
+      const normalizedSearchPhone = normalizePhone(search);
       records = records.filter(r => {
         const qn = ((r.fields['Quote Number'] as string) || '').toLowerCase();
-        const cn = ((r.fields['Customer Name'] as string) || '').toLowerCase();
-        const ph = ((r.fields['Customer Phone'] as string) || '').toLowerCase();
-        const contact = ((r.fields['Contact Name'] as string) || '').toLowerCase();
-        return qn.includes(search) || cn.includes(search) || ph.includes(search) || contact.includes(search);
+        const customerName = ((r.fields['Customer Name'] as string) || '').toLowerCase();
+        const customerEmail = ((r.fields['Customer Email'] as string) || '').toLowerCase();
+        const customerPhone = (r.fields['Customer Phone'] as string) || '';
+        const contactName = ((r.fields['Contact Name'] as string) || '').toLowerCase();
+        const quotePhone = (r.fields['Phone'] as string) || '';
+
+        const textMatch = [qn, customerName, customerEmail, contactName, customerPhone.toLowerCase(), quotePhone.toLowerCase()]
+          .some(value => value.includes(search));
+
+        const phoneMatch = normalizedSearchPhone.length >= 4
+          && [customerPhone, quotePhone]
+            .map(normalizePhone)
+            .some(value => value.includes(normalizedSearchPhone));
+
+        return textMatch || phoneMatch;
       });
     }
 
@@ -1612,22 +1629,30 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
     };
     const howKnowUsValue = howKnowUsMapping[howDidYouKnowUs] || undefined;
 
-    // Upsert customer master using a normalized phone comparison.
-    // This treats 68983722, 6898 3722 and +852 6898 3722 as the same customer.
-    const normalizedCustomerPhone = normalizePhone(customerPhone);
-    const existingCustomer = await findCustomerByPhone(normalizedCustomerPhone);
-    const customerFields: FieldSet = {
-      'Customer Name': customerName,
-      'Phone': normalizedCustomerPhone || customerPhone,
-      'Email': customerEmail,
-      'Address': chineseDeliveryAddress,
-      ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
-    };
-
+    // Upsert customer master using normalized phone matching.
+    // This prevents the same customer being duplicated because of spaces or +852.
+    const existingCustomer = await findCustomerByPhone(customerPhone);
     if (existingCustomer) {
-      await tableCustomers.update([{ id: existingCustomer.id, fields: customerFields }]);
+      await tableCustomers.update([{
+        id: existingCustomer.id,
+        fields: {
+          'Customer Name': customerName,
+          'Phone': customerPhone,
+          'Email': customerEmail,
+          'Address': chineseDeliveryAddress,
+          ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
+        } as FieldSet
+      }]);
     } else {
-      await tableCustomers.create([{ fields: customerFields }]);
+      await tableCustomers.create([{
+        fields: {
+          'Customer Name': customerName,
+          'Phone': customerPhone,
+          'Email': customerEmail,
+          'Address': chineseDeliveryAddress,
+          ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
+        } as FieldSet
+      }]);
     }
 
     res.send(renderPage('已收到資料', `
@@ -1674,26 +1699,33 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Quote has no customer phone number. Please ask customer to fill in the form first.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
     }
 
-    // A. Customers — use submitted details first and compare normalized phone numbers.
+    // A. Customers — use normalized phone matching and prefer submitted customer details.
     let customerRecordId: string;
-    const normalizedLookupPhone = normalizePhone(lookupPhone);
-    const customerName = (qf['Customer Name'] as string) || (qf['Contact Name'] as string) || '';
-    const customerEmail = (qf['Customer Email'] as string) || '';
-    const customerAddress = (qf['Chinese Delivery Address'] as string) || '';
-    const existingCustomer = await findCustomerByPhone(normalizedLookupPhone);
-
-    const customerFields: FieldSet = {
-      'Customer Name': customerName,
-      'Phone': normalizedLookupPhone || lookupPhone,
-      ...(customerEmail ? { 'Email': customerEmail } : {}),
-      ...(customerAddress ? { 'Address': customerAddress } : {}),
-    };
+    const submittedName = (qf['Customer Name'] as string) || (qf['Contact Name'] as string) || '';
+    const submittedEmail = (qf['Customer Email'] as string) || '';
+    const submittedAddress = (qf['Chinese Delivery Address'] as string) || '';
+    const existingCustomer = await findCustomerByPhone(lookupPhone);
 
     if (existingCustomer) {
       customerRecordId = existingCustomer.id;
-      await tableCustomers.update([{ id: customerRecordId, fields: customerFields }]);
+      await tableCustomers.update([{
+        id: existingCustomer.id,
+        fields: {
+          'Customer Name': submittedName,
+          'Phone': lookupPhone,
+          'Email': submittedEmail,
+          'Address': submittedAddress,
+        } as FieldSet
+      }]);
     } else {
-      const newCustomer = await tableCustomers.create([{ fields: customerFields }]);
+      const newCustomer = await tableCustomers.create([{
+        fields: {
+          'Customer Name': submittedName,
+          'Phone': lookupPhone,
+          'Email': submittedEmail,
+          'Address': submittedAddress,
+        } as FieldSet
+      }]);
       customerRecordId = newCustomer[0].id;
     }
 
@@ -1735,7 +1767,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
         const fields: FieldSet = {
-          'Order': [orderRecordId],
+          'Order Link': [orderRecordId],
           'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
