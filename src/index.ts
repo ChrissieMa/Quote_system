@@ -62,7 +62,7 @@ const DEFAULT_TERMS = `1. 本報價僅供參考，所有尺寸、設計及細節
 2. 客戶需自行量度展示物品尺寸，本公司提供之尺寸建議（包括預留約5–10cm空間）僅供參考用途，最終尺寸需由客戶確認，本公司不會就尺寸不合適承擔責任。
 3. 所有產品均為訂製產品，訂單確認後恕不接受取消或退款；如需更改尺寸或設計，可能需重新報價及安排製作時間。
 4. 本報價之優惠或折扣只於指定期間內有效，逾期將不再適用，本公司保留最終決定權。
-5. 訂單確認後將安排生產，一般發貨時間約為45個工作天，長假期可能延長，實際時間視乎訂單情況而定。
+5. 訂單確認後將安排生產，一般發貨時間約為30個工作天，長假期可能延長，實際時間視乎訂單情況而定。
 6. 本公司不接受因生產或發貨延遲而提出退款之要求。
 7. 如因送貨地點之環境限制（包括門口尺寸、樓梯、電梯或通道空間等）導致無法順利送貨或需額外安排，本公司恕不承擔相關責任或費用。
 8. 客戶需於收貨時即時檢查產品，如有問題請即時提出，否則視為驗收完成。
@@ -76,15 +76,12 @@ const DEFAULT_PAYMENT_TERMS = `1. 所有訂單均需於確認後支付全數貨�
 4. 運費會因貨物重量、尺寸及送貨地點而有所不同，實際金額以最終發出之運費發票為準。
 5. 本公司保留最終收費及送貨安排之決定權。`;
 
-const DEFAULT_QUOTE_NOTES = `LKS 自家物流🚛「運費到付」
-🚛💰運費按貨物重量計算
-大部分地區運費相若☺️
-🌟偏遠地區除外🌟
-
-🎊 新客戶優惠 🎊
-🔽 首次購買即享 85 折
+const DEFAULT_QUOTE_NOTES = `🎊 新客戶優惠 🎊
+🔽 首次購買即享 免運費 點到點送到屋企💫 
 💡 必須 Like Facebook Page 並分享指定 Post 💡
 
+🎊貨期更新🎊
+🚚由45個工作天加快至30個工作天內出貨🚚
 ❌❌❌ 不接急單 ❌❌❌
 
 展示盒介紹
@@ -134,6 +131,7 @@ for (const envVar of requiredEnvVars) {
 // Airtable Setup
 const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID!);
 const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS!);
+const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
 const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
@@ -183,16 +181,86 @@ const buildCustomerSearchDisplay = (fields: FieldSet): string => {
   return [customerId, name, phone].filter(Boolean).join(' | ');
 };
 
+const buildLegacyCustomerSearchDisplay = (fields: FieldSet): string => {
+  const legacyRef = getCustomerText(fields, 'Customer Display');
+  const company = getCustomerText(fields, 'Company Name');
+  const name = getCustomerText(fields, 'Last Name');
+  const phone = getCustomerText(fields, 'MobilePhone') || getCustomerText(fields, 'Shipping Phone');
+  return [legacyRef, company || name, phone].filter(Boolean).join(' | ');
+};
+
+const buildLegacyNotes = (fields: FieldSet): string => {
+  const lines = [
+    getCustomerText(fields, 'CF.Find Us') ? `Find Us: ${getCustomerText(fields, 'CF.Find Us')}` : '',
+    getCustomerText(fields, 'CF.Social Media') ? `Social Media: ${getCustomerText(fields, 'CF.Social Media')}` : '',
+    getCustomerText(fields, 'CF.Keyword') ? `Keyword: ${getCustomerText(fields, 'CF.Keyword')}` : '',
+    getCustomerText(fields, 'CF.Why choose us') ? `Why choose us: ${getCustomerText(fields, 'CF.Why choose us')}` : '',
+    getCustomerText(fields, 'Department') ? `Department: ${getCustomerText(fields, 'Department')}` : '',
+    getCustomerText(fields, 'Designation') ? `Designation: ${getCustomerText(fields, 'Designation')}` : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+};
+
+const activateLegacyCustomer = async (legacyRecordId: string) => {
+  const legacy = await tableCustomersActive.find(legacyRecordId);
+  const f = legacy.fields;
+
+  const legacyRef = getCustomerText(f, 'Customer Display');
+  const companyName = getCustomerText(f, 'Company Name');
+  const name = getCustomerText(f, 'Last Name') || companyName || legacyRef;
+  const mobilePhone = getCustomerText(f, 'MobilePhone');
+  const shippingPhone = getCustomerText(f, 'Shipping Phone');
+  const primaryPhone = mobilePhone || shippingPhone;
+  const alternatePhone = shippingPhone && normalizePhone(shippingPhone) !== normalizePhone(primaryPhone) ? shippingPhone : '';
+  const email = getCustomerText(f, 'EmailID');
+  const address = getCustomerText(f, 'Shipping Address');
+  const legacyNotes = buildLegacyNotes(f);
+
+  const existingByPrimary = await findCustomerByPhone(primaryPhone);
+  const existingByAlternate = !existingByPrimary && alternatePhone ? await findCustomerByPhone(alternatePhone) : null;
+  const existing = existingByPrimary || existingByAlternate;
+
+  const legacyFields: FieldSet = {
+    'Customer Name': name,
+    'Phone': primaryPhone,
+    'Email': email,
+    'Address': address,
+    'Customer Status': 'Legacy Activated',
+    'Legacy Customer Ref': legacyRef,
+    'Alternate Phone': alternatePhone,
+    'Company Name': companyName,
+    'Legacy Notes': legacyNotes,
+  };
+
+  if (existing) {
+    await tableCustomers.update([{
+      id: existing.id,
+      fields: {
+        'Customer Status': 'Legacy Activated',
+        'Legacy Customer Ref': legacyRef,
+        'Alternate Phone': alternatePhone,
+        'Company Name': companyName,
+        'Legacy Notes': legacyNotes,
+      } as FieldSet
+    }]);
+    const updated = await tableCustomers.find(existing.id);
+    return updated;
+  }
+
+  const created = await tableCustomers.create([{ fields: legacyFields }]);
+  return created[0];
+};
+
 const searchCustomers = async (query: unknown) => {
   const q = String(query ?? '').trim().toLowerCase();
   const normalizedQ = normalizePhone(q);
   if (!q && !normalizedQ) return [];
 
-  const records = await tableCustomers.select({
+  const officialRecords = await tableCustomers.select({
     fields: ['Customer Display', 'Customer ID', 'Customer Name', 'Phone', 'Email', 'Address']
   }).all();
 
-  return records
+  const officialResults = officialRecords
     .filter((record: any) => {
       const f = record.fields;
       const textFields = [
@@ -208,10 +276,10 @@ const searchCustomers = async (query: unknown) => {
       const phoneMatch = normalizedQ.length >= 4 && normalizePhone(getCustomerText(f, 'Phone')).includes(normalizedQ);
       return textMatch || phoneMatch;
     })
-    .slice(0, 10)
     .map((record: any) => {
       const f = record.fields;
       return {
+        source: 'customers',
         id: record.id,
         display: buildCustomerSearchDisplay(f),
         customerId: getCustomerText(f, 'Customer ID'),
@@ -221,6 +289,49 @@ const searchCustomers = async (query: unknown) => {
         address: getCustomerText(f, 'Address'),
       };
     });
+
+  const legacyRecords = await tableCustomersActive.select({
+    fields: ['Customer Display', 'Company Name', 'Last Name', 'Shipping Address', 'Shipping Phone', 'EmailID', 'MobilePhone', 'CF.Find Us', 'CF.Social Media', 'CF.Keyword', 'CF.Why choose us', 'Department', 'Designation']
+  }).all();
+
+  const legacyResults = legacyRecords
+    .filter((record: any) => {
+      const f = record.fields;
+      const textFields = [
+        getCustomerText(f, 'Customer Display'),
+        getCustomerText(f, 'Company Name'),
+        getCustomerText(f, 'Last Name'),
+        getCustomerText(f, 'Shipping Address'),
+        getCustomerText(f, 'Shipping Phone'),
+        getCustomerText(f, 'EmailID'),
+        getCustomerText(f, 'MobilePhone'),
+      ].map(v => v.toLowerCase());
+
+      const textMatch = textFields.some(v => v.includes(q));
+      const phoneMatch = normalizedQ.length >= 4 && [getCustomerText(f, 'MobilePhone'), getCustomerText(f, 'Shipping Phone')]
+        .map(normalizePhone)
+        .some(value => value.includes(normalizedQ));
+      return textMatch || phoneMatch;
+    })
+    .map((record: any) => {
+      const f = record.fields;
+      const mobilePhone = getCustomerText(f, 'MobilePhone');
+      const shippingPhone = getCustomerText(f, 'Shipping Phone');
+      return {
+        source: 'legacy',
+        id: record.id,
+        display: buildLegacyCustomerSearchDisplay(f),
+        customerId: getCustomerText(f, 'Customer Display'),
+        name: getCustomerText(f, 'Last Name') || getCustomerText(f, 'Company Name'),
+        phone: mobilePhone || shippingPhone,
+        email: getCustomerText(f, 'EmailID'),
+        address: getCustomerText(f, 'Shipping Address'),
+        companyName: getCustomerText(f, 'Company Name'),
+        alternatePhone: shippingPhone && normalizePhone(shippingPhone) !== normalizePhone(mobilePhone || shippingPhone) ? shippingPhone : '',
+      };
+    });
+
+  return [...officialResults, ...legacyResults].slice(0, 20);
 };
 
 const getNextNumber = async (
@@ -795,6 +906,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           <div class="section">
             <div class="section-title">Existing Customer 客戶搜尋</div>
             <input type="hidden" name="customerRecordId" id="customerRecordId">
+            <input type="hidden" name="customerSource" id="customerSource">
+            <input type="hidden" name="legacyCustomerRecordId" id="legacyCustomerRecordId">
             <div class="form-row form-row-2">
               <div class="form-group">
                 <label>Search Customer ID / Name / Phone / Email</label>
@@ -807,7 +920,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
             </div>
             <div id="customerSearchResults" style="display:none;border:1px solid #e5e7eb;border-radius:6px;background:#fff;margin-top:8px;overflow:hidden;"></div>
             <div id="selectedCustomerBox" style="display:none;margin-top:10px;padding:10px 12px;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:6px;font-size:13px;color:#065f46;"></div>
-            <div style="font-size:12px;color:#6b7280;margin-top:6px;">如屬舊客，先搜尋並選擇客戶；選擇後會自動帶入姓名、電話、Email 及地址，並將 Quote 連結到 Customers。</div>
+            <div style="font-size:12px;color:#6b7280;margin-top:6px;">可搜尋正式 Customers 或 Customers (Active) 舊客資料；如選擇 Legacy 舊客，建立 Quote 時會自動啟用到正式 Customers。</div>
           </div>
 
           <div class="section">
@@ -1279,8 +1392,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       box.style.display = 'block';
       box.innerHTML = customers.map(function(c) {
         var safe = function(v) { return String(v || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); };
+        var badge = c.source === 'legacy' ? ' <span style="display:inline-block;background:#fef3c7;color:#92400e;border-radius:999px;padding:2px 7px;font-size:11px;margin-left:6px;">Legacy 舊客</span>' : ' <span style="display:inline-block;background:#dbeafe;color:#1d4ed8;border-radius:999px;padding:2px 7px;font-size:11px;margin-left:6px;">Customers</span>';
         return '<button type="button" class="customer-result-row" data-id="' + safe(c.id) + '" style="display:block;width:100%;text-align:left;padding:10px 12px;border:0;border-bottom:1px solid #f3f4f6;background:#fff;cursor:pointer;">'
-          + '<div style="font-weight:700;color:#111827;">' + safe(c.display || c.name || c.phone || c.id) + '</div>'
+          + '<div style="font-weight:700;color:#111827;">' + safe(c.display || c.name || c.phone || c.id) + badge + '</div>'
           + '<div style="font-size:12px;color:#6b7280;">' + safe([c.email, c.address].filter(Boolean).join(' · ')) + '</div>'
           + '</button>';
       }).join('');
@@ -1308,7 +1422,16 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     function selectExistingCustomer(customer) {
       selectedCustomer = customer;
       var idInput = document.getElementById('customerRecordId');
-      if (idInput) idInput.value = customer.id || '';
+      var sourceInput = document.getElementById('customerSource');
+      var legacyInput = document.getElementById('legacyCustomerRecordId');
+      if (sourceInput) sourceInput.value = customer.source || 'customers';
+      if (customer.source === 'legacy') {
+        if (idInput) idInput.value = '';
+        if (legacyInput) legacyInput.value = customer.id || '';
+      } else {
+        if (idInput) idInput.value = customer.id || '';
+        if (legacyInput) legacyInput.value = '';
+      }
 
       var form = document.getElementById('quoteForm');
       if (form) {
@@ -1322,6 +1445,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       if (selectedBox) {
         selectedBox.style.display = 'block';
         selectedBox.innerHTML = '<strong>已選擇客戶：</strong>'
+          + (customer.source === 'legacy' ? '<span style="background:#fef3c7;color:#92400e;border-radius:999px;padding:2px 7px;font-size:11px;margin-right:6px;">Legacy 舊客</span>' : '')
           + [customer.customerId, customer.name, customer.phone].filter(Boolean).join(' | ')
           + (customer.email ? '<br>Email：' + customer.email : '')
           + (customer.address ? '<br>Address：' + customer.address : '');
@@ -1331,7 +1455,11 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     function clearSelectedCustomer() {
       selectedCustomer = null;
       var idInput = document.getElementById('customerRecordId');
+      var sourceInput = document.getElementById('customerSource');
+      var legacyInput = document.getElementById('legacyCustomerRecordId');
       if (idInput) idInput.value = '';
+      if (sourceInput) sourceInput.value = '';
+      if (legacyInput) legacyInput.value = '';
       var results = document.getElementById('customerSearchResults');
       if (results) results.style.display = 'none';
       var selectedBox = document.getElementById('selectedCustomerBox');
@@ -1351,6 +1479,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         var form = e.target;
         var payload = {
           customerRecordId: (document.getElementById('customerRecordId') || {}).value || '',
+          customerSource: (document.getElementById('customerSource') || {}).value || '',
+          legacyCustomerRecordId: (document.getElementById('legacyCustomerRecordId') || {}).value || '',
           contactName: form.querySelector('[name=contactName]').value,
           phone: form.querySelector('[name=phone]').value,
           contactMethod: form.querySelector('[name=contactMethod]').value,
@@ -1443,8 +1573,21 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     const quoteDate = new Date().toISOString().split('T')[0];
 
     let selectedCustomerId = String(b.customerRecordId || '').trim();
+    const customerSource = String(b.customerSource || '').trim();
+    const legacyCustomerRecordId = String(b.legacyCustomerRecordId || '').trim();
     let selectedCustomerFields: FieldSet | null = null;
-    if (selectedCustomerId) {
+
+    if (customerSource === 'legacy' && legacyCustomerRecordId) {
+      try {
+        const activatedCustomer = await activateLegacyCustomer(legacyCustomerRecordId);
+        selectedCustomerId = activatedCustomer.id;
+        selectedCustomerFields = activatedCustomer.fields;
+      } catch (error) {
+        console.error('Legacy customer activation failed:', error);
+        selectedCustomerId = '';
+        selectedCustomerFields = null;
+      }
+    } else if (selectedCustomerId) {
       try {
         const selectedCustomerRecord = await tableCustomers.find(selectedCustomerId);
         selectedCustomerFields = selectedCustomerRecord.fields;
@@ -1606,7 +1749,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
               <div class="lbl">Date</div>
               <div class="val-sm">${escapeHtml(quote['Quote Date'] as string)}</div>
             </div>
-            ${quote['Valid Until'] ? `<div class="info-block"><div class="lbl">Valid Until</div><div class="val-sm">${escapeHtml(quote['Valid Until'] as string)}</div></div>` : '<div></div>'}
+            ${quote['Valid Until'] ? `<div class="info-block"><div class="lbl">報價有效日期</div><div class="val-sm">${escapeHtml(quote['Valid Until'] as string)}</div></div>` : '<div></div>'}
           </div>
 
           ${contactBlock}
@@ -1717,11 +1860,11 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
           <div class="info-grid info-grid-2" style="margin-bottom:16px;">
             <div class="info-block">
               <div class="lbl">製作及發貨安排</div>
-              <div class="val-sm">由於訂單數量持續增加，<br>一般需約 <strong>45 個工作天內發貨</strong> ☺️<br><br>如遇長假期，<br>需再加約 <strong>10–15 個工作天</strong> 🙏🏻<br><br>如完成製作，我哋會盡快安排發貨。<br><br>❗️<strong>不接急單</strong>❗️</div>
+              <div class="val-sm">貨期時間🕐<br><br>📦 <strong>度身訂造展示盒／疊高展示櫃</strong><br>一般會於 <strong>30個工作天內發貨</strong> ☺️<br><br>⚡ <strong>現貨成品</strong><br>一般會於 <strong>15個工作天內發貨</strong> 😊<br><br>如遇農曆新年、國慶等長假期，<br>貨期需額外增加 <strong>10–15個工作天</strong> 🙏🏻<br><br>介意貨期者請勿下單🙏🏻<br><br>如提早完成，我哋會立即安排發貨😊<br>🔥 寧早莫遲，建議預早訂購 🔥<br>❗️不接急單❗️</div>
             </div>
             <div class="info-block">
               <div class="lbl">安裝須知</div>
-              <div class="val-sm">每個展示盒及樓梯均需自行安裝，<br>安裝方式簡單易明，一般情況下 <strong>不需要使用大力</strong>，亦 <strong>不需要使用膠水</strong>，之後如有需要亦可自行拆卸☺️<br><br>🌟 如選用 <strong>開門式設計</strong>，則需要使用膠水固定。<br><br>送貨時亦會附上 <strong>電子版安裝說明書</strong> 😎<br><br>使用 <strong>LKS 車隊送貨</strong>，可享 <strong>三天內包補板</strong> 安排。<br>🌟 <strong>人為損壞除外</strong> 🌟</div>
+              <div class="val-sm">🔧 安裝說明<br><br>每個展示盒及樓梯配件均需要自行安裝，<br>安裝過程非常簡單☺️<br><br>全程唔需要用膠水，<br>亦唔需要「大力士」先裝到💪🏻<br>日後有需要時，亦可以自行拆卸及重新安裝😉<br><br>送貨時會附上電子版安裝說明書，方便跟住步驟安裝😎<br><br>使用 LKS 車隊送貨，如收貨後發現板件有問題，<br>可於收貨後 3 日內聯絡我哋安排補板🙏🏻<br><br>🌟 人為損壞除外 🌟</div>
             </div>
           </div>
 
