@@ -1261,23 +1261,27 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       return suggested;
     }
 
-    function suggestHongKongDeliveryTotal(row) {
+    function getEstimatedPackageUnits(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
-      var baseDriverCost = suggestBaseDriverCost(row);
-      var baseReserve = calcDeliveryReserve(baseDriverCost);
-      if (!(baseReserve > 0)) return 0;
 
       // 包裝 / 運費邏輯：
       // 展示盒：每件 1 個基本包裝；展示櫃：每層 1 個基本包裝。
-      // 燈類不論種類，每 1 件燈板加基本運費的一半；上下燈 / 獨立上下燈按 2 件燈板計。
-      // QTY 代表同一 item 有幾件，香港運費跟件數倍增。
+      // 燈類不論種類，每 1 件燈板加 0.5 個包裝單位；上下燈 / 獨立上下燈按 2 件燈板計。
+      // QTY 代表同一 item 有幾件，包裝單位跟件數倍增。
       var basePackageCount = isDisplayCase ? levels : 1;
       var lightBoardPieces = getLightBoardPieceCount(row);
-      var multiplierPerSet = basePackageCount + (lightBoardPieces * 0.5);
-      return baseReserve * multiplierPerSet * qty;
+      var unitsPerSet = basePackageCount + (lightBoardPieces * 0.5);
+      return unitsPerSet * qty;
+    }
+
+    function suggestHongKongDeliveryTotal(row) {
+      var baseDriverCost = suggestBaseDriverCost(row);
+      var baseReserve = calcDeliveryReserve(baseDriverCost);
+      if (!(baseReserve > 0)) return 0;
+      return baseReserve * getEstimatedPackageUnits(row);
     }
 
     function updateLocalDeliveryEstimate(row) {
@@ -1461,6 +1465,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           hongKongDelivery: (row.querySelector('.f-hk-delivery') || {}).value || '0',
           deliveryCostReserve: (row.querySelector('.f-hk-delivery') || {}).value || '0',
           profit: (row.querySelector('.f-profit') || {}).value || '0',
+          estimatedPackageUnits: String(getEstimatedPackageUnits(row) || 0),
+          localDeliveryOverride: ((row.querySelector('.f-hk-delivery') || {}).getAttribute('data-manual') === '1') ? 'true' : 'false',
+          localDeliveryNotes: ((row.querySelector('.f-hk-delivery') || {}).getAttribute('data-manual') === '1') ? '香港運費已人手修改' : '香港運費由系統按包裝單位自動建議',
           amount: (row.querySelector('.f-amt') || {}).value || '0'
         });
       });
@@ -1632,6 +1639,9 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       hongKongDelivery: parseFloat(String(item.hongKongDelivery ?? item.deliveryCostReserve ?? item.localDelivery)) || 0,
       deliveryCostReserve: parseFloat(String(item.deliveryCostReserve ?? item.hongKongDelivery ?? item.localDelivery)) || 0,
       profit: parseFloat(String(item.profit)) || 0,
+      estimatedPackageUnits: parseFloat(String(item.estimatedPackageUnits)) || 0,
+      localDeliveryOverride: String(item.localDeliveryOverride) === 'true' || item.localDeliveryOverride === true,
+      localDeliveryNotes: String(item.localDeliveryNotes || ''),
       amount: parseFloat(String(item.amount)) || 0,
     }));
 
@@ -2223,6 +2233,12 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
           'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
+          'Quoted China Freight HKD': Number(item.freight) || 0,
+          'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
+          'Quoted Profit HKD': Number(item.profit) || 0,
+          'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
+          'Local Delivery Override': Boolean(item.localDeliveryOverride),
+          'Local Delivery Notes': safeStr(item.localDeliveryNotes),
           'Item Type': safeStr(item.itemType),
           'For What': safeStr(item.forWhat),
           'Inter L': safeStr(item.interL),
