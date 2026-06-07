@@ -1234,48 +1234,56 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       return roundUpToNearest10(rawReserve);
     }
 
-    function hasDeliverySensitiveAccessories(row) {
+    function getLightBoardPieceCount(row) {
       var qtyMap = getAccessoryQtyMap(row);
-      var single = getSingleAccessories(row);
-      var names = Object.keys(qtyMap).concat(single);
-      return names.some(function(name) {
-        return ['獨立燈板 - 上燈','獨立燈板 - 下燈','獨立燈板 - 上下燈','上下燈','背燈','左板鏡面','右板鏡面','底板鏡面','頂板鏡面','背板鏡面','左板圖片','右板圖片','底板圖片','頂板圖片','背板圖片','樓梯'].indexOf(name) !== -1;
-      });
+      var count = 0;
+      count += (qtyMap['獨立燈板 - 上燈'] || 0);
+      count += (qtyMap['獨立燈板 - 下燈'] || 0);
+      count += ((qtyMap['獨立燈板 - 上下燈'] || 0) * 2);
+      count += ((qtyMap['上下燈'] || 0) * 2);
+      count += (qtyMap['背燈'] || 0);
+      return count;
     }
 
-    function suggestDriverCost(row) {
+    function suggestBaseDriverCost(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
-      var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
-      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
       var l = parseNum((row.querySelector('.f-ol') || {}).value) || parseNum((row.querySelector('.f-il') || {}).value);
       var d = parseNum((row.querySelector('.f-od') || {}).value) || parseNum((row.querySelector('.f-id') || {}).value);
       var h = parseNum((row.querySelector('.f-oh') || {}).value) || parseNum((row.querySelector('.f-ih') || {}).value);
       if (!(l > 0 && d > 0 && h > 0)) return 0;
 
-      var pieces = (isDisplayCase ? levels : 1) * qty;
       var maxDim = Math.max(l, d, h);
-      var hasAccessories = hasDeliverySensitiveAccessories(row);
+      var suggested = isDisplayCase ? 130 : 100;
 
-      if (isDisplayCase) {
-        if (pieces >= 5 || levels >= 5) return 600;
-        if (pieces >= 4 || levels >= 4) return 430;
-        return 250;
-      }
-
-      var suggested = 100;
-      if (hasAccessories || maxDim >= 60 || l >= 70 || d >= 35 || h >= 50) suggested = 130;
-      if (maxDim >= 90 || l >= 100 || d >= 45 || h >= 80) suggested = 160;
-      if (pieces === 2) suggested = Math.max(suggested, 160);
-      if (pieces >= 3) suggested = Math.max(suggested, 250);
+      if (maxDim >= 60 || l >= 70 || d >= 35 || h >= 50) suggested = Math.max(suggested, 130);
+      if (maxDim >= 90 || l >= 100 || d >= 45 || h >= 80) suggested = Math.max(suggested, 160);
       return suggested;
+    }
+
+    function suggestHongKongDeliveryTotal(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
+      var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
+      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+      var baseDriverCost = suggestBaseDriverCost(row);
+      var baseReserve = calcDeliveryReserve(baseDriverCost);
+      if (!(baseReserve > 0)) return 0;
+
+      // 包裝 / 運費邏輯：
+      // 展示盒：每件 1 個基本包裝；展示櫃：每層 1 個基本包裝。
+      // 燈類不論種類，每 1 件燈板加基本運費的一半；上下燈 / 獨立上下燈按 2 件燈板計。
+      // QTY 代表同一 item 有幾件，香港運費跟件數倍增。
+      var basePackageCount = isDisplayCase ? levels : 1;
+      var lightBoardPieces = getLightBoardPieceCount(row);
+      var multiplierPerSet = basePackageCount + (lightBoardPieces * 0.5);
+      return baseReserve * multiplierPerSet * qty;
     }
 
     function updateLocalDeliveryEstimate(row) {
       var input = row.querySelector('.f-hk-delivery');
       if (!input || input.getAttribute('data-manual') === '1') return;
-      var driverCost = suggestDriverCost(row);
-      var reserve = calcDeliveryReserve(driverCost);
+      var reserve = suggestHongKongDeliveryTotal(row);
       input.value = reserve > 0 ? String(reserve) : '';
       input.setAttribute('data-auto-value', input.value || '');
     }
@@ -1348,8 +1356,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         accessoryRmb += calcPowerRmb();
       }
 
-      var unitAmount = ((sizeRmb + accessoryRmb) / RMB_DIVISOR) + hkdAddons + freight + hkDelivery + profit;
-      var lineAmount = unitAmount * qty;
+      var unitProductAmount = ((sizeRmb + accessoryRmb) / RMB_DIVISOR) + hkdAddons;
+      // QTY 只應該倍增產品 / 配件本身金額。
+      // 內地運費、香港運費及利潤均視為該行 item 的總數，由使用者或系統直接填入，不再因 QTY 被重複相乘。
+      var lineAmount = (unitProductAmount * qty) + freight + hkDelivery + profit;
       var amountInput = row.querySelector('.f-amt');
       if (amountInput) amountInput.value = lineAmount.toFixed(2);
       return lineAmount;
@@ -1392,6 +1402,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
             el.value = '0';
           } else {
             el.value = '';
+          }
+          if (el.classList.contains('f-hk-delivery')) {
+            el.removeAttribute('data-manual');
+            el.removeAttribute('data-auto-value');
           }
         } else {
           el.value = '';
