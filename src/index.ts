@@ -445,6 +445,9 @@ const SHARED_CSS = `
   }
   .items-table td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: top; }
   .items-table tr:nth-child(even) td { background: #fdf8f5; }
+  .items-table .item-sub-detail td { background: #fffaf5 !important; }
+  .mini-label { font-size: 11px; font-weight: 700; color: #d8833b; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
+  .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
 
   /* ── Accessories Tags ── */
   .acc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -971,7 +974,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                     <th>Accessories</th>
                     <th>Description</th>
                     <th>QTY</th>
-                    <th>運費 ($)</th>
+                    <th>內地運費 ($)</th>
+                    <th>香港運費 ($)</th>
                     <th>利潤 ($)</th>
                     <th>Amount ($)</th>
                     <th></th>
@@ -1023,7 +1027,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                     </td>
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
                     <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px"></td>
-                    <td><input type="number" class="f-freight amount-input" step="0.01" style="width:80px"></td>
+                    <td><input type="number" class="f-freight amount-input" step="0.01" style="width:80px" title="內地運費"></td>
+                    <td><input type="number" class="f-hk-delivery amount-input" step="0.01" style="width:80px" title="系統建議，可手動修改"></td>
                     <td><input type="number" class="f-profit amount-input" step="0.01" style="width:80px"></td>
                     <td><input type="number" class="f-amt amount-input" step="0.01" style="width:90px;background:#f9fafb;" readonly></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
@@ -1219,11 +1224,68 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       if (outerHInput) outerHInput.value = (h + inc.outerHeightIncrease).toFixed(1);
     }
 
+    function roundUpToNearest10(value) {
+      return Math.ceil(value / 10) * 10;
+    }
+
+    function calcDeliveryReserve(driverCost) {
+      if (!(driverCost > 0)) return 0;
+      var rawReserve = Math.max(driverCost * 1.10, driverCost + 30);
+      return roundUpToNearest10(rawReserve);
+    }
+
+    function hasDeliverySensitiveAccessories(row) {
+      var qtyMap = getAccessoryQtyMap(row);
+      var single = getSingleAccessories(row);
+      var names = Object.keys(qtyMap).concat(single);
+      return names.some(function(name) {
+        return ['獨立燈板 - 上燈','獨立燈板 - 下燈','獨立燈板 - 上下燈','上下燈','背燈','左板鏡面','右板鏡面','底板鏡面','頂板鏡面','背板鏡面','左板圖片','右板圖片','底板圖片','頂板圖片','背板圖片','樓梯'].indexOf(name) !== -1;
+      });
+    }
+
+    function suggestDriverCost(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
+      var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
+      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+      var l = parseNum((row.querySelector('.f-ol') || {}).value) || parseNum((row.querySelector('.f-il') || {}).value);
+      var d = parseNum((row.querySelector('.f-od') || {}).value) || parseNum((row.querySelector('.f-id') || {}).value);
+      var h = parseNum((row.querySelector('.f-oh') || {}).value) || parseNum((row.querySelector('.f-ih') || {}).value);
+      if (!(l > 0 && d > 0 && h > 0)) return 0;
+
+      var pieces = (isDisplayCase ? levels : 1) * qty;
+      var maxDim = Math.max(l, d, h);
+      var hasAccessories = hasDeliverySensitiveAccessories(row);
+
+      if (isDisplayCase) {
+        if (pieces >= 5 || levels >= 5) return 600;
+        if (pieces >= 4 || levels >= 4) return 430;
+        return 250;
+      }
+
+      var suggested = 100;
+      if (hasAccessories || maxDim >= 60 || l >= 70 || d >= 35 || h >= 50) suggested = 130;
+      if (maxDim >= 90 || l >= 100 || d >= 45 || h >= 80) suggested = 160;
+      if (pieces === 2) suggested = Math.max(suggested, 160);
+      if (pieces >= 3) suggested = Math.max(suggested, 250);
+      return suggested;
+    }
+
+    function updateLocalDeliveryEstimate(row) {
+      var input = row.querySelector('.f-hk-delivery');
+      if (!input || input.getAttribute('data-manual') === '1') return;
+      var driverCost = suggestDriverCost(row);
+      var reserve = calcDeliveryReserve(driverCost);
+      input.value = reserve > 0 ? String(reserve) : '';
+      input.setAttribute('data-auto-value', input.value || '');
+    }
+
     function calcRowAmount(row) {
       var dims = getDims(row);
       var l = dims.l, d = dims.d, h = dims.h;
       var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
       var freight = parseNum((row.querySelector('.f-freight') || {}).value);
+      var hkDelivery = parseNum((row.querySelector('.f-hk-delivery') || {}).value);
       var profit = parseNum((row.querySelector('.f-profit') || {}).value);
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
@@ -1286,7 +1348,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         accessoryRmb += calcPowerRmb();
       }
 
-      var unitAmount = ((sizeRmb + accessoryRmb) / RMB_DIVISOR) + hkdAddons + freight + profit;
+      var unitAmount = ((sizeRmb + accessoryRmb) / RMB_DIVISOR) + hkdAddons + freight + hkDelivery + profit;
       var lineAmount = unitAmount * qty;
       var amountInput = row.querySelector('.f-amt');
       if (amountInput) amountInput.value = lineAmount.toFixed(2);
@@ -1296,9 +1358,18 @@ app.get('/quote/create', (_req: Request, res: Response) => {
     function bindRowEvents(row) {
       row.querySelectorAll('input, select').forEach(function(el) {
         if (el.classList.contains('f-amt')) return;
+        if (el.classList.contains('f-hk-delivery')) {
+          el.addEventListener('input', function() {
+            el.setAttribute('data-manual', '1');
+            calcRowAmount(row);
+            recalcSubtotal();
+          });
+          return;
+        }
         var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
           updateOuterDimensions(row);
+          updateLocalDeliveryEstimate(row);
           calcRowAmount(row);
           recalcSubtotal();
         });
@@ -1330,6 +1401,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       bindRowEvents(clone);
       updateOuterDimensionMode(clone);
       updateOuterDimensions(clone);
+      updateLocalDeliveryEstimate(clone);
       recalcSubtotal();
     }
     function removeRow(btn) {
@@ -1372,6 +1444,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
           freight: (row.querySelector('.f-freight') || {}).value || '0',
+          hongKongDelivery: (row.querySelector('.f-hk-delivery') || {}).value || '0',
+          deliveryCostReserve: (row.querySelector('.f-hk-delivery') || {}).value || '0',
           profit: (row.querySelector('.f-profit') || {}).value || '0',
           amount: (row.querySelector('.f-amt') || {}).value || '0'
         });
@@ -1473,6 +1547,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
         bindRowEvents(row);
         updateOuterDimensions(row);
+        updateLocalDeliveryEstimate(row);
       });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
         e.preventDefault();
@@ -1540,6 +1615,8 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       description: String(item.description || ''),
       qty: parseInt(String(item.qty)) || 1,
       freight: parseFloat(String(item.freight)) || 0,
+      hongKongDelivery: parseFloat(String(item.hongKongDelivery ?? item.deliveryCostReserve ?? item.localDelivery)) || 0,
+      deliveryCostReserve: parseFloat(String(item.deliveryCostReserve ?? item.hongKongDelivery ?? item.localDelivery)) || 0,
       profit: parseFloat(String(item.profit)) || 0,
       amount: parseFloat(String(item.amount)) || 0,
     }));
@@ -1557,7 +1634,8 @@ app.post('/quote/create', async (req: Request, res: Response) => {
           item.levelHeights ? `層高 ${item.levelHeights}` : '',
           item.accessories ? `配件 ${Array.isArray(item.accessories) ? item.accessories.join(', ') : item.accessories}` : '',
           item.qty ? `QTY ${item.qty}` : '',
-          item.freight ? `運費 $${item.freight}` : '',
+          item.freight ? `內地運費 $${item.freight}` : '',
+          item.hongKongDelivery ? `香港運費 $${item.hongKongDelivery}` : '',
           item.profit ? `利潤 $${item.profit}` : '',
           item.amount ? `$${item.amount}` : '',
         ].filter(Boolean);
@@ -1694,12 +1772,12 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           descriptionSummary
             ? `<tr>
                 <td>1</td>
-                <td colspan="14" style="white-space:pre-line;">${nl2br(descriptionSummary)}</td>
+                <td colspan="10" style="white-space:pre-line;">${nl2br(descriptionSummary)}</td>
               </tr>`
-            : '<tr><td colspan="15" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+            : '<tr><td colspan="11" style="text-align:center;color:#9ca3af;">No items</td></tr>'
         )
       : items.map((item: any, idx: number) => {
-          return `<tr>
+          return `<tr class="item-main-row">
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
@@ -1711,10 +1789,13 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             <td style="text-align:center;">${item.outerH || '-'}</td>
             <td style="text-align:center;">${item.noOfLevels || '-'}</td>
             <td>${escapeHtml(item.levelHeights) || '-'}</td>
-            <td>${renderAccTags(item.accessories)}</td>
-            <td>${escapeHtml(item.description) || '-'}</td>
-            <td style="text-align:center;">${item.qty || 1}</td>
-            <td style="text-align:right;">$${item.amount || 0}</td>
+          </tr>
+          <tr class="item-sub-detail">
+            <td></td>
+            <td colspan="5"><div class="mini-label">Accessories</div>${renderAccTags(item.accessories)}</td>
+            <td colspan="3"><div class="mini-label">Description</div>${escapeHtml(item.description) || '-'}</td>
+            <td style="text-align:center;"><div class="mini-label">QTY</div>${item.qty || 1}</td>
+            <td style="text-align:right;"><div class="mini-label">Amount</div>$${item.amount || 0}</td>
           </tr>`;
         }).join('');
 
@@ -1771,10 +1852,6 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
                     <th>Outer H</th>
                     <th>Levels</th>
                     <th>Level Heights</th>
-                    <th>Accessories</th>
-                    <th>Description</th>
-                    <th>QTY</th>
-                    <th>Amount</th>
                   </tr>
                 </thead>
                 <tbody>${itemRows}</tbody>
@@ -1783,7 +1860,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           </div>
 
           <div class="totals-box">
-            <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
+            <div class="row subtotal-row" style="justify-content:space-between;gap:18px;"><span class="free-delivery-offer" style="color:#d8833b;">🎊首次購買即享免運費優惠🎊</span><span><span style="color:#666;margin-right:24px;">Subtotal</span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
             <div class="row total-row"><span>Total</span><span>$${total}</span></div>
           </div>
