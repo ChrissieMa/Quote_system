@@ -1056,12 +1056,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
               <div class="form-group">
                 <label>使用優惠</label>
                 <select name="promotionType" id="promotionType" onchange="applyPromotionPreset(); recalcTotal();">
-                  <option value="無優惠">無優惠</option>
+                  <option value="">不使用優惠</option>
+                  <option value="新客戶免運費">新客戶免運費</option>
                   <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
-                  <option value="首次購買優惠">首次購買優惠</option>
                   <option value="現貨優惠">現貨優惠</option>
-                  <option value="回購優惠">回購優惠</option>
-                  <option value="自訂優惠">自訂優惠</option>
                 </select>
               </div>
               <div class="form-group">
@@ -1095,8 +1093,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 <select name="discountReason" id="discountReason" onchange="recalcTotal()">
                   <option value="">不適用</option>
                   <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
-                  <option value="首次購買優惠">首次購買優惠</option>
-                  <option value="現貨優惠">現貨優惠</option>
+                  <option value="新客戶優惠">新客戶優惠</option>
                   <option value="回購優惠">回購優惠</option>
                 </select>
               </div>
@@ -1104,20 +1101,15 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 <label>送貨收費方式</label>
                 <select name="deliveryChargeMode" id="deliveryChargeMode" onchange="toggleDeliveryInputs(); recalcTotal();">
                   <option value="已包本地送貨">已包本地送貨</option>
-                  <option value="LKS車隊運費到付">LKS車隊運費到付</option>
-                  <option value="不需要送貨">不需要送貨</option>
-                  <option value="自訂送貨安排">自訂送貨安排</option>
+                  <option value="LKS 車隊 運費到付">LKS 車隊 運費到付</option>
                 </select>
               </div>
               <div class="form-group" id="deliveryOfferReasonGroup">
                 <label>免運費原因</label>
                 <select name="deliveryOfferReason" id="deliveryOfferReason" onchange="recalcTotal()">
-                  <option value="不適用">不適用</option>
-                  <option value="ToyTV 專屬免運費">ToyTV 專屬免運費</option>
-                  <option value="首次購買免運費">首次購買免運費</option>
-                  <option value="現貨優惠免運費">現貨優惠免運費</option>
-                  <option value="回購客戶免運費">回購客戶免運費</option>
-                  <option value="自訂">自訂</option>
+                  <option value="">不適用</option>
+                  <option value="新客戶免運費">新客戶免運費</option>
+                  <option value="ToyTV 專屬優惠免運費">ToyTV 專屬優惠免運費</option>
                 </select>
               </div>
             </div>
@@ -1561,10 +1553,9 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       var mode = getElValue('deliveryChargeMode');
       var reason = getElValue('deliveryOfferReason');
       if (mode === '已包本地送貨') {
-        return reason && reason !== '不適用' ? '已包本地送貨｜' + reason : '已包本地送貨';
+        return reason ? '已包本地送貨｜' + reason : '已包本地送貨';
       }
-      if (mode === 'LKS車隊運費到付') return 'LKS車隊運費到付';
-      if (mode === '不需要送貨') return '不需要送貨';
+      if (mode === 'LKS 車隊 運費到付') return 'LKS 車隊 運費到付';
       return mode || '';
     }
 
@@ -1583,7 +1574,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       var mode = getElValue('deliveryChargeMode');
       var group = document.getElementById('deliveryOfferReasonGroup');
       if (group) group.style.display = mode === '已包本地送貨' ? 'block' : 'none';
-      if (mode !== '已包本地送貨') setElValue('deliveryOfferReason', '不適用');
+      if (mode !== '已包本地送貨') setElValue('deliveryOfferReason', '');
     }
 
     function applyPromotionPreset() {
@@ -1594,35 +1585,28 @@ app.get('/quote/create', (_req: Request, res: Response) => {
         setElValue('discountMultiplier', '');
         setElValue('discountReason', 'ToyTV 專屬優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', 'ToyTV 專屬免運費');
-      } else if (promotion === '首次購買優惠') {
+        setElValue('deliveryOfferReason', 'ToyTV 專屬優惠免運費');
+      } else if (promotion === '新客戶免運費') {
         setElValue('discountType', '無折扣');
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
-        setElValue('discountReason', '');
+        setElValue('discountReason', '新客戶優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', '首次購買免運費');
+        setElValue('deliveryOfferReason', '新客戶免運費');
       } else if (promotion === '現貨優惠') {
         setElValue('discountType', '無折扣');
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
         setElValue('discountReason', '');
         setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', '現貨優惠免運費');
-      } else if (promotion === '回購優惠') {
+        setElValue('deliveryOfferReason', '');
+      } else if (promotion === '') {
         setElValue('discountType', '無折扣');
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
         setElValue('discountReason', '');
-        setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', '回購客戶免運費');
-      } else if (promotion === '無優惠') {
-        setElValue('discountType', '無折扣');
-        setElValue('discountAmountHkd', '');
-        setElValue('discountMultiplier', '');
-        setElValue('discountReason', '');
-        setElValue('deliveryChargeMode', 'LKS車隊運費到付');
-        setElValue('deliveryOfferReason', '不適用');
+        setElValue('deliveryChargeMode', 'LKS 車隊 運費到付');
+        setElValue('deliveryOfferReason', '');
       }
       toggleDiscountInputs();
       toggleDeliveryInputs();
@@ -1885,7 +1869,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       })
       .join('\n');
     const subtotal = parseFloat(b.subtotal) || 0;
-    const promotionType = String(b.promotionType || '無優惠');
+    const promotionType = String(b.promotionType || '');
     const discountType = String(b.discountType || '無折扣');
     const discountMultiplierRaw = parseFloat(String(b.discountMultiplier));
     const discountMultiplier = Number.isFinite(discountMultiplierRaw) ? discountMultiplierRaw : null;
@@ -1964,14 +1948,14 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         // Legacy Discount is kept as an effective multiplier so old Airtable formulas/views stay compatible.
         'Discount': discountRate,
         'Total': total,
-        'Promotion / Offer Type': promotionType,
+        'Promotion / Offer Type': promotionType || undefined,
         'Discount Type': discountType,
         'Discount Multiplier': discountType === '百分比折扣' && discountMultiplier !== null ? discountMultiplier : undefined,
         'Discount Amount HKD': discountType === '指定金額扣減' ? discountAmountHkd : 0,
-        'Discount Reason': discountReason || '',
+        'Discount Reason': discountReason || undefined,
         // Discount Value HKD / Discount Display Text / Delivery Display Text are Airtable formula fields in Quotes, so do not write them here.
         'Delivery Charge Mode': deliveryChargeMode,
-        'Delivery Offer Reason': deliveryOfferReason || '',
+        'Delivery Offer Reason': deliveryOfferReason || undefined,
         'Quote Items JSON': itemsJson,
         'Description Summary': descriptionSummary,
         'Notes': b.notes || '',
@@ -2463,15 +2447,15 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       'Customer': [customerRecordId],
       'Product Amount': qf['Sub Total'],
       'Discount': qf['Discount'],
-      'Promotion / Offer Type': qf['Promotion / Offer Type'] || '無優惠',
+      'Promotion / Offer Type': qf['Promotion / Offer Type'] || undefined,
       'Discount Type': qf['Discount Type'] || '無折扣',
       'Discount Multiplier': (qf['Discount Multiplier'] as number | undefined) || undefined,
       'Discount Amount HKD': qf['Discount Amount HKD'] || 0,
-      'Discount Reason': qf['Discount Reason'] || '',
+      'Discount Reason': qf['Discount Reason'] || undefined,
       'Discount Value HKD': qf['Discount Value HKD'] || Math.max(0, Number(qf['Sub Total'] || 0) - Number(qf['Total'] || 0)),
       'Discount Display Text': qf['Discount Display Text'] || '',
       'Delivery Charge Mode': qf['Delivery Charge Mode'] || '',
-      'Delivery Offer Reason': qf['Delivery Offer Reason'] || '',
+      'Delivery Offer Reason': qf['Delivery Offer Reason'] || undefined,
       'Delivery Display Text': qf['Delivery Display Text'] || '',
       // 'Final Amount' is computed — do NOT write
       // 'Description' is computed — do NOT write
