@@ -448,6 +448,11 @@ const SHARED_CSS = `
   .items-table .item-sub-detail td { background: #fffaf5 !important; }
   .mini-label { font-size: 11px; font-weight: 700; color: #d8833b; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
   .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
+  .offer-preview { background:#fffaf6; border:1px solid #f0e0d0; border-radius:6px; padding:12px; font-size:13px; }
+  .offer-preview .line { display:flex; justify-content:space-between; gap:12px; margin-bottom:4px; }
+  .offer-preview .final { border-top:1px solid #f0e0d0; padding-top:6px; margin-top:6px; font-size:16px; font-weight:700; color:#d8833b; }
+  .discount-row span:last-child { color:#ef4444; }
+  .delivery-row span:last-child { color:#d8833b; font-weight:700; }
 
   /* ── Accessories Tags ── */
   .acc-tags { display: flex; flex-wrap: wrap; gap: 4px; }
@@ -1042,20 +1047,86 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           </div>
 
           <div class="section">
-            <div class="section-title">Pricing</div>
+            <div class="section-title">Pricing / 優惠及送貨設定</div>
             <div class="form-row form-row-3">
               <div class="form-group">
                 <label>Subtotal ($)</label>
                 <input type="number" name="subtotal" id="subtotal" step="0.01" readonly style="background:#f9fafb;">
               </div>
               <div class="form-group">
-                <label>Discount (e.g. 0.9 = 9折, 1 = no discount)</label>
-                <input type="number" name="discount" id="discount" step="0.01" min="0" max="1" value="1" oninput="recalcTotal()">
+                <label>使用優惠</label>
+                <select name="promotionType" id="promotionType" onchange="applyPromotionPreset(); recalcTotal();">
+                  <option value="無優惠">無優惠</option>
+                  <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
+                  <option value="首次購買優惠">首次購買優惠</option>
+                  <option value="現貨優惠">現貨優惠</option>
+                  <option value="回購優惠">回購優惠</option>
+                  <option value="自訂優惠">自訂優惠</option>
+                </select>
               </div>
               <div class="form-group">
                 <label>Total ($)</label>
                 <input type="number" name="total" id="total" step="0.01" readonly style="background:#f9fafb;">
               </div>
+            </div>
+
+            <div class="form-row form-row-3">
+              <div class="form-group">
+                <label>折扣方式</label>
+                <select name="discountType" id="discountType" onchange="toggleDiscountInputs(); recalcTotal();">
+                  <option value="無折扣">無折扣</option>
+                  <option value="百分比折扣">百分比折扣</option>
+                  <option value="指定金額扣減">指定金額扣減</option>
+                </select>
+              </div>
+              <div class="form-group" id="discountMultiplierGroup">
+                <label>折扣倍率（0.9 = 9折 / 0.85 = 85折）</label>
+                <input type="number" name="discountMultiplier" id="discountMultiplier" step="0.01" min="0" max="1" value="" oninput="recalcTotal()">
+              </div>
+              <div class="form-group" id="discountAmountGroup">
+                <label>指定扣減金額 HKD</label>
+                <input type="number" name="discountAmountHkd" id="discountAmountHkd" step="1" min="0" value="" oninput="recalcTotal()">
+              </div>
+            </div>
+
+            <div class="form-row form-row-3">
+              <div class="form-group">
+                <label>折扣原因</label>
+                <select name="discountReason" id="discountReason" onchange="recalcTotal()">
+                  <option value="">不適用</option>
+                  <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
+                  <option value="首次購買優惠">首次購買優惠</option>
+                  <option value="現貨優惠">現貨優惠</option>
+                  <option value="回購優惠">回購優惠</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>送貨收費方式</label>
+                <select name="deliveryChargeMode" id="deliveryChargeMode" onchange="toggleDeliveryInputs(); recalcTotal();">
+                  <option value="已包本地送貨">已包本地送貨</option>
+                  <option value="LKS車隊運費到付">LKS車隊運費到付</option>
+                  <option value="不需要送貨">不需要送貨</option>
+                  <option value="自訂送貨安排">自訂送貨安排</option>
+                </select>
+              </div>
+              <div class="form-group" id="deliveryOfferReasonGroup">
+                <label>免運費原因</label>
+                <select name="deliveryOfferReason" id="deliveryOfferReason" onchange="recalcTotal()">
+                  <option value="不適用">不適用</option>
+                  <option value="ToyTV 專屬免運費">ToyTV 專屬免運費</option>
+                  <option value="首次購買免運費">首次購買免運費</option>
+                  <option value="現貨優惠免運費">現貨優惠免運費</option>
+                  <option value="回購客戶免運費">回購客戶免運費</option>
+                  <option value="自訂">自訂</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="offer-preview" id="offerPreview">
+              <div class="line"><span>Subtotal</span><span id="previewSubtotal">$0.00</span></div>
+              <div class="line" id="previewDiscountRow" style="display:none;"><span id="previewDiscountText">優惠折扣</span><span id="previewDiscountAmount">-$0.00</span></div>
+              <div class="line"><span>送貨安排</span><span id="previewDeliveryText">已包本地送貨</span></div>
+              <div class="line final"><span>Total</span><span id="previewTotal">$0</span></div>
             </div>
           </div>
 
@@ -1436,11 +1507,147 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
     }
+    function getElValue(id) {
+      var el = document.getElementById(id);
+      return el ? el.value : '';
+    }
+
+    function setElValue(id, value) {
+      var el = document.getElementById(id);
+      if (el) el.value = value;
+    }
+
+    function setText(id, value) {
+      var el = document.getElementById(id);
+      if (el) el.textContent = value;
+    }
+
+    function formatMoney(value, decimals) {
+      var n = Number(value) || 0;
+      var fixed = typeof decimals === 'number' ? n.toFixed(decimals) : String(Math.ceil(n));
+      return '$' + fixed.replace(/\B(?=(\d{3})+(?!\d))/g, ',');
+    }
+
+    function calculateDiscountValue(subtotal) {
+      var discountType = getElValue('discountType');
+      var multiplier = parseFloat(getElValue('discountMultiplier'));
+      var amount = parseFloat(getElValue('discountAmountHkd')) || 0;
+
+      if (discountType === '百分比折扣') {
+        if (isNaN(multiplier)) multiplier = 1;
+        return Math.max(0, subtotal * (1 - multiplier));
+      }
+      if (discountType === '指定金額扣減') {
+        return Math.max(0, Math.min(amount, subtotal));
+      }
+      return 0;
+    }
+
+    function buildDiscountDisplayText() {
+      var discountType = getElValue('discountType');
+      var reason = getElValue('discountReason');
+      var multiplier = parseFloat(getElValue('discountMultiplier'));
+      var amount = parseFloat(getElValue('discountAmountHkd')) || 0;
+      if (discountType === '百分比折扣' && reason && !isNaN(multiplier)) {
+        return reason + '：' + (Math.round(multiplier * 100) / 10) + '折優惠';
+      }
+      if (discountType === '指定金額扣減' && reason && amount > 0) {
+        return reason + '：全單減 HKD $' + Math.ceil(amount);
+      }
+      return '';
+    }
+
+    function buildDeliveryDisplayText() {
+      var mode = getElValue('deliveryChargeMode');
+      var reason = getElValue('deliveryOfferReason');
+      if (mode === '已包本地送貨') {
+        return reason && reason !== '不適用' ? '已包本地送貨｜' + reason : '已包本地送貨';
+      }
+      if (mode === 'LKS車隊運費到付') return 'LKS車隊運費到付';
+      if (mode === '不需要送貨') return '不需要送貨';
+      return mode || '';
+    }
+
+    function toggleDiscountInputs() {
+      var discountType = getElValue('discountType');
+      var multiplierGroup = document.getElementById('discountMultiplierGroup');
+      var amountGroup = document.getElementById('discountAmountGroup');
+      if (multiplierGroup) multiplierGroup.style.display = discountType === '百分比折扣' ? 'block' : 'none';
+      if (amountGroup) amountGroup.style.display = discountType === '指定金額扣減' ? 'block' : 'none';
+      if (discountType !== '百分比折扣') setElValue('discountMultiplier', '');
+      if (discountType !== '指定金額扣減') setElValue('discountAmountHkd', '');
+      if (discountType === '無折扣') setElValue('discountReason', '');
+    }
+
+    function toggleDeliveryInputs() {
+      var mode = getElValue('deliveryChargeMode');
+      var group = document.getElementById('deliveryOfferReasonGroup');
+      if (group) group.style.display = mode === '已包本地送貨' ? 'block' : 'none';
+      if (mode !== '已包本地送貨') setElValue('deliveryOfferReason', '不適用');
+    }
+
+    function applyPromotionPreset() {
+      var promotion = getElValue('promotionType');
+      if (promotion === 'ToyTV 專屬優惠') {
+        setElValue('discountType', '指定金額扣減');
+        setElValue('discountAmountHkd', '200');
+        setElValue('discountMultiplier', '');
+        setElValue('discountReason', 'ToyTV 專屬優惠');
+        setElValue('deliveryChargeMode', '已包本地送貨');
+        setElValue('deliveryOfferReason', 'ToyTV 專屬免運費');
+      } else if (promotion === '首次購買優惠') {
+        setElValue('discountType', '無折扣');
+        setElValue('discountAmountHkd', '');
+        setElValue('discountMultiplier', '');
+        setElValue('discountReason', '');
+        setElValue('deliveryChargeMode', '已包本地送貨');
+        setElValue('deliveryOfferReason', '首次購買免運費');
+      } else if (promotion === '現貨優惠') {
+        setElValue('discountType', '無折扣');
+        setElValue('discountAmountHkd', '');
+        setElValue('discountMultiplier', '');
+        setElValue('discountReason', '');
+        setElValue('deliveryChargeMode', '已包本地送貨');
+        setElValue('deliveryOfferReason', '現貨優惠免運費');
+      } else if (promotion === '回購優惠') {
+        setElValue('discountType', '無折扣');
+        setElValue('discountAmountHkd', '');
+        setElValue('discountMultiplier', '');
+        setElValue('discountReason', '');
+        setElValue('deliveryChargeMode', '已包本地送貨');
+        setElValue('deliveryOfferReason', '回購客戶免運費');
+      } else if (promotion === '無優惠') {
+        setElValue('discountType', '無折扣');
+        setElValue('discountAmountHkd', '');
+        setElValue('discountMultiplier', '');
+        setElValue('discountReason', '');
+        setElValue('deliveryChargeMode', 'LKS車隊運費到付');
+        setElValue('deliveryOfferReason', '不適用');
+      }
+      toggleDiscountInputs();
+      toggleDeliveryInputs();
+    }
+
     function recalcTotal() {
       var sub = parseFloat(document.getElementById('subtotal').value) || 0;
-      var disc = parseFloat(document.getElementById('discount').value);
-      var d = isNaN(disc) ? 1 : disc;
-      document.getElementById('total').value = Math.ceil(sub * d);
+      var discountValue = calculateDiscountValue(sub);
+      var total = Math.max(0, Math.ceil(sub - discountValue));
+      var discountText = buildDiscountDisplayText();
+      var deliveryText = buildDeliveryDisplayText();
+      document.getElementById('total').value = total;
+      setText('previewSubtotal', formatMoney(sub, 2));
+      setText('previewTotal', formatMoney(total, 0));
+      setText('previewDeliveryText', deliveryText || '-');
+      var discountRow = document.getElementById('previewDiscountRow');
+      if (discountValue > 0) {
+        if (discountRow) discountRow.style.display = 'flex';
+        setText('previewDiscountText', discountText || '優惠折扣');
+        setText('previewDiscountAmount', '-' + formatMoney(discountValue, 2));
+      } else {
+        if (discountRow) discountRow.style.display = 'none';
+        setText('previewDiscountText', '優惠折扣');
+        setText('previewDiscountAmount', '-$0.00');
+      }
     }
     function collectItems() {
       var items = [];
@@ -1582,7 +1789,16 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           contactMethod: form.querySelector('[name=contactMethod]').value,
           contactHandle: form.querySelector('[name=contactHandle]').value,
           subtotal: document.getElementById('subtotal').value,
-          discount: document.getElementById('discount').value,
+          promotionType: getElValue('promotionType'),
+          discountType: getElValue('discountType'),
+          discountMultiplier: getElValue('discountMultiplier'),
+          discountAmountHkd: getElValue('discountAmountHkd'),
+          discountReason: getElValue('discountReason'),
+          discountValueHkd: calculateDiscountValue(parseFloat(document.getElementById('subtotal').value) || 0),
+          discountDisplayText: buildDiscountDisplayText(),
+          deliveryChargeMode: getElValue('deliveryChargeMode'),
+          deliveryOfferReason: getElValue('deliveryOfferReason'),
+          deliveryDisplayText: buildDeliveryDisplayText(),
           total: document.getElementById('total').value,
           validUntil: form.querySelector('[name=validUntil]').value,
           notes: form.querySelector('[name=notes]').value,
@@ -1601,6 +1817,8 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           })
           .catch(function(err) { alert('Error: ' + err.message); });
       });
+      toggleDiscountInputs();
+      toggleDeliveryInputs();
       recalcSubtotal();
     });
   </script>`;
@@ -1667,8 +1885,37 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       })
       .join('\n');
     const subtotal = parseFloat(b.subtotal) || 0;
-    const discountRate = parseFloat(b.discount) || 1;
-    const total = Math.ceil(parseFloat(b.total) || subtotal * discountRate);
+    const promotionType = String(b.promotionType || '無優惠');
+    const discountType = String(b.discountType || '無折扣');
+    const discountMultiplierRaw = parseFloat(String(b.discountMultiplier));
+    const discountMultiplier = Number.isFinite(discountMultiplierRaw) ? discountMultiplierRaw : null;
+    const discountAmountHkd = parseFloat(String(b.discountAmountHkd)) || 0;
+    const discountReason = String(b.discountReason || '');
+    const deliveryChargeMode = String(b.deliveryChargeMode || '已包本地送貨');
+    const deliveryOfferReason = String(b.deliveryOfferReason || '');
+
+    let discountValueHkd = 0;
+    if (discountType === '百分比折扣') {
+      const multiplier = discountMultiplier ?? 1;
+      discountValueHkd = Math.max(0, subtotal * (1 - multiplier));
+    } else if (discountType === '指定金額扣減') {
+      discountValueHkd = Math.max(0, Math.min(discountAmountHkd, subtotal));
+    }
+    discountValueHkd = Math.round(discountValueHkd * 100) / 100;
+
+    const total = Math.max(0, Math.ceil(subtotal - discountValueHkd));
+    const discountRate = subtotal > 0 ? Math.max(0, Math.round((total / subtotal) * 10000) / 10000) : 1;
+
+    const discountDisplayText = String(b.discountDisplayText || (discountValueHkd > 0
+      ? (discountType === '百分比折扣' && discountReason && discountMultiplier
+        ? `${discountReason}：${Math.round(discountMultiplier * 100) / 10}折優惠`
+        : (discountType === '指定金額扣減' && discountReason
+          ? `${discountReason}：全單減 HKD $${Math.ceil(discountAmountHkd)}`
+          : '優惠折扣'))
+      : ''));
+    const deliveryDisplayText = String(b.deliveryDisplayText || (deliveryChargeMode === '已包本地送貨'
+      ? (deliveryOfferReason && deliveryOfferReason !== '不適用' ? `已包本地送貨｜${deliveryOfferReason}` : '已包本地送貨')
+      : deliveryChargeMode));
 
     const quoteNumber = await getNextNumber(tableQuotes, 'Quote Number', 'QT');
     const publicToken = generateToken();
@@ -1714,8 +1961,17 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Contact Method': b.contactMethod,
         'Contact Handle / Reference': b.contactHandle || '',
         'Sub Total': subtotal,
+        // Legacy Discount is kept as an effective multiplier so old Airtable formulas/views stay compatible.
         'Discount': discountRate,
         'Total': total,
+        'Promotion / Offer Type': promotionType,
+        'Discount Type': discountType,
+        'Discount Multiplier': discountType === '百分比折扣' && discountMultiplier !== null ? discountMultiplier : undefined,
+        'Discount Amount HKD': discountType === '指定金額扣減' ? discountAmountHkd : 0,
+        'Discount Reason': discountReason || '',
+        // Discount Value HKD / Discount Display Text / Delivery Display Text are Airtable formula fields in Quotes, so do not write them here.
+        'Delivery Charge Mode': deliveryChargeMode,
+        'Delivery Offer Reason': deliveryOfferReason || '',
         'Quote Items JSON': itemsJson,
         'Description Summary': descriptionSummary,
         'Notes': b.notes || '',
@@ -1786,7 +2042,9 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     const subtotal = (quote['Sub Total'] as number) || 0;
     const discountRate = (quote['Discount'] as number) ?? 1;
     const total = (quote['Total'] as number) || 0;
-    const discountAmount = subtotal - total;
+    const discountAmount = Number(quote['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
+    const discountDisplayText = (quote['Discount Display Text'] as string) || (discountAmount > 0 ? '優惠折扣' : '');
+    const deliveryDisplayText = (quote['Delivery Display Text'] as string) || (quote['Delivery Charge Mode'] as string) || '';
 
     // Items table rows
     const descriptionSummary = (quote['Description Summary'] as string) || '';
@@ -1884,9 +2142,10 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           </div>
 
           <div class="totals-box">
-            <div class="row subtotal-row" style="justify-content:space-between;gap:18px;"><span class="free-delivery-offer" style="color:#d8833b;">🎊首次購買即享免運費優惠🎊</span><span><span style="color:#666;margin-right:24px;">Subtotal</span>$${subtotal.toFixed(2)}</span></div>
-            ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            <div class="row total-row"><span>Total</span><span>$${total}</span></div>
+            <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
+            ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>送貨安排</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
+            <div class="row total-row"><span>Total</span><span>$${Math.ceil(total)}</span></div>
           </div>
 
           ${quote['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:14px;">${nl2br(quote['Notes'])}</p></div>` : ''}
@@ -2204,6 +2463,16 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       'Customer': [customerRecordId],
       'Product Amount': qf['Sub Total'],
       'Discount': qf['Discount'],
+      'Promotion / Offer Type': qf['Promotion / Offer Type'] || '無優惠',
+      'Discount Type': qf['Discount Type'] || '無折扣',
+      'Discount Multiplier': (qf['Discount Multiplier'] as number | undefined) || undefined,
+      'Discount Amount HKD': qf['Discount Amount HKD'] || 0,
+      'Discount Reason': qf['Discount Reason'] || '',
+      'Discount Value HKD': qf['Discount Value HKD'] || Math.max(0, Number(qf['Sub Total'] || 0) - Number(qf['Total'] || 0)),
+      'Discount Display Text': qf['Discount Display Text'] || '',
+      'Delivery Charge Mode': qf['Delivery Charge Mode'] || '',
+      'Delivery Offer Reason': qf['Delivery Offer Reason'] || '',
+      'Delivery Display Text': qf['Delivery Display Text'] || '',
       // 'Final Amount' is computed — do NOT write
       // 'Description' is computed — do NOT write
       'Payment Method': qf['Payment Method'] || '',
@@ -2335,7 +2604,9 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
     const total =
       (of['Final Amount'] as number) ||
       Math.ceil(subtotal * discountRate);
-    const discountAmount = subtotal - total;
+    const discountAmount = Number(of['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
+    const discountDisplayText = (of['Discount Display Text'] as string) || (discountAmount > 0 ? '優惠折扣' : '');
+    const deliveryDisplayText = (of['Delivery Display Text'] as string) || (of['Delivery Charge Mode'] as string) || '';
     const balanceDue = status === 'Paid' ? 0 : total;
 
     const content = `
@@ -2398,7 +2669,8 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
           <div class="totals-box">
             <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
-            ${discountAmount > 0 ? `<div class="row"><span>Discount</span><span style="color:#ef4444;">-$${discountAmount.toFixed(2)}</span></div>` : ''}
+            ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>送貨安排</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
             <div class="row total-row"><span>Total</span><span>$${Math.ceil(total)}</span></div>
             <div class="row balance-row" style="color:${status === 'Paid' ? '#10b981' : '#ef4444'};">
               <span>Balance Due</span><span>$${Math.ceil(balanceDue)}</span>
