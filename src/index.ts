@@ -76,20 +76,33 @@ const DEFAULT_PAYMENT_TERMS = `1. 所有訂單均需於確認後支付全數貨�
 4. 運費會因貨物重量、尺寸及送貨地點而有所不同，實際金額以最終發出之運費發票為準。
 5. 本公司保留最終收費及送貨安排之決定權。`;
 
-const DEFAULT_QUOTE_NOTES = `🎊 新客戶優惠 🎊
-🔽 首次購買即享 免運費 點到點送到屋企💫 
-💡 必須 Like Facebook Page 並分享指定 Post 💡
+const DEFAULT_QUOTE_NOTES = `💡 所有優惠必須 Like Facebook Page 並分享指定 Post 才能享有優惠💡
 
-🎊貨期更新🎊
-🚚由45個工作天加快至30個工作天內出貨🚚
-❌❌❌ 不接急單 ❌❌❌
-
-展示盒介紹
 🤏🏻 全港少數採用 5MM 高清厚板製作展示盒及展示櫃 🤏🏻
 💫 購買任何展示盒或展示櫃，附送趟門或磁石門。💫
 ➕ 加購優惠 ➕ 如加購背景或刻字，即免費設計及修圖。
-💡 獨立燈板 💡 獨立燈板與展示盒分體設計，方便日後升級成疊高展示櫃，燈板亦可靈活轉為上燈或下燈 🚪
-💰 新客戶專屬優惠 💰 首次購買即享 85 折優惠 🫶🏻`;
+💡 獨立燈板 💡 獨立燈板與展示盒分體設計，方便日後升級成疊高展示櫃，燈板亦可靈活轉為上燈或下燈 🚪`;
+
+const DEFAULT_QUOTE_NOTES_EN = `💡 All offers are only valid after liking our Facebook Page and sharing the designated post. 💡
+
+🤏🏻 LKS Display Box is one of the few Hong Kong brands using 5MM high-clarity thick acrylic panels for display boxes and display cases. 🤏🏻
+💫 Any display box or display case order includes a sliding door or magnetic door. 💫
+➕ Add-on offer ➕ Add a background or engraving and enjoy free design and image retouching.
+💡 Independent light board 💡 The independent light board is separate from the display box, making it easier to upgrade into a stackable display case later. The light board can also be used flexibly as a top light or bottom light. 🚪`;
+
+const DEFAULT_TERMS_EN = `1. This quotation is for reference only. All sizes, design details and specifications must be confirmed by the customer before the order is finalized.
+2. Customers are responsible for measuring their display items. Size suggestions provided by LKS Display Box, including the recommended 5–10cm clearance, are for reference only. The final size must be confirmed by the customer.
+3. All products are custom-made. Once an order is confirmed, cancellation or refund is not accepted. Any change in size or design may require a new quotation and production schedule.
+4. Offers or discounts shown in this quotation are valid only within the specified period. LKS Display Box reserves the final decision.
+5. Production will be arranged after order confirmation. Standard production time is around 30 working days. Public holidays or peak seasons may require additional time.
+6. Refund requests due to production or delivery delay will not be accepted.
+7. If delivery is affected by site restrictions, including doorway size, stairs, lift access or corridor space, LKS Display Box shall not be responsible for related costs or issues.
+8. Customers should inspect the product upon delivery. Any issue should be reported immediately; otherwise the product will be treated as accepted.
+9. LKS Display Box is not responsible for damage caused by misuse, human damage or incorrect self-installation.
+10. Acrylic products may have minor production marks, which are considered normal.
+11. LKS Display Box reserves the final decision on all quotations and orders.`;
+
+const MATERIAL_NOTE_EN = 'All LKS display boxes and display cases are made with 5MM high-clarity acrylic panels';
 
 const MATERIAL_NOTE = '本公司全線展示盒及展示櫃均採用 5MM 高清亞加力厚板製作';
 const PAYMENT_METHOD_HTML = `
@@ -910,6 +923,22 @@ app.get('/quote/create', (_req: Request, res: Response) => {
       ${docHeader('建立報價單', 'Create Quote')}
       <div class="doc-body">
         <form id="quoteForm">
+
+          <div class="section">
+            <div class="section-title">報價單語言 / Quote Language</div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Share View 顯示語言</label>
+                <select name="quoteLanguage" id="quoteLanguage">
+                  <option value="中文">中文</option>
+                  <option value="English">English</option>
+                </select>
+              </div>
+              <div class="form-group" style="display:flex;align-items:flex-end;color:#6b7280;font-size:12px;">
+                只影響客人 Share View 顯示；Create Quote 內部介面維持原本格式。
+              </div>
+            </div>
+          </div>
 
           <div class="section">
             <div class="section-title">Existing Customer 客戶搜尋</div>
@@ -1773,6 +1802,7 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           contactMethod: form.querySelector('[name=contactMethod]').value,
           contactHandle: form.querySelector('[name=contactHandle]').value,
           subtotal: document.getElementById('subtotal').value,
+          quoteLanguage: getElValue('quoteLanguage') || '中文',
           promotionType: getElValue('promotionType'),
           discountType: getElValue('discountType'),
           discountMultiplier: getElValue('discountMultiplier'),
@@ -1869,6 +1899,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       })
       .join('\n');
     const subtotal = parseFloat(b.subtotal) || 0;
+    const quoteLanguage = String(b.quoteLanguage || '中文') === 'English' ? 'English' : '中文';
     const promotionType = String(b.promotionType || '');
     const discountType = String(b.discountType || '無折扣');
     const discountMultiplierRaw = parseFloat(String(b.discountMultiplier));
@@ -1939,6 +1970,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Quote Number': quoteNumber,
         'Quote Date': quoteDate,
         'Public Token': publicToken,
+        'Quote Language': quoteLanguage,
         'Valid Until': b.validUntil && b.validUntil.trim() ? b.validUntil.trim() : null,
         'Contact Name': b.contactName,
         'Phone': b.phone,
@@ -1983,7 +2015,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
           <div class="alert alert-success">Quote created successfully!</div>
           <div class="info-grid info-grid-2" style="margin-bottom:20px;">
             <div class="info-block"><div class="lbl">Quote Number</div><div class="val">${escapeHtml(quoteNumber)}</div></div>
-            <div class="info-block"><div class="lbl">Date</div><div class="val">${quoteDate}</div></div>
+            <div class="info-block"><div class="lbl">Quote Date</div><div class="val">${quoteDate}</div></div>
           </div>
           <div class="section">
             <div class="section-title">Links</div>
@@ -2018,6 +2050,73 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     const quote = records[0].fields;
     const status = (quote['Status'] as string) || 'Draft';
+    const quoteLanguage = ((quote['Quote Language'] as string) || '中文') === 'English' ? 'English' : '中文';
+    const isEnglish = quoteLanguage === 'English';
+    const L = {
+      quoteTitle: isEnglish ? 'Quotation' : '報價單',
+      quoteSubTitle: isEnglish ? '' : 'Quotation',
+      quoteNumber: isEnglish ? 'Quote Number' : '報價編號',
+      date: isEnglish ? 'Date' : '報價日期',
+      validUntil: isEnglish ? 'Valid Until' : '報價有效日期',
+      contactInfo: isEnglish ? 'Contact Information' : '客戶資料',
+      contactName: isEnglish ? 'Contact Name' : '聯絡人',
+      phone: isEnglish ? 'Phone' : '電話',
+      contactMethod: isEnglish ? 'Contact Method' : '聯絡方式',
+      contactHandle: isEnglish ? 'Contact Handle / Reference' : '聯絡帳號 / 參考',
+      items: isEnglish ? 'Items' : '產品項目',
+      itemType: isEnglish ? 'Item Type' : '產品類型',
+      forWhat: isEnglish ? 'For What' : '擺放物品',
+      interL: isEnglish ? 'Internal L' : '內長',
+      interD: isEnglish ? 'Internal D' : '內深',
+      interH: isEnglish ? 'Internal H' : '內高',
+      outerL: isEnglish ? 'Outer L' : '外長',
+      outerD: isEnglish ? 'Outer D' : '外深',
+      outerH: isEnglish ? 'Outer H' : '外高',
+      levels: isEnglish ? 'Levels' : '層數',
+      levelHeights: isEnglish ? 'Level Heights' : '每層高度',
+      accessories: isEnglish ? 'Accessories' : '配件',
+      description: isEnglish ? 'Description' : '描述',
+      qty: isEnglish ? 'QTY' : '數量',
+      amount: isEnglish ? 'Amount' : '金額',
+      subtotal: isEnglish ? 'Subtotal' : '小計',
+      delivery: isEnglish ? 'Delivery Arrangement' : '送貨安排',
+      total: isEnglish ? 'Total' : '總額',
+      notes: isEnglish ? 'Notes' : '備註',
+      terms: isEnglish ? 'Terms and Conditions' : '條款及細則',
+      thankYou: isEnglish ? 'Thank you!' : '多謝！'
+    };
+    const mapDiscountReasonEn = (reason: string): string => {
+      const map: Record<string, string> = {
+        'ToyTV 專屬優惠': 'ToyTV exclusive offer',
+        '新客戶優惠': 'New customer offer',
+        '回購優惠': 'Returning customer offer'
+      };
+      return map[reason] || reason || 'Offer discount';
+    };
+    const buildShareDiscountText = (): string => {
+      if (!isEnglish) return (quote['Discount Display Text'] as string) || '';
+      const reason = mapDiscountReasonEn(String(quote['Discount Reason'] || ''));
+      const type = String(quote['Discount Type'] || '');
+      const amount = Number(quote['Discount Amount HKD'] || 0);
+      const multiplier = Number(quote['Discount Multiplier'] || 0);
+      if (type === '指定金額扣減' && amount > 0) return `${reason}: HKD $${Math.ceil(amount)} off`;
+      if (type === '百分比折扣' && multiplier > 0) return `${reason}: ${Math.round((1 - multiplier) * 100)}% off`;
+      return 'Offer discount';
+    };
+    const buildShareDeliveryText = (): string => {
+      const mode = String(quote['Delivery Charge Mode'] || '');
+      const reason = String(quote['Delivery Offer Reason'] || '');
+      if (!isEnglish) return (quote['Delivery Display Text'] as string) || mode || '';
+      if (mode === '已包本地送貨') {
+        const reasonMap: Record<string, string> = {
+          '新客戶免運費': 'New customer free delivery',
+          'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery'
+        };
+        return reason ? `Local delivery included | ${reasonMap[reason] || reason}` : 'Local delivery included';
+      }
+      if (mode === 'LKS 車隊 運費到付') return 'LKS fleet delivery fee payable separately';
+      return mode;
+    };
 
     // Parse items
     let items: any[] = [];
@@ -2027,8 +2126,8 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     const discountRate = (quote['Discount'] as number) ?? 1;
     const total = (quote['Total'] as number) || 0;
     const discountAmount = Number(quote['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
-    const discountDisplayText = (quote['Discount Display Text'] as string) || (discountAmount > 0 ? '優惠折扣' : '');
-    const deliveryDisplayText = (quote['Delivery Display Text'] as string) || (quote['Delivery Charge Mode'] as string) || '';
+    const discountDisplayText = discountAmount > 0 ? buildShareDiscountText() : '';
+    const deliveryDisplayText = buildShareDeliveryText();
 
     // Items table rows
     const descriptionSummary = (quote['Description Summary'] as string) || '';
@@ -2058,10 +2157,10 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           </tr>
           <tr class="item-sub-detail">
             <td></td>
-            <td colspan="5"><div class="mini-label">Accessories</div>${renderAccTags(item.accessories)}</td>
-            <td colspan="3"><div class="mini-label">Description</div>${escapeHtml(item.description) || '-'}</td>
-            <td style="text-align:center;"><div class="mini-label">QTY</div>${item.qty || 1}</td>
-            <td style="text-align:right;"><div class="mini-label">Amount</div>$${item.amount || 0}</td>
+            <td colspan="5"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
+            <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
+            <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
+            <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
           </tr>`;
         }).join('');
 
@@ -2075,49 +2174,49 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
       <div class="section">
         <div class="section-title">Contact Information</div>
         <div class="info-grid info-grid-2">
-          <div class="info-block"><div class="lbl">Contact Name</div><div class="val-sm">${escapeHtml(contactName) || 'N/A'}</div></div>
-          <div class="info-block"><div class="lbl">Phone</div><div class="val-sm">${escapeHtml(contactPhone) || 'N/A'}</div></div>
-          <div class="info-block"><div class="lbl">Contact Method</div><div class="val-sm">${escapeHtml(contactMethod) || 'N/A'}</div></div>
-          <div class="info-block"><div class="lbl">Contact Handle / Reference</div><div class="val-sm">${escapeHtml(contactHandle) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">${L.contactName}</div><div class="val-sm">${escapeHtml(contactName) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">${L.phone}</div><div class="val-sm">${escapeHtml(contactPhone) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">${L.contactMethod}</div><div class="val-sm">${escapeHtml(contactMethod) || 'N/A'}</div></div>
+          <div class="info-block"><div class="lbl">${L.contactHandle}</div><div class="val-sm">${escapeHtml(contactHandle) || 'N/A'}</div></div>
         </div>
       </div>`;
 
     const content = `
       <div class="doc-card">
-        ${docHeader('報價單', 'Quotation')}
+        ${docHeader(L.quoteTitle, L.quoteSubTitle)}
         <div class="doc-body">
 
           <div class="info-grid info-grid-3" style="margin-bottom:16px;">
             <div class="info-block">
-              <div class="lbl">Quote Number</div>
+              <div class="lbl">${L.quoteNumber}</div>
               <div class="val">${escapeHtml(quote['Quote Number'] as string)}</div>
             </div>
             <div class="info-block">
-              <div class="lbl">Date</div>
+              <div class="lbl">${L.date}</div>
               <div class="val-sm">${escapeHtml(quote['Quote Date'] as string)}</div>
             </div>
-            ${quote['Valid Until'] ? `<div class="info-block"><div class="lbl">報價有效日期</div><div class="val-sm">${escapeHtml(quote['Valid Until'] as string)}</div></div>` : '<div></div>'}
+            ${quote['Valid Until'] ? `<div class="info-block"><div class="lbl">${L.validUntil}</div><div class="val-sm">${escapeHtml(quote['Valid Until'] as string)}</div></div>` : '<div></div>'}
           </div>
 
           ${contactBlock}
 
           <div class="section">
-            <div class="section-title">Items</div>
+            <div class="section-title">${L.items}</div>
             <div style="overflow-x:auto;">
-              <div class="material-banner">${escapeHtml(MATERIAL_NOTE)}</div><table class="items-table">
+              <div class="material-banner">${escapeHtml(isEnglish ? MATERIAL_NOTE_EN : MATERIAL_NOTE)}</div><table class="items-table">
                 <thead>
                   <tr>
                     <th>#</th>
-                    <th>Item Type</th>
-                    <th>For What</th>
-                    <th>Inter L</th>
-                    <th>Inter D</th>
-                    <th>Inter H</th>
-                    <th>Outer L</th>
-                    <th>Outer D</th>
-                    <th>Outer H</th>
-                    <th>Levels</th>
-                    <th>Level Heights</th>
+                    <th>${L.itemType}</th>
+                    <th>${L.forWhat}</th>
+                    <th>${L.interL}</th>
+                    <th>${L.interD}</th>
+                    <th>${L.interH}</th>
+                    <th>${L.outerL}</th>
+                    <th>${L.outerD}</th>
+                    <th>${L.outerH}</th>
+                    <th>${L.levels}</th>
+                    <th>${L.levelHeights}</th>
                   </tr>
                 </thead>
                 <tbody>${itemRows}</tbody>
@@ -2126,21 +2225,21 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           </div>
 
           <div class="totals-box">
-            <div class="row"><span>Subtotal</span><span>$${subtotal.toFixed(2)}</span></div>
+            <div class="row"><span>${L.subtotal}</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            ${deliveryDisplayText ? `<div class="row delivery-row"><span>送貨安排</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
-            <div class="row total-row"><span>Total</span><span>$${Math.ceil(total)}</span></div>
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${L.delivery}</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
+            <div class="row total-row"><span>${L.total}</span><span>$${Math.ceil(total)}</span></div>
           </div>
 
-          ${quote['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">Notes</div><p style="font-size:14px;">${nl2br(quote['Notes'])}</p></div>` : ''}
-          ${quote['Terms and Conditions'] ? `<div class="section"><div class="section-title">Terms and Conditions</div><p style="font-size:13px;color:#374151;">${nl2br(quote['Terms and Conditions'])}</p></div>` : ''}
+          ${quote['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">${L.notes}</div><p style="font-size:14px;">${nl2br(isEnglish ? DEFAULT_QUOTE_NOTES_EN : String(quote['Notes'] || ''))}</p></div>` : ''}
+          ${quote['Terms and Conditions'] ? `<div class="section"><div class="section-title">${L.terms}</div><p style="font-size:13px;color:#374151;">${nl2br(isEnglish ? DEFAULT_TERMS_EN : String(quote['Terms and Conditions'] || ''))}</p></div>` : ''}
 
-          <div class="thank-you">Thank you!</div>
+          <div class="thank-you">${L.thankYou}</div>
         </div>
       </div>
     `;
 
-    res.send(renderPage(`Quote ${quote['Quote Number']}`, content));
+    res.send(renderPage(`${isEnglish ? 'Quote' : '報價單'} ${quote['Quote Number']}`, content));
   } catch (error: any) {
     console.error(error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
