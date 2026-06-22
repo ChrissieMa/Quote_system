@@ -154,6 +154,8 @@ const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE ||
 const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
+const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
+const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
 
 const normalizeQuoteLanguage = (value: unknown): '中文' | 'English' =>
   String(value || '').trim() === 'English' ? 'English' : '中文';
@@ -976,7 +978,31 @@ app.get('/quotes', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quote/create
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/quote/create', (_req: Request, res: Response) => {
+app.get('/quote/create', async (_req: Request, res: Response) => {
+  let inquiryOptions = '<option value="">不連結查詢</option>';
+  let performanceMonthOptions = '<option value="">不連結月份</option>';
+  try {
+    const inquiryRecords = await tableInquiries.select({ maxRecords: 100 }).all();
+    inquiryOptions += inquiryRecords.map((record) => {
+      const f = record.fields;
+      const label = String(f['Inquiry Ref'] || f['Inquiry No'] || f['Customer Name'] || f['Phone'] || record.id);
+      const channel = f['Channel'] ? ` · ${String(f['Channel'])}` : '';
+      return `<option value="${record.id}">${escapeHtml(label + channel)}</option>`;
+    }).join('');
+  } catch (error) {
+    console.warn('Unable to load Inquiries for Create Quote:', error);
+  }
+  try {
+    const performanceRecords = await tableMonthlyPerformance.select({ maxRecords: 60 }).all();
+    performanceMonthOptions += performanceRecords.map((record) => {
+      const f = record.fields;
+      const label = String(f['Month'] || record.id);
+      return `<option value="${record.id}">${escapeHtml(label)}</option>`;
+    }).join('');
+  } catch (error) {
+    console.warn('Unable to load Monthly Performance for Create Quote:', error);
+  }
+
   const content = `
     <div class="doc-card">
       ${docHeader('建立報價單', 'Create Quote')}
@@ -997,6 +1023,49 @@ app.get('/quote/create', (_req: Request, res: Response) => {
                 只影響客人 Share View 顯示；Create Quote 內部介面維持原本格式。
               </div>
             </div>
+          </div>
+
+          <div class="section">
+            <div class="section-title">查詢來源 / Monthly Review</div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Quote Source / Channel</label>
+                <select name="quoteSourceChannel" id="quoteSourceChannel">
+                  <option value="">請選擇</option>
+                  <option value="Website">Website</option>
+                  <option value="WhatsApp Direct">WhatsApp Direct</option>
+                  <option value="Meta Ads">Meta Ads</option>
+                  <option value="Facebook Organic">Facebook Organic</option>
+                  <option value="Instagram Organic">Instagram Organic</option>
+                  <option value="Carousell">Carousell</option>
+                  <option value="KOL">KOL</option>
+                  <option value="Google Search">Google Search</option>
+                  <option value="Google Organic">Google Organic</option>
+                  <option value="Referral">Referral</option>
+                  <option value="Returning Customer">Returning Customer</option>
+                  <option value="Other">Other</option>
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Campaign / Source Detail</label>
+                <input type="text" name="campaignSourceDetail" id="campaignSourceDetail" placeholder="例如 ToyTV June 2026 / Carousell BE@RBRICK 1000%">
+              </div>
+            </div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>Inquiry</label>
+                <select name="inquiryRecordId" id="inquiryRecordId">
+                  ${inquiryOptions}
+                </select>
+              </div>
+              <div class="form-group">
+                <label>Performance Month</label>
+                <select name="performanceMonthRecordId" id="performanceMonthRecordId">
+                  ${performanceMonthOptions}
+                </select>
+              </div>
+            </div>
+            <div style="font-size:12px;color:#6b7280;margin-top:6px;">用於每月檢討：來源會跟 Quote 一齊保存，Convert to Invoice 時會帶去 Order_2026。</div>
           </div>
 
           <div class="section">
@@ -1862,6 +1931,10 @@ app.get('/quote/create', (_req: Request, res: Response) => {
           contactHandle: form.querySelector('[name=contactHandle]').value,
           subtotal: document.getElementById('subtotal').value,
           quoteLanguage: getElValue('quoteLanguage') || '中文',
+          quoteSourceChannel: getElValue('quoteSourceChannel'),
+          campaignSourceDetail: getElValue('campaignSourceDetail'),
+          inquiryRecordId: getElValue('inquiryRecordId'),
+          performanceMonthRecordId: getElValue('performanceMonthRecordId'),
           promotionType: getElValue('promotionType'),
           discountType: getElValue('discountType'),
           discountMultiplier: getElValue('discountMultiplier'),
@@ -1967,6 +2040,10 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     const discountReason = String(b.discountReason || '');
     const deliveryChargeMode = String(b.deliveryChargeMode || '已包本地送貨');
     const deliveryOfferReason = String(b.deliveryOfferReason || '');
+    const quoteSourceChannel = String(b.quoteSourceChannel || '').trim();
+    const campaignSourceDetail = String(b.campaignSourceDetail || '').trim();
+    const inquiryRecordId = String(b.inquiryRecordId || '').trim();
+    const performanceMonthRecordId = String(b.performanceMonthRecordId || '').trim();
 
     let discountValueHkd = 0;
     if (discountType === '百分比折扣') {
@@ -2030,6 +2107,10 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         'Quote Date': quoteDate,
         'Public Token': publicToken,
         'Quote Language': quoteLanguage,
+        ...(quoteSourceChannel ? { 'Quote Source / Channel': quoteSourceChannel } : {}),
+        ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
+        ...(inquiryRecordId ? { 'Inquiry': [inquiryRecordId] } : {}),
+        ...(performanceMonthRecordId ? { 'Performance Month': [performanceMonthRecordId] } : {}),
         'Valid Until': b.validUntil && b.validUntil.trim() ? b.validUntil.trim() : null,
         'Contact Name': b.contactName,
         'Phone': b.phone,
@@ -2646,6 +2727,10 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
       'Delivery Charge Mode': qf['Delivery Charge Mode'] || '',
       'Delivery Offer Reason': qf['Delivery Offer Reason'] || undefined,
       'Delivery Display Text': qf['Delivery Display Text'] || '',
+      ...(qf['Quote Source / Channel'] ? { 'Order Source / Channel': qf['Quote Source / Channel'] } : {}),
+      ...(qf['Campaign / Source Detail'] ? { 'Campaign / Source Detail': qf['Campaign / Source Detail'] } : {}),
+      ...(Array.isArray(qf['Inquiry']) && qf['Inquiry'].length ? { 'Inquiry': qf['Inquiry'] } : {}),
+      ...(Array.isArray(qf['Performance Month']) && qf['Performance Month'].length ? { 'Performance Month': qf['Performance Month'] } : {}),
       // 'Final Amount' is computed — do NOT write
       // 'Description' is computed — do NOT write
       'Payment Method': qf['Payment Method'] || '',
