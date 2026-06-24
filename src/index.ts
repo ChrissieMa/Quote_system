@@ -2143,7 +2143,46 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         } : {}),
       };
 
-    await tableQuotes.create([{ fields: quoteFields }]);
+    const createdQuoteRecords = await tableQuotes.create([{ fields: quoteFields }]);
+    const createdQuoteRecordId = createdQuoteRecords[0].id;
+
+    // V13: Auto-create / update Inquiry from Create Quote so daily workflow does not require double entry.
+    // If an Inquiry is manually selected, link this Quote back to it and mark it as Quoted.
+    // If no Inquiry is selected, create a new Inquiry record from the Quote source fields, then link it back to the Quote.
+    try {
+      if (inquiryRecordId) {
+        const inquiryUpdateFields: FieldSet = {
+          'Inquiry Status': 'Quoted',
+          'Quote': [createdQuoteRecordId],
+          ...(performanceMonthRecordId ? { 'Performance Month': [performanceMonthRecordId] } : {}),
+          ...(quoteSourceChannel ? { 'Channel': quoteSourceChannel } : {}),
+          ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
+        };
+        await tableInquiries.update([{ id: inquiryRecordId, fields: inquiryUpdateFields }]);
+      } else if (quoteSourceChannel || performanceMonthRecordId || campaignSourceDetail) {
+        const firstItem = items[0] || {};
+        const autoInquiryFields: FieldSet = {
+          'Inquiry Date': quoteDate,
+          'Customer Name': quoteCustomerName || String(b.contactName || '').trim(),
+          'Phone': quoteCustomerPhone || String(b.phone || '').trim(),
+          ...(quoteSourceChannel ? { 'Channel': quoteSourceChannel } : {}),
+          ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
+          ...(firstItem.itemType ? { 'Product Interest': firstItem.itemType } : {}),
+          'Inquiry Status': 'Quoted',
+          'Quote': [createdQuoteRecordId],
+          ...(performanceMonthRecordId ? { 'Performance Month': [performanceMonthRecordId] } : {}),
+          'Notes': `Auto-created from Create Quote ${quoteNumber}`,
+        };
+        const createdInquiryRecords = await tableInquiries.create([{ fields: autoInquiryFields }]);
+        await tableQuotes.update([{
+          id: createdQuoteRecordId,
+          fields: { 'Inquiry': [createdInquiryRecords[0].id] } as FieldSet,
+        }]);
+      }
+    } catch (inquiryError) {
+      console.error('V13 inquiry auto-link failed:', inquiryError);
+      // Do not block quote creation if Inquiry automation fails.
+    }
 
     const publicLink = `${PUBLIC_BASE_URL}/quote/${publicToken}`;
     const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${publicToken}/customer-info`;
@@ -2741,6 +2780,23 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     };
     const newOrder = await tableOrders.create([{ fields: orderFields }]);
     const orderRecordId = newOrder[0].id;
+
+    // V13: When a Quote converts to Invoice, mark the linked Inquiry as Converted and link the Order.
+    try {
+      const linkedInquiryId = getLinkedRecordId(qf['Inquiry']);
+      if (linkedInquiryId) {
+        await tableInquiries.update([{
+          id: linkedInquiryId,
+          fields: {
+            'Inquiry Status': 'Converted',
+            'Order': [orderRecordId],
+          } as FieldSet,
+        }]);
+      }
+    } catch (inquiryUpdateError) {
+      console.error('V13 inquiry conversion update failed:', inquiryUpdateError);
+      // Do not block invoice conversion if Inquiry update fails.
+    }
 
     // C. Order Items
     let items: any[] = [];
