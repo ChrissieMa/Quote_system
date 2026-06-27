@@ -182,20 +182,12 @@ const buildDisplayDiscountText = (fields: FieldSet, isEnglish: boolean): string 
   return 'Offer discount';
 };
 
-const buildDisplayDeliveryText = (fields: FieldSet, isEnglish: boolean): string => {
-  const mode = String(fields['Delivery Charge Mode'] || '');
-  const reason = String(fields['Delivery Offer Reason'] || '');
-  if (!isEnglish) return (fields['Delivery Display Text'] as string) || mode || '';
-  if (mode === '已包本地送貨') {
-    const reasonMap: Record<string, string> = {
-      '新客戶免運費': 'New customer free delivery',
-      'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery'
-    };
-    return reason ? `Local delivery included | ${reasonMap[reason] || reason}` : 'Local delivery included';
-  }
-  if (mode === 'LKS 車隊 運費到付') return 'LKS fleet delivery fee payable separately';
-  return mode;
-};
+const buildDisplayDeliveryText = (
+  fields: FieldSet,
+  isEnglish: boolean,
+  localDeliveryAmount = 0,
+  validUntil?: unknown
+): string => buildDeliveryWaiverText(fields, isEnglish, localDeliveryAmount, validUntil);
 
 const getOrderLanguageFromSourceQuote = async (orderFields: FieldSet): Promise<'中文' | 'English'> => {
   if (orderFields['Quote Language']) return normalizeQuoteLanguage(orderFields['Quote Language']);
@@ -220,6 +212,69 @@ const escapeHtml = (unsafe: unknown): string =>
 
 const nl2br = (str: unknown): string =>
   escapeHtml(str).replace(/\n/g, '<br>');
+
+
+const sumQuoteLocalDelivery = (items: any[]): number =>
+  (Array.isArray(items) ? items : []).reduce((sum, item) => {
+    const value = Number(item?.hongKongDelivery ?? item?.deliveryCostReserve ?? item?.localDelivery ?? 0);
+    return sum + (Number.isFinite(value) ? value : 0);
+  }, 0);
+
+const buildDeliveryFeeRange = (localDeliveryAmount: number): string => {
+  const amount = Number(localDeliveryAmount) || 0;
+  if (amount <= 0) return '';
+  const lower = Math.ceil(amount / 100) * 100;
+  const upper = lower + 100;
+  return `HK$${lower}–$${upper}`;
+};
+
+const formatDeliveryOfferReasonZh = (reason: string): string => {
+  if (reason === '新客戶免運費') return '新客戶免運費優惠';
+  return reason || '';
+};
+
+const formatDeliveryOfferReasonEn = (reason: string): string => {
+  const reasonMap: Record<string, string> = {
+    '新客戶免運費': 'New customer free delivery offer',
+    'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery offer'
+  };
+  return reasonMap[reason] || reason || '';
+};
+
+const buildDeliveryWaiverText = (
+  fields: FieldSet,
+  isEnglish: boolean,
+  localDeliveryAmount = 0,
+  validUntil?: unknown
+): string => {
+  const mode = String(fields['Delivery Charge Mode'] || '');
+  const reason = String(fields['Delivery Offer Reason'] || '');
+  const range = buildDeliveryFeeRange(localDeliveryAmount);
+  const validUntilText = String(validUntil || fields['Valid Until'] || '').trim();
+
+  if (mode !== '已包本地送貨') {
+    if (isEnglish && mode === 'LKS 車隊 運費到付') return 'LKS fleet delivery fee payable separately';
+    return mode || '';
+  }
+
+  if (isEnglish) {
+    const firstLine = reason
+      ? `Local delivery included | ${formatDeliveryOfferReasonEn(reason)}`
+      : 'Local delivery included';
+    const lines = [firstLine];
+    if (range) lines.push(`Delivery fee is calculated by weight | Estimated delivery fee approx. ${range}, now waived`);
+    if (validUntilText) lines.push(`Offer valid until quotation valid-until date: ${validUntilText}`);
+    return lines.join('\n');
+  }
+
+  const firstLine = reason
+    ? `已包本地送貨｜${formatDeliveryOfferReasonZh(reason)}`
+    : '已包本地送貨';
+  const lines = [firstLine];
+  if (range) lines.push(`運費以重量計算｜預計運費約 ${range}，現已豁免`);
+  if (validUntilText) lines.push(`優惠有效期為此報價有效期 ${validUntilText}`);
+  return lines.join('\n');
+};
 
 // Normalize Hong Kong phone numbers so formats such as
 // 68983722, 6898 3722 and +852 6898 3722 are treated as the same number.
@@ -2282,24 +2337,12 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
       if (type === '百分比折扣' && multiplier > 0) return `${reason}: ${Math.round((1 - multiplier) * 100)}% off`;
       return 'Offer discount';
     };
-    const buildShareDeliveryText = (): string => {
-      const mode = String(quote['Delivery Charge Mode'] || '');
-      const reason = String(quote['Delivery Offer Reason'] || '');
-      if (!isEnglish) return (quote['Delivery Display Text'] as string) || mode || '';
-      if (mode === '已包本地送貨') {
-        const reasonMap: Record<string, string> = {
-          '新客戶免運費': 'New customer free delivery',
-          'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery'
-        };
-        return reason ? `Local delivery included | ${reasonMap[reason] || reason}` : 'Local delivery included';
-      }
-      if (mode === 'LKS 車隊 運費到付') return 'LKS fleet delivery fee payable separately';
-      return mode;
-    };
-
     // Parse items
     let items: any[] = [];
     items = parseQuoteItems(quote['Quote Items JSON']);
+
+    const buildShareDeliveryText = (): string =>
+      buildDeliveryWaiverText(quote, isEnglish, sumQuoteLocalDelivery(items), quote['Valid Until']);
 
     const subtotal = (quote['Sub Total'] as number) || 0;
     const discountRate = (quote['Discount'] as number) ?? 1;
@@ -2406,7 +2449,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           <div class="totals-box">
             <div class="row"><span>${L.subtotal}</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${L.delivery}</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${L.delivery}</span><span>${nl2br(deliveryDisplayText)}</span></div>` : ''}
             <div class="row total-row"><span>${L.total}</span><span>$${Math.ceil(total)}</span></div>
           </div>
 
@@ -2921,11 +2964,13 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     // Items — read from Source Quote's Quote Items JSON (same as Quote view)
     let items: any[] = [];
+    let sourceQuoteFields: FieldSet | null = null;
     const sourceQuoteRef = (of['Source Quote Ref'] as string) || '';
     if (sourceQuoteRef) {
       const quoteRecords = await tableQuotes.select({ filterByFormula: `{Quote Number} = '${sourceQuoteRef}'` }).firstPage();
       if (quoteRecords.length > 0) {
-        items = parseQuoteItems(quoteRecords[0].fields['Quote Items JSON']);
+        sourceQuoteFields = quoteRecords[0].fields;
+        items = parseQuoteItems(sourceQuoteFields['Quote Items JSON']);
       }
     }
 
@@ -2958,7 +3003,12 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       Math.ceil(subtotal * discountRate);
     const discountAmount = Number(of['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
     const discountDisplayText = discountAmount > 0 ? buildDisplayDiscountText(of, isEnglish) : '';
-    const deliveryDisplayText = buildDisplayDeliveryText(of, isEnglish);
+    const deliveryDisplayText = buildDisplayDeliveryText(
+      of,
+      isEnglish,
+      sumQuoteLocalDelivery(items),
+      sourceQuoteFields?.['Valid Until']
+    );
     const balanceDue = status === 'Paid' ? 0 : total;
 
     const content = `
@@ -3022,7 +3072,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
           <div class="totals-box">
             <div class="row"><span>${I.subtotal}</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${I.delivery}</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${I.delivery}</span><span>${nl2br(deliveryDisplayText)}</span></div>` : ''}
             <div class="row total-row"><span>${I.total}</span><span>$${Math.ceil(total)}</span></div>
             <div class="row balance-row" style="color:${status === 'Paid' ? '#10b981' : '#ef4444'};">
               <span>${I.balanceDue}</span><span>$${Math.ceil(balanceDue)}</span>
