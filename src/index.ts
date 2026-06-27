@@ -157,6 +157,39 @@ const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
 
+
+const getItemLocalDeliveryAmount = (item: any): number => {
+  const raw = item?.hongKongDelivery ?? item?.deliveryCostReserve ?? item?.localDelivery ?? 0;
+  const n = Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : 0;
+};
+
+const getItemsLocalDeliveryTotal = (items: any[]): number =>
+  (items || []).reduce((sum, item) => sum + getItemLocalDeliveryAmount(item), 0);
+
+const buildDeliveryFeeRangeLabel = (amount: number): string => {
+  const n = Number(amount) || 0;
+  if (!(n > 0)) return '';
+  const lower = Math.ceil(n / 100) * 100;
+  const upper = lower + 100;
+  return `HK$${lower}–$${upper}`;
+};
+
+const mapDeliveryOfferReason = (reason: string, isEnglish: boolean): string => {
+  if (isEnglish) {
+    const map: Record<string, string> = {
+      '新客戶免運費': 'New customer free delivery offer',
+      'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery offer'
+    };
+    return map[reason] || reason || '';
+  }
+  const map: Record<string, string> = {
+    '新客戶免運費': '新客戶免運費優惠',
+    'ToyTV 專屬優惠免運費': 'ToyTV 專屬優惠免運費'
+  };
+  return map[reason] || reason || '';
+};
+
 const normalizeQuoteLanguage = (value: unknown): '中文' | 'English' =>
   String(value || '').trim() === 'English' ? 'English' : '中文';
 
@@ -182,19 +215,34 @@ const buildDisplayDiscountText = (fields: FieldSet, isEnglish: boolean): string 
   return 'Offer discount';
 };
 
-const buildDisplayDeliveryText = (fields: FieldSet, isEnglish: boolean): string => {
+const buildDisplayDeliveryText = (
+  fields: FieldSet,
+  isEnglish: boolean,
+  localDeliveryAmount = 0,
+  validUntil = ''
+): string => {
   const mode = String(fields['Delivery Charge Mode'] || '');
   const reason = String(fields['Delivery Offer Reason'] || '');
-  if (!isEnglish) return (fields['Delivery Display Text'] as string) || mode || '';
+  const reasonText = mapDeliveryOfferReason(reason, isEnglish);
+  const range = buildDeliveryFeeRangeLabel(localDeliveryAmount);
+  const validUntilText = String(validUntil || fields['Valid Until'] || '').trim();
+
   if (mode === '已包本地送貨') {
-    const reasonMap: Record<string, string> = {
-      '新客戶免運費': 'New customer free delivery',
-      'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery'
-    };
-    return reason ? `Local delivery included | ${reasonMap[reason] || reason}` : 'Local delivery included';
+    if (isEnglish) {
+      const lines = [reasonText ? `Local delivery included | ${reasonText}` : 'Local delivery included'];
+      if (range) lines.push(`Delivery fee is calculated by weight | Estimated delivery fee approx. ${range}, now waived`);
+      lines.push(validUntilText ? `Offer valid until quotation valid-until date: ${validUntilText}` : 'Offer valid until the quotation valid-until date');
+      return lines.join('\n');
+    }
+
+    const lines = [reasonText ? `已包本地送貨｜${reasonText}` : '已包本地送貨'];
+    if (range) lines.push(`運費以重量計算｜預計運費約 ${range}，現已豁免`);
+    lines.push(validUntilText ? `優惠有效期為此報價有效期 ${validUntilText}` : '優惠有效期為此報價有效期');
+    return lines.join('\n');
   }
-  if (mode === 'LKS 車隊 運費到付') return 'LKS fleet delivery fee payable separately';
-  return mode;
+
+  if (mode === 'LKS 車隊 運費到付') return isEnglish ? 'LKS fleet delivery fee payable separately' : 'LKS 車隊 運費到付';
+  return isEnglish ? mode : ((fields['Delivery Display Text'] as string) || mode || '');
 };
 
 const getOrderLanguageFromSourceQuote = async (orderFields: FieldSet): Promise<'中文' | 'English'> => {
@@ -524,6 +572,7 @@ const SHARED_CSS = `
   .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
   .offer-preview { background:#fffaf6; border:1px solid #f0e0d0; border-radius:6px; padding:12px; font-size:13px; }
   .offer-preview .line { display:flex; justify-content:space-between; gap:12px; margin-bottom:4px; }
+  .offer-preview .line span:last-child { white-space: pre-line; text-align:right; }
   .offer-preview .final { border-top:1px solid #f0e0d0; padding-top:6px; margin-top:6px; font-size:16px; font-weight:700; color:#d8833b; }
   .discount-row span:last-child { color:#ef4444; }
   .delivery-row span:last-child { color:#d8833b; font-weight:700; }
@@ -1706,11 +1755,41 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       return '';
     }
 
+    function getQuoteLocalDeliveryTotal() {
+      var total = 0;
+      document.querySelectorAll('#itemsBody tr').forEach(function(row) {
+        total += parseNum((row.querySelector('.f-hk-delivery') || {}).value);
+      });
+      return total;
+    }
+
+    function buildDeliveryFeeRangeLabel(amount) {
+      var n = Number(amount) || 0;
+      if (!(n > 0)) return '';
+      var lower = Math.ceil(n / 100) * 100;
+      var upper = lower + 100;
+      return 'HK$' + lower + '–$' + upper;
+    }
+
+    function mapDeliveryOfferReason(reason) {
+      var map = {
+        '新客戶免運費': '新客戶免運費優惠',
+        'ToyTV 專屬優惠免運費': 'ToyTV 專屬優惠免運費'
+      };
+      return map[reason] || reason || '';
+    }
+
     function buildDeliveryDisplayText() {
       var mode = getElValue('deliveryChargeMode');
       var reason = getElValue('deliveryOfferReason');
+      var reasonText = mapDeliveryOfferReason(reason);
+      var range = buildDeliveryFeeRangeLabel(getQuoteLocalDeliveryTotal());
+      var validUntil = getElValue('validUntil');
       if (mode === '已包本地送貨') {
-        return reason ? '已包本地送貨｜' + reason : '已包本地送貨';
+        var lines = [reasonText ? '已包本地送貨｜' + reasonText : '已包本地送貨'];
+        if (range) lines.push('運費以重量計算｜預計運費約 ' + range + '，現已豁免');
+        lines.push(validUntil ? '優惠有效期為此報價有效期 ' + validUntil : '優惠有效期為此報價有效期');
+        return lines.join('\n');
       }
       if (mode === 'LKS 車隊 運費到付') return 'LKS 車隊 運費到付';
       return mode || '';
@@ -2283,18 +2362,8 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
       return 'Offer discount';
     };
     const buildShareDeliveryText = (): string => {
-      const mode = String(quote['Delivery Charge Mode'] || '');
-      const reason = String(quote['Delivery Offer Reason'] || '');
-      if (!isEnglish) return (quote['Delivery Display Text'] as string) || mode || '';
-      if (mode === '已包本地送貨') {
-        const reasonMap: Record<string, string> = {
-          '新客戶免運費': 'New customer free delivery',
-          'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery'
-        };
-        return reason ? `Local delivery included | ${reasonMap[reason] || reason}` : 'Local delivery included';
-      }
-      if (mode === 'LKS 車隊 運費到付') return 'LKS fleet delivery fee payable separately';
-      return mode;
+      const localDeliveryTotal = getItemsLocalDeliveryTotal(items);
+      return buildDisplayDeliveryText(quote, isEnglish, localDeliveryTotal, String(quote['Valid Until'] || ''));
     };
 
     // Parse items
@@ -2406,7 +2475,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           <div class="totals-box">
             <div class="row"><span>${L.subtotal}</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${L.delivery}</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${L.delivery}</span><span>${nl2br(deliveryDisplayText)}</span></div>` : ''}
             <div class="row total-row"><span>${L.total}</span><span>$${Math.ceil(total)}</span></div>
           </div>
 
@@ -2921,11 +2990,13 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     // Items — read from Source Quote's Quote Items JSON (same as Quote view)
     let items: any[] = [];
+    let sourceQuoteValidUntil = '';
     const sourceQuoteRef = (of['Source Quote Ref'] as string) || '';
     if (sourceQuoteRef) {
       const quoteRecords = await tableQuotes.select({ filterByFormula: `{Quote Number} = '${sourceQuoteRef}'` }).firstPage();
       if (quoteRecords.length > 0) {
         items = parseQuoteItems(quoteRecords[0].fields['Quote Items JSON']);
+        sourceQuoteValidUntil = String(quoteRecords[0].fields['Valid Until'] || '');
       }
     }
 
@@ -2958,7 +3029,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       Math.ceil(subtotal * discountRate);
     const discountAmount = Number(of['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
     const discountDisplayText = discountAmount > 0 ? buildDisplayDiscountText(of, isEnglish) : '';
-    const deliveryDisplayText = buildDisplayDeliveryText(of, isEnglish);
+    const deliveryDisplayText = buildDisplayDeliveryText(of, isEnglish, getItemsLocalDeliveryTotal(items), sourceQuoteValidUntil);
     const balanceDue = status === 'Paid' ? 0 : total;
 
     const content = `
@@ -3022,7 +3093,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
           <div class="totals-box">
             <div class="row"><span>${I.subtotal}</span><span>$${subtotal.toFixed(2)}</span></div>
             ${discountAmount > 0 ? `<div class="row discount-row"><span>${escapeHtml(discountDisplayText)}</span><span>-$${discountAmount.toFixed(2)}</span></div>` : ''}
-            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${I.delivery}</span><span>${escapeHtml(deliveryDisplayText)}</span></div>` : ''}
+            ${deliveryDisplayText ? `<div class="row delivery-row"><span>${I.delivery}</span><span>${nl2br(deliveryDisplayText)}</span></div>` : ''}
             <div class="row total-row"><span>${I.total}</span><span>$${Math.ceil(total)}</span></div>
             <div class="row balance-row" style="color:${status === 'Paid' ? '#10b981' : '#ef4444'};">
               <span>${I.balanceDue}</span><span>$${Math.ceil(balanceDue)}</span>
