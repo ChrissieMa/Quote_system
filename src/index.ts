@@ -229,13 +229,14 @@ const buildDeliveryFeeRange = (localDeliveryAmount: number): string => {
 };
 
 const formatDeliveryOfferReasonZh = (reason: string): string => {
-  if (reason === '新客戶免運費') return '新客戶免運費優惠';
+  if (reason === '新客戶免運費' || reason === '首次落單優惠') return '首次落單優惠';
   return reason || '';
 };
 
 const formatDeliveryOfferReasonEn = (reason: string): string => {
   const reasonMap: Record<string, string> = {
-    '新客戶免運費': 'New customer free delivery offer',
+    '新客戶免運費': 'First order offer',
+    '首次落單優惠': 'First order offer',
     'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery offer'
   };
   return reasonMap[reason] || reason || '';
@@ -1269,7 +1270,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                 <label>使用優惠</label>
                 <select name="promotionType" id="promotionType" onchange="applyPromotionPreset(); recalcTotal();">
                   <option value="">不使用優惠</option>
-                  <option value="新客戶免運費">新客戶免運費</option>
+                  <option value="首次落單優惠">首次落單優惠</option>
                   <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
                   <option value="現貨優惠">現貨優惠</option>
                 </select>
@@ -1320,7 +1321,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                 <label>免運費原因</label>
                 <select name="deliveryOfferReason" id="deliveryOfferReason" onchange="recalcTotal()">
                   <option value="">不適用</option>
-                  <option value="新客戶免運費">新客戶免運費</option>
+                  <option value="首次落單優惠">首次落單優惠</option>
                   <option value="ToyTV 專屬優惠免運費">ToyTV 專屬優惠免運費</option>
                 </select>
               </div>
@@ -1798,13 +1799,13 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
         setElValue('discountReason', 'ToyTV 專屬優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
         setElValue('deliveryOfferReason', 'ToyTV 專屬優惠免運費');
-      } else if (promotion === '新客戶免運費') {
+      } else if (promotion === '首次落單優惠' || promotion === '新客戶免運費') {
         setElValue('discountType', '無折扣');
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
         setElValue('discountReason', '新客戶優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', '新客戶免運費');
+        setElValue('deliveryOfferReason', '首次落單優惠');
       } else if (promotion === '現貨優惠') {
         setElValue('discountType', '無折扣');
         setElValue('discountAmountHkd', '');
