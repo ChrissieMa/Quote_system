@@ -157,6 +157,42 @@ const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
 const tableCampaigns = base(process.env.AIRTABLE_TABLE_CAMPAIGNS || 'Campaigns');
+const tableBusinessExpenses = base(process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES || 'Business Expenses');
+const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST || 'Expense Checklist');
+const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
+const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
+
+const getAdminCredentials = () => ({
+  username: String(process.env.ADMIN_USERNAME || 'lks').trim(),
+  password: String(process.env.ADMIN_PASSWORD || '').trim(),
+});
+
+const safeEqual = (left: string, right: string): boolean => {
+  const a = Buffer.from(left);
+  const b = Buffer.from(right);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+const requireAdmin = (req: Request, res: Response, next: () => void) => {
+  const expected = getAdminCredentials();
+  if (!expected.password) {
+    return res.status(503).send('ADMIN_PASSWORD is not configured.');
+  }
+  const auth = String(req.headers.authorization || '');
+  if (auth.startsWith('Basic ')) {
+    try {
+      const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
+      const separator = decoded.indexOf(':');
+      const username = separator >= 0 ? decoded.slice(0, separator) : '';
+      const password = separator >= 0 ? decoded.slice(separator + 1) : '';
+      if (safeEqual(username, expected.username) && safeEqual(password, expected.password)) return next();
+    } catch {
+      // Fall through to the authentication challenge.
+    }
+  }
+  res.setHeader('WWW-Authenticate', 'Basic realm="LKS Owner", charset="UTF-8"');
+  return res.status(401).send('Owner login required.');
+};
 
 type AirtableMetadataField = {
   name: string;
@@ -527,6 +563,144 @@ const searchCustomers = async (query: unknown) => {
     });
 
   return [...officialResults, ...legacyResults].slice(0, 20);
+};
+
+// ─── Owner finance helpers ─────────────────────────────────────────────────
+const MONTH_CODES: Record<string, string> = {
+  JAN: '01', FEB: '02', MAR: '03', APR: '04', MAY: '05', JUN: '06',
+  JUL: '07', AUG: '08', SEP: '09', OCT: '10', NOV: '11', DEC: '12'
+};
+
+const getHongKongMonth = (): string => {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong', year: 'numeric', month: '2-digit'
+  }).formatToParts(new Date());
+  const year = parts.find(part => part.type === 'year')?.value || String(new Date().getUTCFullYear());
+  const month = parts.find(part => part.type === 'month')?.value || String(new Date().getUTCMonth() + 1).padStart(2, '0');
+  return `${year}-${month}`;
+};
+
+const getOrderFinanceMonth = (orderNo: unknown): string | null => {
+  const match = String(orderNo || '').toUpperCase().match(/^([A-Z]{3})(\d{2})/);
+  if (!match || !MONTH_CODES[match[1]]) return null;
+  return `20${match[2]}-${MONTH_CODES[match[1]]}`;
+};
+
+const monthBounds = (month: string) => {
+  const [year, monthNumber] = month.split('-').map(Number);
+  if (!year || !monthNumber || monthNumber < 1 || monthNumber > 12) throw new Error('Invalid month; use YYYY-MM');
+  const start = `${year}-${String(monthNumber).padStart(2, '0')}-01`;
+  const lastDay = new Date(Date.UTC(year, monthNumber, 0)).getUTCDate();
+  const end = `${year}-${String(monthNumber).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+  return { start, end };
+};
+
+const numberField = (fields: FieldSet, name: string): number => {
+  const value = Number(fields[name] || 0);
+  return Number.isFinite(value) ? value : 0;
+};
+
+const dueDateForMonth = (month: string, duePattern: unknown): string => {
+  const { end } = monthBounds(month);
+  const maxDay = Number(end.slice(-2));
+  const match = String(duePattern || '').match(/(?:^|\D)(\d{1,2})(?:st|nd|rd|th|日|號)?(?:\D|$)/i);
+  const day = Math.min(Math.max(Number(match?.[1] || 1), 1), maxDay);
+  return `${month}-${String(day).padStart(2, '0')}`;
+};
+
+const ensureRecurringExpenses = async (month: string): Promise<void> => {
+  const [checklist, existing] = await Promise.all([
+    tableExpenseChecklist.select().all(),
+    tableBusinessExpenses.select().all(),
+  ]);
+  const existingKeys = new Set(existing.map(record => {
+    const fields = record.fields;
+    return `${String(fields['Month'] || '')}|${String(fields['Expense Name'] || '').trim().toLowerCase()}`;
+  }));
+
+  const creates = checklist.flatMap(record => {
+    const fields = record.fields;
+    if (!fields['Auto Post Monthly'] || String(fields['Active'] || '').toLowerCase() === 'no') return [];
+    const amount = numberField(fields, 'Planning Amount HKD');
+    const expenseName = String(fields['Expense Name'] || '').trim();
+    if (!expenseName || amount <= 0) return [];
+    const key = `${month}|${expenseName.toLowerCase()}`;
+    if (existingKeys.has(key)) return [];
+    return [{ fields: {
+      'Expense Name': expenseName,
+      'Expense Date': dueDateForMonth(month, fields['Due Pattern']),
+      'Month': month,
+      'Category': 'Software Subscription',
+      'Amount HKD': amount,
+      'Status': 'Auto-accrued',
+      'Notes': 'Automatically generated from Expense Checklist. Only adjust when the price, payment status or subscription changes.'
+    } as FieldSet }];
+  });
+  if (creates.length) await tableBusinessExpenses.create(creates);
+};
+
+const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<string, unknown>> => {
+  const month = requestedMonth || getHongKongMonth();
+  const { start, end } = monthBounds(month);
+  await ensureRecurringExpenses(month);
+
+  const [orders, marketing, expenses, monthlyRows] = await Promise.all([
+    tableOrders.select().all(),
+    tableMarketingSpend.select().all(),
+    tableBusinessExpenses.select().all(),
+    tableMonthlyFinance.select().all(),
+  ]);
+
+  const monthOrders = orders.filter(record => getOrderFinanceMonth(record.fields['Internal Order No']) === month);
+  const monthMarketing = marketing.filter(record => {
+    const fields = record.fields;
+    const date = String(fields['Spend Date'] || '');
+    const status = String(fields['Payment Status'] || 'Paid').toLowerCase();
+    return date.startsWith(month) && !['pending', 'refunded', 'cancelled'].includes(status);
+  });
+  const monthExpenses = expenses.filter(record => String(record.fields['Month'] || '').startsWith(month));
+
+  const totals = monthOrders.reduce((sum, record) => {
+    const fields = record.fields;
+    sum.revenue += numberField(fields, 'Final Amount');
+    sum.supplier += numberField(fields, 'Supplier Cost Used HKD') || numberField(fields, 'Actual Supplier Cost HKD') || numberField(fields, 'Cost');
+    sum.china += numberField(fields, 'China Freight Used HKD') || numberField(fields, 'Actual China Freight HKD') || numberField(fields, 'China Freight Cost HKD');
+    sum.delivery += numberField(fields, 'Actual Local Delivery Cost HKD');
+    sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
+    sum.gross += numberField(fields, 'Actual Profit HKD');
+    if (String(fields['Finance Data Status'] || '').trim()) sum.pending += 1;
+    if (String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
+    return sum;
+  }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, gross: 0, pending: 0, adOrders: 0 });
+
+  const marketingSpend = monthMarketing.reduce((sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0);
+  const businessExpenses = monthExpenses.reduce((sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0);
+  const missingExpenseItems = '';
+  const financeStatus = totals.pending > 0 ? '暫計／尚欠訂單成本資料' : 'Complete';
+  const fields: FieldSet = {
+    'Month': month,
+    'Month Start': start,
+    'Month End': end,
+    'Order Count': monthOrders.length,
+    'Total Revenue': totals.revenue,
+    'Supplier Cost': totals.supplier,
+    'China Freight': totals.china,
+    'Local Delivery': totals.delivery,
+    'Reissue': totals.reissue,
+    'Order Gross Profit': totals.gross,
+    'Marketing Spend': marketingSpend,
+    'Business Expenses': businessExpenses,
+    'Ad Attributed Orders': totals.adOrders,
+    'Pending Cost Orders': totals.pending,
+    'Missing Expense Items': missingExpenseItems,
+    'Finance Status': financeStatus,
+    'Last Updated': new Date().toISOString(),
+  };
+
+  const existing = monthlyRows.find(record => String(record.fields['Month'] || '') === month);
+  if (existing) await tableMonthlyFinance.update([{ id: existing.id, fields }]);
+  else await tableMonthlyFinance.create([{ fields }]);
+  return { month, orderCount: monthOrders.length, marketingSpend, businessExpenses, pendingCostOrders: totals.pending };
 };
 
 const getNextNumber = async (
@@ -3436,6 +3610,90 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
   }
 });
 
+// ─── Owner-only: pending supplier costs and finance sync ────────────────────
+const getOwnerFormToken = (): string =>
+  crypto.createHash('sha256').update(`${getAdminCredentials().password}:supplier-costs`).digest('hex');
+
+app.get('/admin/costs', requireAdmin, async (_req: Request, res: Response) => {
+  try {
+    const orders = await tableOrders.select().all();
+    const pending = orders
+      .filter(record => {
+        const fields = record.fields;
+        const used = numberField(fields, 'Supplier Cost Used HKD')
+          || numberField(fields, 'Actual Supplier Cost HKD')
+          || numberField(fields, 'Cost');
+        return String(fields['Internal Order No'] || '').trim() && used <= 0;
+      })
+      .sort((a, b) => String(a.fields['Internal Order No']).localeCompare(String(b.fields['Internal Order No'])));
+
+    const rows = pending.map(record => {
+      const fields = record.fields;
+      const orderNo = String(fields['Internal Order No'] || record.id);
+      return `<tr>
+        <td><strong>${escapeHtml(orderNo)}</strong></td>
+        <td>HK$${numberField(fields, 'Final Amount').toFixed(2)}</td>
+        <td><input name="cost_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" aria-label="${escapeHtml(orderNo)} supplier cost"></td>
+      </tr>`;
+    }).join('');
+
+    const content = `<div class="doc-card"><div class="doc-body">
+      <div class="section-title">待補小糖實際成本</div>
+      <p style="color:#64748b;margin-bottom:18px;">只顯示仍未有小糖成本嘅訂單。儲存後已完成嘅訂單會自動消失，並重新計算每月利潤。</p>
+      ${pending.length ? `<form method="POST" action="/admin/costs">
+        <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
+        <div style="overflow-x:auto"><table class="items-table"><thead><tr><th>Order</th><th>訂單收入</th><th>小糖實際成本 HKD</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <div style="margin-top:20px"><button class="btn btn-primary" type="submit">儲存成本並更新 Dashboard</button></div>
+      </form>` : '<div class="alert alert-success">所有訂單已經有小糖成本，暫時冇資料需要填。</div>'}
+    </div></div>`;
+    res.send(renderPage('待補小糖成本', content));
+  } catch (error: any) {
+    console.error('Unable to render supplier cost page:', error);
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
+app.post('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
+      return res.status(403).send('Invalid form token.');
+    }
+    const updates: Array<{ id: string; fields: FieldSet }> = [];
+    for (const [key, rawValue] of Object.entries(req.body || {})) {
+      if (!key.startsWith('cost_rec')) continue;
+      const id = key.slice(5);
+      const value = Number(rawValue);
+      if (id && Number.isFinite(value) && value > 0) {
+        updates.push({ id, fields: { 'Actual Supplier Cost HKD': value } });
+      }
+    }
+    if (!updates.length) return res.redirect('/admin/costs');
+    await tableOrders.update(updates);
+    const months = new Set<string>();
+    for (const update of updates) {
+      const record = await tableOrders.find(update.id);
+      const month = getOrderFinanceMonth(record.fields['Internal Order No']);
+      if (month) months.add(month);
+    }
+    for (const month of months) await syncMonthlyFinance(month);
+    res.redirect('/admin/costs?saved=1');
+  } catch (error: any) {
+    console.error('Unable to save supplier costs:', error);
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
+app.post('/admin/finance/sync', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const month = String(req.body.month || req.query.month || getHongKongMonth());
+    const result = await syncMonthlyFinance(month);
+    res.json({ ok: true, ...result });
+  } catch (error: any) {
+    console.error('Finance sync failed:', error);
+    res.status(500).json({ ok: false, error: error.message });
+  }
+});
+
 // ─── Root redirect ───────────────────────────────────────────────────────────
 app.get('/', (_req: Request, res: Response) => res.redirect('/quotes'));
 
@@ -3444,4 +3702,12 @@ app.listen(PORT, () => {
   console.log(`LKS Quote System running on port ${PORT}`);
   console.log(`Public Base URL: ${PUBLIC_BASE_URL}`);
   console.log(`Dashboard: ${PUBLIC_BASE_URL}/quotes`);
+  if (getAdminCredentials().password) {
+    syncMonthlyFinance().catch(error => console.error('Initial finance sync failed:', error));
+    setInterval(() => {
+      syncMonthlyFinance().catch(error => console.error('Scheduled finance sync failed:', error));
+    }, 6 * 60 * 60 * 1000).unref();
+  } else {
+    console.warn('ADMIN_PASSWORD is missing; owner cost page and automatic finance sync are disabled.');
+  }
 });
