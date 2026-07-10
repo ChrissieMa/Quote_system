@@ -156,6 +156,67 @@ const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
+const tableCampaigns = base(process.env.AIRTABLE_TABLE_CAMPAIGNS || 'Campaigns');
+
+type AirtableMetadataField = {
+  name: string;
+  type: string;
+  options?: { choices?: Array<{ name: string }> };
+};
+
+type AirtableMetadataTable = {
+  id: string;
+  name: string;
+  fields: AirtableMetadataField[];
+};
+
+let airtableMetadataCache: { expiresAt: number; tables: AirtableMetadataTable[] } | null = null;
+
+const getAirtableMetadataTables = async (): Promise<AirtableMetadataTable[]> => {
+  if (airtableMetadataCache && airtableMetadataCache.expiresAt > Date.now()) {
+    return airtableMetadataCache.tables;
+  }
+
+  const apiKey = String(process.env.AIRTABLE_API_KEY || '').trim();
+  const baseId = String(process.env.AIRTABLE_BASE_ID || '').trim();
+  if (!apiKey || !baseId) throw new Error('Airtable metadata credentials are missing');
+
+  const response = await fetch(`https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+  });
+  if (!response.ok) {
+    throw new Error(`Airtable metadata request failed (${response.status})`);
+  }
+
+  const payload = await response.json() as { tables?: AirtableMetadataTable[] };
+  const tables = Array.isArray(payload.tables) ? payload.tables : [];
+  airtableMetadataCache = { expiresAt: Date.now() + 60_000, tables };
+  return tables;
+};
+
+const findMetadataTable = (tables: AirtableMetadataTable[], configuredValue: string | undefined, fallbackName: string) => {
+  const configured = String(configuredValue || '').trim();
+  return tables.find(table => table.id === configured || table.name === configured)
+    || tables.find(table => table.name === fallbackName);
+};
+
+const getSharedSelectOptions = async (fieldName: string, fallback: string[]): Promise<string[]> => {
+  try {
+    const tables = await getAirtableMetadataTables();
+    const quotesTable = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
+    const ordersTable = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+    const quoteChoices = quotesTable?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
+    const orderChoices = ordersTable?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
+    const shared = quoteChoices.filter(choice => orderChoices.includes(choice));
+    return shared.length ? shared : fallback;
+  } catch (error) {
+    console.warn(`Unable to load dynamic Airtable options for ${fieldName}:`, error);
+    return fallback;
+  }
+};
+
+const renderSelectOptionTags = (options: string[]): string =>
+  options.map(option => `<option value="${escapeHtml(option)}">${escapeHtml(option)}</option>`).join('');
 
 const normalizeQuoteLanguage = (value: unknown): '中文' | 'English' =>
   String(value || '').trim() === 'English' ? 'English' : '中文';
@@ -1125,6 +1186,17 @@ app.get('/quotes', async (req: Request, res: Response) => {
 app.get('/quote/create', async (_req: Request, res: Response) => {
   let inquiryOptions = '<option value="">不連結查詢</option>';
   let performanceMonthOptions = '<option value="">不連結月份</option>';
+  let campaignOptions = '<option value="">請選擇 Campaign / Ads</option>';
+
+  const [promotionTypeOptions, discountReasonOptions, deliveryOfferReasonOptions] = await Promise.all([
+    getSharedSelectOptions('Promotion / Offer Type', ['首次落單優惠', 'ToyTV 專屬優惠', '現貨優惠']),
+    getSharedSelectOptions('Discount Reason', ['ToyTV 專屬優惠', '新客戶優惠', '回購優惠']),
+    getSharedSelectOptions('Delivery Offer Reason', ['首次落單優惠', 'ToyTV 專屬優惠免運費']),
+  ]);
+
+  const promotionTypeOptionTags = renderSelectOptionTags(promotionTypeOptions);
+  const discountReasonOptionTags = renderSelectOptionTags(discountReasonOptions);
+  const deliveryOfferReasonOptionTags = renderSelectOptionTags(deliveryOfferReasonOptions);
   try {
     const inquiryRecords = await tableInquiries.select({ maxRecords: 100 }).all();
     inquiryOptions += inquiryRecords.map((record) => {
@@ -1145,6 +1217,26 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
     }).join('');
   } catch (error) {
     console.warn('Unable to load Monthly Performance for Create Quote:', error);
+  }
+  try {
+    const campaignRecords = await tableCampaigns.select({
+      fields: ['Campaign Name', 'Channel', 'Status'],
+      sort: [{ field: 'Campaign Name', direction: 'asc' }],
+      maxRecords: 200,
+    }).all();
+    campaignOptions += campaignRecords
+      .filter(record => !['inactive', 'paused', 'ended', 'archive', 'archived'].includes(String(record.fields['Status'] || '').trim().toLowerCase()))
+      .map(record => {
+        const name = String(record.fields['Campaign Name'] || '').trim();
+        const channel = String(record.fields['Channel'] || '').trim();
+        if (!name) return '';
+        return `<option value="${escapeHtml(name)}" data-channel="${escapeHtml(channel)}">${escapeHtml(name)}${channel ? ` · ${escapeHtml(channel)}` : ''}</option>`;
+      })
+      .join('');
+    campaignOptions += '<option value="__manual__">其他／手動輸入</option>';
+  } catch (error) {
+    console.warn('Unable to load Campaigns for Create Quote:', error);
+    campaignOptions += '<option value="__manual__">手動輸入 Campaign / Ads</option>';
   }
 
   const content = `
@@ -1192,7 +1284,10 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
               </div>
               <div class="form-group">
                 <label>Campaign / Source Detail</label>
-                <input type="text" name="campaignSourceDetail" id="campaignSourceDetail" placeholder="例如 ToyTV June 2026 / Carousell BE@RBRICK 1000%">
+                <select name="campaignSourceDetail" id="campaignSourceDetail" onchange="handleCampaignChange()">
+                  ${campaignOptions}
+                </select>
+                <input type="text" id="campaignSourceDetailManual" placeholder="手動輸入 Campaign / Ads 名稱" style="display:none;margin-top:8px;">
               </div>
             </div>
             <div class="form-row form-row-2">
@@ -1358,9 +1453,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                 <label>使用優惠</label>
                 <select name="promotionType" id="promotionType" onchange="applyPromotionPreset(); recalcTotal();">
                   <option value="">不使用優惠</option>
-                  <option value="首次落單優惠">首次落單優惠</option>
-                  <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
-                  <option value="現貨優惠">現貨優惠</option>
+                  ${promotionTypeOptionTags}
                 </select>
               </div>
               <div class="form-group">
@@ -1393,9 +1486,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                 <label>折扣原因</label>
                 <select name="discountReason" id="discountReason" onchange="recalcTotal()">
                   <option value="">不適用</option>
-                  <option value="ToyTV 專屬優惠">ToyTV 專屬優惠</option>
-                  <option value="新客戶優惠">新客戶優惠</option>
-                  <option value="回購優惠">回購優惠</option>
+                  ${discountReasonOptionTags}
                 </select>
               </div>
               <div class="form-group">
@@ -1409,8 +1500,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                 <label>免運費原因</label>
                 <select name="deliveryOfferReason" id="deliveryOfferReason" onchange="recalcTotal()">
                   <option value="">不適用</option>
-                  <option value="首次落單優惠">首次落單優惠</option>
-                  <option value="ToyTV 專屬優惠免運費">ToyTV 專屬優惠免運費</option>
+                  ${deliveryOfferReasonOptionTags}
                 </select>
               </div>
             </div>
@@ -1810,6 +1900,28 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       if (el) el.value = value;
     }
 
+    function handleCampaignChange() {
+      var select = document.getElementById('campaignSourceDetail');
+      var manual = document.getElementById('campaignSourceDetailManual');
+      if (!select || !manual) return;
+      var isManual = select.value === '__manual__';
+      manual.style.display = isManual ? 'block' : 'none';
+      if (!isManual) manual.value = '';
+
+      var option = select.options[select.selectedIndex];
+      var channel = option ? String(option.getAttribute('data-channel') || '') : '';
+      if (channel === 'KOL / ToyTV') channel = 'KOL';
+      if (channel) setElValue('quoteSourceChannel', channel);
+    }
+
+    function getCampaignDetailValue() {
+      var selectValue = getElValue('campaignSourceDetail');
+      if (selectValue === '__manual__') {
+        return getElValue('campaignSourceDetailManual').trim();
+      }
+      return selectValue;
+    }
+
     function setText(id, value) {
       var el = document.getElementById(id);
       if (el) el.textContent = value;
@@ -2076,7 +2188,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
           subtotal: document.getElementById('subtotal').value,
           quoteLanguage: getElValue('quoteLanguage') || '中文',
           quoteSourceChannel: getElValue('quoteSourceChannel'),
-          campaignSourceDetail: getElValue('campaignSourceDetail'),
+          campaignSourceDetail: getCampaignDetailValue(),
           inquiryRecordId: getElValue('inquiryRecordId'),
           performanceMonthRecordId: getElValue('performanceMonthRecordId'),
           promotionType: getElValue('promotionType'),
