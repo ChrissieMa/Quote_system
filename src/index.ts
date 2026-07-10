@@ -336,6 +336,7 @@ const activateLegacyCustomer = async (legacyRecordId: string) => {
   const f = legacy.fields;
 
   const legacyRef = getCustomerText(f, 'Customer Display');
+  const legacyCustomerId = extractCustomerId(legacyRef);
   const companyName = getCustomerText(f, 'Company Name');
   const name = getCustomerText(f, 'Last Name') || companyName || legacyRef;
   const mobilePhone = getCustomerText(f, 'MobilePhone');
@@ -351,6 +352,7 @@ const activateLegacyCustomer = async (legacyRecordId: string) => {
   const existing = existingByPrimary || existingByAlternate;
 
   const legacyFields: FieldSet = {
+    'Customer ID': legacyCustomerId || await getNextCustomerId(),
     'Customer Name': name,
     'Phone': primaryPhone,
     'Email': email,
@@ -363,9 +365,11 @@ const activateLegacyCustomer = async (legacyRecordId: string) => {
   };
 
   if (existing) {
+    const existingCustomerId = extractCustomerId(existing.fields['Customer ID']);
     await tableCustomers.update([{
       id: existing.id,
       fields: {
+        ...(!existingCustomerId ? { 'Customer ID': legacyCustomerId || await getNextCustomerId() } : {}),
         'Customer Status': 'Legacy Activated',
         'Legacy Customer Ref': legacyRef,
         'Alternate Phone': alternatePhone,
@@ -480,6 +484,90 @@ const getNextNumber = async (
     return `${prefix}-2026-${next.toString().padStart(4, '0')}`;
   }
   return `${prefix}-2026-0001`;
+};
+
+const getHongKongDate = (): string =>
+  new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+
+const extractCustomerId = (value: unknown): string => {
+  const match = String(value ?? '').trim().toUpperCase().match(/^L(\d{1,4})$/);
+  return match ? `L${match[1].padStart(4, '0')}` : '';
+};
+
+const getNextCustomerId = async (): Promise<string> => {
+  const [officialCustomers, legacyCustomers] = await Promise.all([
+    tableCustomers.select({ fields: ['Customer ID'] }).all(),
+    tableCustomersActive.select({ fields: ['Customer Display'] }).all(),
+  ]);
+
+  const numbers = [
+    ...officialCustomers.map((record: any) => extractCustomerId(record.fields['Customer ID'])),
+    ...legacyCustomers.map((record: any) => extractCustomerId(record.fields['Customer Display'])),
+  ]
+    .filter(Boolean)
+    .map(value => parseInt(value.slice(1), 10))
+    .filter(Number.isFinite);
+
+  const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
+  return `L${String(next).padStart(4, '0')}`;
+};
+
+const ORDER_MONTH_PREFIXES = [
+  'JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN',
+  'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC',
+];
+
+const ORDER_MONTH_SELECT_NAMES = [
+  'January', 'Febuary', 'March', 'April', 'May', 'June',
+  'July', 'August', 'Sepember', 'October', 'November', 'December',
+];
+
+const ITEM_MONTH_SELECT_NAMES = [
+  'January', 'February', 'March', 'April', 'May', 'June',
+  'July', 'August', 'September', 'October', 'November', 'December',
+];
+
+const getOrderMonthDetails = (dateText: string) => {
+  const match = dateText.match(/^(\d{4})-(\d{2})-/);
+  if (!match) throw new Error(`Invalid invoice date: ${dateText}`);
+  const year = parseInt(match[1], 10);
+  const monthIndex = parseInt(match[2], 10) - 1;
+  if (monthIndex < 0 || monthIndex > 11) throw new Error(`Invalid invoice month: ${dateText}`);
+
+  return {
+    codePrefix: `${ORDER_MONTH_PREFIXES[monthIndex]}${String(year).slice(-2)}`,
+    orderMonthSelect: `${ORDER_MONTH_SELECT_NAMES[monthIndex]}_${year}`,
+    itemMonthSelect: `${ITEM_MONTH_SELECT_NAMES[monthIndex]}_${year}`,
+  };
+};
+
+const getNextInternalOrderCode = async (dateText: string): Promise<string> => {
+  const { codePrefix } = getOrderMonthDetails(dateText);
+  const records = await tableOrders.select({ fields: ['Internal 1 Order No'] }).all();
+  const numbers = records
+    .map((record: any) => String(record.fields['Internal 1 Order No'] || '').trim().toUpperCase())
+    .map(value => value.match(new RegExp(`^${codePrefix}(\\d+)$`)))
+    .filter(Boolean)
+    .map(match => parseInt((match as RegExpMatchArray)[1], 10))
+    .filter(Number.isFinite);
+  const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
+  return `${codePrefix}${String(next).padStart(2, '0')}`;
+};
+
+const itemSuffixFromIndex = (index: number): string => {
+  let value = index + 1;
+  let suffix = '';
+  while (value > 0) {
+    value -= 1;
+    suffix = String.fromCharCode(65 + (value % 26)) + suffix;
+    value = Math.floor(value / 26);
+  }
+  return suffix;
 };
 
 // ─── Shared CSS ─────────────────────────────────────────────────────────────
@@ -2683,8 +2771,10 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
         } as FieldSet
       }]);
     } else {
+      const newCustomerId = await getNextCustomerId();
       const newCustomer = await tableCustomers.create([{
         fields: {
+          'Customer ID': newCustomerId,
           'Customer Name': customerName,
           'Phone': customerPhone,
           'Email': customerEmail,
@@ -2776,8 +2866,10 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         } as FieldSet
       }]);
     } else {
+      const newCustomerId = await getNextCustomerId();
       const newCustomer = await tableCustomers.create([{
         fields: {
+          'Customer ID': newCustomerId,
           'Customer Name': submittedName,
           'Phone': lookupPhone,
           'Email': submittedEmail,
@@ -2791,11 +2883,15 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     const internalOrderNo = await getNextNumber(tableOrders, 'Internal Order No', 'ORD');
     const invoiceNumber = await getNextNumber(tableOrders, 'Invoice Number', 'INV');
     const invoicePublicToken = generateToken();
-    const invoiceDate = new Date().toISOString().split('T')[0];
+    const invoiceDate = getHongKongDate();
+    const internalOrderCode = await getNextInternalOrderCode(invoiceDate);
+    const { orderMonthSelect, itemMonthSelect } = getOrderMonthDetails(invoiceDate);
 
     const orderFields: FieldSet = {
       'Internal Order No': internalOrderNo,
+      'Internal 1 Order No': internalOrderCode,
       'Invoice Number': invoiceNumber,
+      'Order Month & Year': orderMonthSelect,
       'Invoice Public Token': invoicePublicToken,
       'Customer': [customerRecordId],
       'Product Amount': qf['Sub Total'],
@@ -2847,7 +2943,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
     items = parseQuoteItems(qf['Quote Items JSON']);
 
     if (items.length > 0) {
-      const orderItemsPayload = items.map((item: any) => {
+      const orderItemsPayload = items.map((item: any, itemIndex: number) => {
         // Accessories: Airtable Multiple Select requires an array of strings
         const rawAccArray: string[] = Array.isArray(item.accessories)
           ? item.accessories.filter(Boolean)
@@ -2855,7 +2951,10 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
         const accArray: string[] = Array.from(new Set(rawAccArray.map((s: string) => s.replace(/\s*x\d+$/i, '').trim()).filter(Boolean)));
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
+        const itemNo = `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`;
         const fields: FieldSet = {
+          'Item No': itemNo,
+          'Month': itemMonthSelect,
           'Order': [orderRecordId],
           'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
           'QTY': item.qty || 1,
