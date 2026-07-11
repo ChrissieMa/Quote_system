@@ -236,6 +236,28 @@ const findMetadataTable = (tables: AirtableMetadataTable[], configuredValue: str
     || tables.find(table => table.name === fallbackName);
 };
 
+const keepExistingAirtableFields = async (
+  fields: FieldSet,
+  configuredValue: string | undefined,
+  fallbackTableName: string
+): Promise<FieldSet | null> => {
+  try {
+    const tables = await getAirtableMetadataTables();
+    const table = findMetadataTable(tables, configuredValue, fallbackTableName);
+    if (!table) {
+      console.warn(`Airtable table metadata not found for ${fallbackTableName}; skipping optional summary write.`);
+      return null;
+    }
+    const availableNames = new Set(table.fields.map(field => field.name));
+    return Object.fromEntries(
+      Object.entries(fields).filter(([fieldName]) => availableNames.has(fieldName))
+    ) as FieldSet;
+  } catch (error) {
+    console.warn(`Unable to read ${fallbackTableName} field metadata; skipping optional summary write:`, error);
+    return null;
+  }
+};
+
 const getSharedSelectOptions = async (fieldName: string, fallback: string[]): Promise<string[]> => {
   try {
     const tables = await getAirtableMetadataTables();
@@ -699,9 +721,23 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     'Last Updated': new Date().toISOString(),
   };
 
-  const existing = monthlyRows.find(record => String(record.fields['Month'] || '') === month);
-  if (existing) await tableMonthlyFinance.update([{ id: existing.id, fields }]);
-  else await tableMonthlyFinance.create([{ fields }]);
+  // Monthly Finance is an optional Airtable summary layer. Bases created at
+  // different times do not always share every column, so only write fields
+  // that actually exist instead of breaking the owner pages on an unknown name.
+  const writableFields = await keepExistingAirtableFields(
+    fields,
+    process.env.AIRTABLE_TABLE_MONTHLY_FINANCE,
+    'Monthly Finance'
+  );
+  if (writableFields && Object.keys(writableFields).length > 0) {
+    const existing = monthlyRows.find(record => String(record.fields['Month'] || '') === month);
+    try {
+      if (existing) await tableMonthlyFinance.update([{ id: existing.id, fields: writableFields }]);
+      else await tableMonthlyFinance.create([{ fields: writableFields }]);
+    } catch (error) {
+      console.warn('Unable to update optional Monthly Finance summary; live owner dashboard will continue:', error);
+    }
+  }
   return { month, orderCount: monthOrders.length, marketingSpend, businessExpenses, pendingCostOrders: totals.pending };
 };
 
