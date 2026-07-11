@@ -317,6 +317,13 @@ const sumQuoteLocalDelivery = (items: any[]): number =>
     return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
 
+const calculateLocalDeliveryFee = (totalWeightKg: number): number => {
+  const weight = Number(totalWeightKg) || 0;
+  if (weight <= 0) return 0;
+  if (weight <= 5) return 100;
+  return Math.round((100 + ((weight - 5) * 10)) * 100) / 100;
+};
+
 const buildDeliveryFeeRange = (localDeliveryAmount: number): string => {
   const amount = Number(localDeliveryAmount) || 0;
   if (amount <= 0) return '';
@@ -347,7 +354,7 @@ const buildDeliveryWaiverText = (
 ): string => {
   const mode = String(fields['Delivery Charge Mode'] || '');
   const reason = String(fields['Delivery Offer Reason'] || '');
-  const range = buildDeliveryFeeRange(localDeliveryAmount);
+  const amount = Number(localDeliveryAmount) || 0;
   const validUntilText = String(validUntil || fields['Valid Until'] || '').trim();
 
   if (mode !== '已包本地送貨') {
@@ -360,7 +367,7 @@ const buildDeliveryWaiverText = (
       ? `Local delivery included | ${formatDeliveryOfferReasonEn(reason)}`
       : 'Local delivery included';
     const lines = [firstLine];
-    if (range) lines.push(`Delivery fee is calculated by weight | Estimated delivery fee approx. ${range}, now waived`);
+    if (amount > 0) lines.push(`Delivery is calculated by estimated weight | HK$${amount.toFixed(2)} included in this quotation`);
     if (validUntilText) lines.push(`Offer valid until quotation valid-until date: ${validUntilText}`);
     return lines.join('\n');
   }
@@ -369,7 +376,7 @@ const buildDeliveryWaiverText = (
     ? `已包本地送貨｜${formatDeliveryOfferReasonZh(reason)}`
     : '已包本地送貨';
   const lines = [firstLine];
-  if (range) lines.push(`運費以重量計算｜預計運費約 ${range}，現已豁免`);
+  if (amount > 0) lines.push(`運費按預計重量計算｜HK$${amount.toFixed(2)} 已計入此報價`);
   if (validUntilText) lines.push(`優惠有效期為此報價有效期 ${validUntilText}`);
   return lines.join('\n');
 };
@@ -651,7 +658,9 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     tableMonthlyFinance.select().all(),
   ]);
 
-  const monthOrders = orders.filter(record => getOrderFinanceMonth(record.fields['Internal Order No']) === month);
+  const monthOrders = orders.filter(record => getOrderFinanceMonth(
+    record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
+  ) === month);
   const monthMarketing = marketing.filter(record => {
     const fields = record.fields;
     const date = String(fields['Spend Date'] || '');
@@ -669,7 +678,7 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
     sum.gross += numberField(fields, 'Actual Profit HKD');
     if (String(fields['Finance Data Status'] || '').trim()) sum.pending += 1;
-    if (String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
+    if (fields['Is Ad Attributed Order']) sum.adOrders += 1;
     return sum;
   }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, gross: 0, pending: 0, adOrders: 0 });
 
@@ -1550,7 +1559,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                     <th>Description</th>
                     <th>QTY</th>
                     <th>內地運費 ($)</th>
-                    <th>香港運費 ($)</th>
+                    <th>預計香港送貨重量 KG</th>
                     <th>利潤 ($)</th>
                     <th>Amount ($)</th>
                     <th></th>
@@ -1603,7 +1612,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
                     <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px"></td>
                     <td><input type="number" class="f-freight amount-input" step="0.01" style="width:80px" title="內地運費"></td>
-                    <td><input type="number" class="f-hk-delivery amount-input" step="0.01" style="width:80px" title="系統建議，可手動修改"></td>
+                    <td><input type="number" class="f-hk-weight amount-input" min="0.01" step="0.01" required style="width:95px" title="此 Item 的總重量；不會再乘 QTY"></td>
                     <td><input type="number" class="f-profit amount-input" step="0.01" style="width:80px"></td>
                     <td><input type="number" class="f-amt amount-input" step="0.01" style="width:90px;background:#f9fafb;" readonly></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
@@ -1618,6 +1627,17 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
 
           <div class="section">
             <div class="section-title">Pricing / 優惠及送貨設定</div>
+            <div class="form-row form-row-2">
+              <div class="form-group">
+                <label>全單預計香港送貨重量 KG</label>
+                <input type="number" id="totalHkDeliveryWeight" step="0.01" readonly style="background:#f9fafb;">
+              </div>
+              <div class="form-group">
+                <label>已包本地送貨費 ($)</label>
+                <input type="number" id="totalHkDeliveryFee" step="0.01" readonly style="background:#f9fafb;">
+                <div style="font-size:12px;color:#6b7280;margin-top:6px;">首 5kg $100；其後每 kg $10。全張單只計一次，沒有額外公司加價。</div>
+              </div>
+            </div>
             <div class="form-row form-row-3">
               <div class="form-group">
                 <label>Subtotal ($)</label>
@@ -1667,7 +1687,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                 <label>送貨收費方式</label>
                 <select name="deliveryChargeMode" id="deliveryChargeMode" onchange="toggleDeliveryInputs(); recalcTotal();">
                   <option value="已包本地送貨">已包本地送貨</option>
-                  <option value="LKS 車隊 運費到付">LKS 車隊 運費到付</option>
                 </select>
               </div>
               <div class="form-group" id="deliveryOfferReasonGroup">
@@ -1852,14 +1871,11 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       if (outerHInput) outerHInput.value = (h + inc.outerHeightIncrease).toFixed(1);
     }
 
-    function roundUpToNearest10(value) {
-      return Math.ceil(value / 10) * 10;
-    }
-
-    function calcDeliveryReserve(driverCost) {
-      if (!(driverCost > 0)) return 0;
-      var rawReserve = Math.max(driverCost * 1.10, driverCost + 30);
-      return roundUpToNearest10(rawReserve);
+    function calculateLocalDeliveryFee(totalWeightKg) {
+      var weight = parseNum(totalWeightKg);
+      if (!(weight > 0)) return 0;
+      if (weight <= 5) return 100;
+      return Math.round((100 + ((weight - 5) * 10)) * 100) / 100;
     }
 
     function getLightBoardPieceCount(row) {
@@ -1871,22 +1887,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       count += ((qtyMap['上下燈'] || 0) * 2);
       count += (qtyMap['背燈'] || 0);
       return count;
-    }
-
-    function suggestBaseDriverCost(row) {
-      var itemType = ((row.querySelector('.f-type') || {}).value || '');
-      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
-      var l = parseNum((row.querySelector('.f-ol') || {}).value) || parseNum((row.querySelector('.f-il') || {}).value);
-      var d = parseNum((row.querySelector('.f-od') || {}).value) || parseNum((row.querySelector('.f-id') || {}).value);
-      var h = parseNum((row.querySelector('.f-oh') || {}).value) || parseNum((row.querySelector('.f-ih') || {}).value);
-      if (!(l > 0 && d > 0 && h > 0)) return 0;
-
-      var maxDim = Math.max(l, d, h);
-      var suggested = isDisplayCase ? 130 : 100;
-
-      if (maxDim >= 60 || l >= 70 || d >= 35 || h >= 50) suggested = Math.max(suggested, 130);
-      if (maxDim >= 90 || l >= 100 || d >= 45 || h >= 80) suggested = Math.max(suggested, 160);
-      return suggested;
     }
 
     function getEstimatedPackageUnits(row) {
@@ -1905,27 +1905,12 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       return unitsPerSet * qty;
     }
 
-    function suggestHongKongDeliveryTotal(row) {
-      var baseDriverCost = suggestBaseDriverCost(row);
-      var baseReserve = calcDeliveryReserve(baseDriverCost);
-      if (!(baseReserve > 0)) return 0;
-      return baseReserve * getEstimatedPackageUnits(row);
-    }
-
-    function updateLocalDeliveryEstimate(row) {
-      var input = row.querySelector('.f-hk-delivery');
-      if (!input || input.getAttribute('data-manual') === '1') return;
-      var reserve = suggestHongKongDeliveryTotal(row);
-      input.value = reserve > 0 ? String(reserve) : '';
-      input.setAttribute('data-auto-value', input.value || '');
-    }
-
-    function calcRowAmount(row) {
+    function calcRowAmount(row, allocatedLocalDelivery) {
       var dims = getDims(row);
       var l = dims.l, d = dims.d, h = dims.h;
       var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
       var freight = parseNum((row.querySelector('.f-freight') || {}).value);
-      var hkDelivery = parseNum((row.querySelector('.f-hk-delivery') || {}).value);
+      var hkDelivery = parseNum(allocatedLocalDelivery);
       var profit = parseNum((row.querySelector('.f-profit') || {}).value);
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
@@ -1992,6 +1977,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       // QTY 只應該倍增產品 / 配件本身金額。
       // 內地運費、香港運費及利潤均視為該行 item 的總數，由使用者或系統直接填入，不再因 QTY 被重複相乘。
       var lineAmount = (unitProductAmount * qty) + freight + hkDelivery + profit;
+      row.setAttribute('data-hk-delivery', String(hkDelivery || 0));
       var amountInput = row.querySelector('.f-amt');
       if (amountInput) amountInput.value = lineAmount.toFixed(2);
       return lineAmount;
@@ -2000,19 +1986,9 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
     function bindRowEvents(row) {
       row.querySelectorAll('input, select').forEach(function(el) {
         if (el.classList.contains('f-amt')) return;
-        if (el.classList.contains('f-hk-delivery')) {
-          el.addEventListener('input', function() {
-            el.setAttribute('data-manual', '1');
-            calcRowAmount(row);
-            recalcSubtotal();
-          });
-          return;
-        }
         var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
           updateOuterDimensions(row);
-          updateLocalDeliveryEstimate(row);
-          calcRowAmount(row);
           recalcSubtotal();
         });
       });
@@ -2035,10 +2011,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
           } else {
             el.value = '';
           }
-          if (el.classList.contains('f-hk-delivery')) {
-            el.removeAttribute('data-manual');
-            el.removeAttribute('data-auto-value');
-          }
         } else {
           el.value = '';
         }
@@ -2047,7 +2019,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       bindRowEvents(clone);
       updateOuterDimensionMode(clone);
       updateOuterDimensions(clone);
-      updateLocalDeliveryEstimate(clone);
       recalcSubtotal();
     }
     function removeRow(btn) {
@@ -2058,9 +2029,20 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
     }
     function recalcSubtotal() {
       var sum = 0;
-      document.querySelectorAll('#itemsBody tr').forEach(function(row) {
-        sum += calcRowAmount(row);
+      var rows = Array.from(document.querySelectorAll('#itemsBody tr'));
+      var totalWeight = rows.reduce(function(total, row) {
+        return total + parseNum((row.querySelector('.f-hk-weight') || {}).value);
+      }, 0);
+      var deliveryFee = calculateLocalDeliveryFee(totalWeight);
+      var includeDelivery = getElValue('deliveryChargeMode') === '已包本地送貨';
+      var allocatedFee = includeDelivery ? deliveryFee : 0;
+      rows.forEach(function(row, index) {
+        sum += calcRowAmount(row, index === 0 ? allocatedFee : 0);
       });
+      var weightInput = document.getElementById('totalHkDeliveryWeight');
+      var feeInput = document.getElementById('totalHkDeliveryFee');
+      if (weightInput) weightInput.value = totalWeight > 0 ? totalWeight.toFixed(2) : '';
+      if (feeInput) feeInput.value = allocatedFee > 0 ? allocatedFee.toFixed(2) : '';
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
     }
@@ -2192,7 +2174,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
         setElValue('discountReason', '');
-        setElValue('deliveryChargeMode', 'LKS 車隊 運費到付');
+        setElValue('deliveryChargeMode', '已包本地送貨');
         setElValue('deliveryOfferReason', '');
       }
       toggleDiscountInputs();
@@ -2240,12 +2222,13 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
           freight: (row.querySelector('.f-freight') || {}).value || '0',
-          hongKongDelivery: (row.querySelector('.f-hk-delivery') || {}).value || '0',
-          deliveryCostReserve: (row.querySelector('.f-hk-delivery') || {}).value || '0',
+          estimatedHkDeliveryWeightKg: (row.querySelector('.f-hk-weight') || {}).value || '0',
+          hongKongDelivery: row.getAttribute('data-hk-delivery') || '0',
+          deliveryCostReserve: row.getAttribute('data-hk-delivery') || '0',
           profit: (row.querySelector('.f-profit') || {}).value || '0',
           estimatedPackageUnits: String(getEstimatedPackageUnits(row) || 0),
-          localDeliveryOverride: ((row.querySelector('.f-hk-delivery') || {}).getAttribute('data-manual') === '1') ? 'true' : 'false',
-          localDeliveryNotes: ((row.querySelector('.f-hk-delivery') || {}).getAttribute('data-manual') === '1') ? '香港運費已人手修改' : '香港運費由系統按包裝單位自動建議',
+          localDeliveryOverride: 'false',
+          localDeliveryNotes: '香港運費按全單預計重量計算；首 5kg $100，續重每 kg $10，沒有額外加價',
           amount: (row.querySelector('.f-amt') || {}).value || '0'
         });
       });
@@ -2346,7 +2329,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
         bindRowEvents(row);
         updateOuterDimensions(row);
-        updateLocalDeliveryEstimate(row);
       });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
         e.preventDefault();
@@ -2430,6 +2412,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       description: String(item.description || ''),
       qty: parseInt(String(item.qty)) || 1,
       freight: parseFloat(String(item.freight)) || 0,
+      estimatedHkDeliveryWeightKg: parseFloat(String(item.estimatedHkDeliveryWeightKg)) || 0,
       hongKongDelivery: parseFloat(String(item.hongKongDelivery ?? item.deliveryCostReserve ?? item.localDelivery)) || 0,
       deliveryCostReserve: parseFloat(String(item.deliveryCostReserve ?? item.hongKongDelivery ?? item.localDelivery)) || 0,
       profit: parseFloat(String(item.profit)) || 0,
@@ -2437,6 +2420,22 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       localDeliveryOverride: String(item.localDeliveryOverride) === 'true' || item.localDeliveryOverride === true,
       localDeliveryNotes: String(item.localDeliveryNotes || ''),
       amount: parseFloat(String(item.amount)) || 0,
+    }));
+
+    // Local delivery is calculated once for the whole quotation from the sum of
+    // each Item's entered total weight. Store the fee on the first Item only so
+    // linked Airtable rollups do not double-count multi-item orders.
+    const totalEstimatedHkDeliveryWeightKg = items.reduce(
+      (sum: number, item: any) => sum + (Number(item.estimatedHkDeliveryWeightKg) || 0),
+      0
+    );
+    const calculatedLocalDeliveryFee = calculateLocalDeliveryFee(totalEstimatedHkDeliveryWeightKg);
+    items = items.map((item: any, index: number) => ({
+      ...item,
+      hongKongDelivery: index === 0 ? calculatedLocalDeliveryFee : 0,
+      deliveryCostReserve: index === 0 ? calculatedLocalDeliveryFee : 0,
+      localDeliveryOverride: false,
+      localDeliveryNotes: '香港運費按全單預計重量計算；首 5kg $100，續重每 kg $10，沒有額外加價',
     }));
 
     const itemsJson = JSON.stringify(items);
@@ -2452,6 +2451,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
           item.levelHeights ? `層高 ${item.levelHeights}` : '',
           item.accessories ? `配件 ${Array.isArray(item.accessories) ? item.accessories.join(', ') : item.accessories}` : '',
           item.qty ? `QTY ${item.qty}` : '',
+          item.estimatedHkDeliveryWeightKg ? `預計香港送貨重量 ${item.estimatedHkDeliveryWeightKg}kg` : '',
           item.freight ? `內地運費 $${item.freight}` : '',
           item.hongKongDelivery ? `香港運費 $${item.hongKongDelivery}` : '',
           item.profit ? `利潤 $${item.profit}` : '',
@@ -3247,6 +3247,7 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
           'Product Amount': item.amount || 0,
           'Quoted China Freight HKD': Number(item.freight) || 0,
           'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
+          'Estimated HK Delivery Weight KG': Number(item.estimatedHkDeliveryWeightKg) || 0,
           'Quoted Profit HKD': Number(item.profit) || 0,
           'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
           'Local Delivery Override': Boolean(item.localDeliveryOverride),
@@ -3614,39 +3615,62 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
 const getOwnerFormToken = (): string =>
   crypto.createHash('sha256').update(`${getAdminCredentials().password}:supplier-costs`).digest('hex');
 
-app.get('/admin/costs', requireAdmin, async (_req: Request, res: Response) => {
+app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
   try {
+    const selectedMonth = String(req.query.month || getHongKongMonth());
+    monthBounds(selectedMonth);
     const orders = await tableOrders.select().all();
     const pending = orders
       .filter(record => {
         const fields = record.fields;
-        const used = numberField(fields, 'Supplier Cost Used HKD')
-          || numberField(fields, 'Actual Supplier Cost HKD')
-          || numberField(fields, 'Cost');
-        return String(fields['Internal Order No'] || '').trim() && used <= 0;
+        const orderNo = fields['Internal 1 Order No'] || fields['Internal Order No'];
+        return getOrderFinanceMonth(orderNo) === selectedMonth
+          && String(fields['Finance Data Status'] || '').trim() !== '';
       })
-      .sort((a, b) => String(a.fields['Internal Order No']).localeCompare(String(b.fields['Internal Order No'])));
+      .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
+        .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])));
 
     const rows = pending.map(record => {
       const fields = record.fields;
-      const orderNo = String(fields['Internal Order No'] || record.id);
+      const orderNo = String(fields['Internal 1 Order No'] || fields['Internal Order No'] || record.id);
+      const supplierCost = numberField(fields, 'Supplier Cost Used HKD')
+        || numberField(fields, 'Actual Supplier Cost HKD')
+        || numberField(fields, 'Cost');
+      const chinaFreight = numberField(fields, 'China Freight Used HKD')
+        || numberField(fields, 'Actual China Freight HKD')
+        || numberField(fields, 'China Freight Cost HKD');
+      const reissueCost = numberField(fields, 'Actual Reissue Cost HKD');
+      const deliveryCost = numberField(fields, 'Actual Local Delivery Cost HKD');
+      const hasDelivery = Array.isArray(fields['Deliveries']) && fields['Deliveries'].length > 0;
       return `<tr>
         <td><strong>${escapeHtml(orderNo)}</strong></td>
-        <td>HK$${numberField(fields, 'Final Amount').toFixed(2)}</td>
-        <td><input name="cost_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="0.00" aria-label="${escapeHtml(orderNo)} supplier cost"></td>
+        <td><small>${escapeHtml(fields['Finance Data Status'] || '')}</small></td>
+        <td>${supplierCost > 0
+          ? `HK$${supplierCost.toFixed(2)}`
+          : `<input name="supplier_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="小糖成本" aria-label="${escapeHtml(orderNo)} supplier cost">`}</td>
+        <td>${chinaFreight > 0
+          ? `HK$${chinaFreight.toFixed(2)}`
+          : `<input name="china_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="中國運費" aria-label="${escapeHtml(orderNo)} China freight">`}</td>
+        <td><input name="reissue_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" value="${reissueCost > 0 ? reissueCost : ''}" placeholder="如有" aria-label="${escapeHtml(orderNo)} reissue cost"></td>
+        <td>${hasDelivery ? `已建立｜HK$${deliveryCost.toFixed(2)}` : '等候 Delivery System 建立'}</td>
       </tr>`;
     }).join('');
 
     const content = `<div class="doc-card"><div class="doc-body">
-      <div class="section-title">待補小糖實際成本</div>
-      <p style="color:#64748b;margin-bottom:18px;">只顯示仍未有小糖成本嘅訂單。儲存後已完成嘅訂單會自動消失，並重新計算每月利潤。</p>
+      <div class="section-title">待補訂單成本</div>
+      <p style="color:#64748b;margin-bottom:12px;">只顯示所選月份仍欠成本資料嘅訂單。中國運費如已經由 China Shipment 自動分配，毋須手動再填。</p>
+      <form method="GET" action="/admin/costs" style="display:flex;gap:10px;align-items:end;margin-bottom:18px;">
+        <label><span style="display:block;font-size:12px;color:#64748b;margin-bottom:5px;">月份</span><input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label>
+        <button class="btn btn-outline" type="submit">查看</button>
+      </form>
       ${pending.length ? `<form method="POST" action="/admin/costs">
         <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
-        <div style="overflow-x:auto"><table class="items-table"><thead><tr><th>Order</th><th>訂單收入</th><th>小糖實際成本 HKD</th></tr></thead><tbody>${rows}</tbody></table></div>
-        <div style="margin-top:20px"><button class="btn btn-primary" type="submit">儲存成本並更新 Dashboard</button></div>
-      </form>` : '<div class="alert alert-success">所有訂單已經有小糖成本，暫時冇資料需要填。</div>'}
+        <input type="hidden" name="month" value="${escapeHtml(selectedMonth)}">
+        <div style="overflow-x:auto"><table class="items-table"><thead><tr><th>Order</th><th>尚欠資料</th><th>小糖成本 HKD</th><th>中國運費 HKD</th><th>補寄成本 HKD</th><th>香港送貨</th></tr></thead><tbody>${rows}</tbody></table></div>
+        <div style="margin-top:20px"><button class="btn btn-primary" type="submit">儲存並更新 Dashboard</button></div>
+      </form>` : '<div class="alert alert-success">所選月份所有訂單成本已齊，暫時冇資料需要填。</div>'}
     </div></div>`;
-    res.send(renderPage('待補小糖成本', content));
+    res.send(renderPage('待補訂單成本', content));
   } catch (error: any) {
     console.error('Unable to render supplier cost page:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
@@ -3658,25 +3682,36 @@ app.post('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
     if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
       return res.status(403).send('Invalid form token.');
     }
-    const updates: Array<{ id: string; fields: FieldSet }> = [];
+    const updatesById = new Map<string, FieldSet>();
+    const writablePrefixes: Record<string, string> = {
+      supplier_: 'Actual Supplier Cost HKD',
+      china_: 'Actual China Freight HKD',
+      reissue_: 'Actual Reissue Cost HKD',
+    };
     for (const [key, rawValue] of Object.entries(req.body || {})) {
-      if (!key.startsWith('cost_rec')) continue;
-      const id = key.slice(5);
-      const value = Number(rawValue);
-      if (id && Number.isFinite(value) && value > 0) {
-        updates.push({ id, fields: { 'Actual Supplier Cost HKD': value } });
-      }
+      const prefix = Object.keys(writablePrefixes).find(candidate => key.startsWith(candidate));
+      if (!prefix) continue;
+      const id = key.slice(prefix.length);
+      const raw = String(rawValue ?? '').trim();
+      if (!id || !raw) continue;
+      const value = Number(raw);
+      if (!Number.isFinite(value) || value < 0) continue;
+      const fields = updatesById.get(id) || {};
+      fields[writablePrefixes[prefix]] = value;
+      updatesById.set(id, fields);
     }
+    const updates = Array.from(updatesById, ([id, fields]) => ({ id, fields }));
     if (!updates.length) return res.redirect('/admin/costs');
     await tableOrders.update(updates);
     const months = new Set<string>();
     for (const update of updates) {
       const record = await tableOrders.find(update.id);
-      const month = getOrderFinanceMonth(record.fields['Internal Order No']);
+      const month = getOrderFinanceMonth(record.fields['Internal 1 Order No'] || record.fields['Internal Order No']);
       if (month) months.add(month);
     }
     for (const month of months) await syncMonthlyFinance(month);
-    res.redirect('/admin/costs?saved=1');
+    const selectedMonth = String(req.body.month || getHongKongMonth());
+    res.redirect(`/admin/costs?month=${encodeURIComponent(selectedMonth)}&saved=1`);
   } catch (error: any) {
     console.error('Unable to save supplier costs:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
