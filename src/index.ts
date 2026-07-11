@@ -1320,7 +1320,10 @@ app.get('/quotes', async (req: Request, res: Response) => {
     const content = `
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:20px;">
         <h2 style="font-size:22px;font-weight:700;">Quote Dashboard</h2>
-        <a href="/quote/create" class="btn btn-primary">+ New Quote</a>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
+          <a href="/admin/dashboard" class="btn btn-outline">老闆 Dashboard</a>
+          <a href="/quote/create" class="btn btn-primary">+ New Quote</a>
+        </div>
       </div>
 
       <form method="GET" action="/quotes" style="margin-bottom:12px;">
@@ -3559,6 +3562,160 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
 const getOwnerFormToken = (): string =>
   crypto.createHash('sha256').update(`${getAdminCredentials().password}:supplier-costs`).digest('hex');
 
+const formatOwnerMoney = (value: number): string =>
+  `HK$${(Number(value) || 0).toLocaleString('en-HK', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+
+const previousMonth = (month: string): string => {
+  const [year, monthNumber] = month.split('-').map(Number);
+  const date = new Date(Date.UTC(year, monthNumber - 2, 1));
+  return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
+};
+
+app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const selectedMonth = String(req.query.month || getHongKongMonth());
+    monthBounds(selectedMonth);
+
+    // Refresh Airtable's Monthly Finance row before presenting the live figures.
+    await syncMonthlyFinance(selectedMonth);
+
+    const [orders, marketing, expenses, checklist] = await Promise.all([
+      tableOrders.select().all(),
+      tableMarketingSpend.select().all(),
+      tableBusinessExpenses.select().all(),
+      tableExpenseChecklist.select().all(),
+    ]);
+
+    const monthOrders = orders
+      .filter(record => getOrderFinanceMonth(
+        record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
+      ) === selectedMonth)
+      .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
+        .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])));
+
+    const monthMarketing = marketing.filter(record => {
+      const fields = record.fields;
+      const date = String(fields['Spend Date'] || '');
+      const status = String(fields['Payment Status'] || 'Paid').trim().toLowerCase();
+      return date.startsWith(selectedMonth) && !['pending', 'refunded', 'cancelled'].includes(status);
+    });
+    const monthExpenses = expenses.filter(record => String(record.fields['Month'] || '').startsWith(selectedMonth));
+
+    const totals = monthOrders.reduce((sum, record) => {
+      const fields = record.fields;
+      sum.revenue += numberField(fields, 'Final Amount');
+      sum.supplier += numberField(fields, 'Supplier Cost Used HKD')
+        || numberField(fields, 'Actual Supplier Cost HKD')
+        || numberField(fields, 'Cost');
+      sum.china += numberField(fields, 'China Freight Used HKD')
+        || numberField(fields, 'Actual China Freight HKD')
+        || numberField(fields, 'China Freight Cost HKD');
+      sum.delivery += numberField(fields, 'Actual Local Delivery Cost HKD');
+      sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
+      if (String(fields['Finance Data Status'] || '').trim()) sum.pending += 1;
+      if (fields['Is Ad Attributed Order'] || String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
+      return sum;
+    }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, pending: 0, adOrders: 0 });
+
+    const marketingSpend = monthMarketing.reduce((sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0);
+    const businessExpenses = monthExpenses.reduce((sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0);
+    const orderCosts = totals.supplier + totals.china + totals.delivery + totals.reissue;
+    const grossProfit = totals.revenue - orderCosts;
+    const netProfit = grossProfit - marketingSpend - businessExpenses;
+    const margin = totals.revenue > 0 ? (netProfit / totals.revenue) * 100 : 0;
+
+    const campaignCounts = new Map<string, number>();
+    for (const record of monthOrders) {
+      const fields = record.fields;
+      const source = String(fields['Campaign / Source Detail'] || '').trim()
+        || (fields['Is Ad Attributed Order'] ? '廣告來源未填' : '非廣告／未填寫');
+      campaignCounts.set(source, (campaignCounts.get(source) || 0) + 1);
+    }
+    const campaignRows = Array.from(campaignCounts.entries())
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .map(([source, count]) => {
+        const percent = monthOrders.length ? Math.round((count / monthOrders.length) * 100) : 0;
+        return `<tr><td><strong>${escapeHtml(source)}</strong></td><td>${count}</td><td><div class="owner-bar"><span style="width:${percent}%"></span></div><small>${percent}%</small></td></tr>`;
+      }).join('');
+
+    const activeChecklist = checklist.filter(record => {
+      const fields = record.fields;
+      return fields['Auto Post Monthly'] && String(fields['Active'] || '').trim().toLowerCase() !== 'no';
+    });
+    const expenseNames = new Set(monthExpenses.map(record => String(record.fields['Expense Name'] || '').trim().toLowerCase()));
+    const missingExpenses = activeChecklist
+      .map(record => String(record.fields['Expense Name'] || '').trim())
+      .filter(name => name && !expenseNames.has(name.toLowerCase()));
+    const expenseRows = monthExpenses
+      .sort((a, b) => String(a.fields['Expense Date'] || '').localeCompare(String(b.fields['Expense Date'] || '')))
+      .map(record => {
+        const fields = record.fields;
+        const status = String(fields['Status'] || '已自動記錄');
+        return `<tr><td>${escapeHtml(fields['Expense Name'] || '-')}</td><td>${escapeHtml(fields['Expense Date'] || selectedMonth)}</td><td>${formatOwnerMoney(numberField(fields, 'Amount HKD'))}</td><td>${escapeHtml(status)}</td></tr>`;
+      }).join('');
+
+    const pendingRows = monthOrders
+      .filter(record => String(record.fields['Finance Data Status'] || '').trim())
+      .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(record.fields['Finance Data Status'] || '尚欠成本')}</li>`)
+      .join('');
+
+    const statusClass = totals.pending || missingExpenses.length ? 'owner-status warning' : 'owner-status complete';
+    const statusText = totals.pending || missingExpenses.length ? '暫計｜仍有資料待補' : '本月資料完整';
+    const content = `<div class="owner-dashboard">
+      <div class="owner-topbar">
+        <div><div class="owner-eyebrow">LKS OWNER</div><h1>老闆 Dashboard</h1><p>收入、成本、廣告及每月支出集中一頁。</p></div>
+        <div class="owner-actions"><a class="btn btn-outline" href="/quotes">Quote System</a><a class="btn btn-primary" href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">補成本資料</a></div>
+      </div>
+      <div class="owner-controls">
+        <form method="GET" action="/admin/dashboard"><label>月份<input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label><button class="btn btn-primary" type="submit">查看／重新整理</button></form>
+        <div class="${statusClass}">${statusText}</div>
+      </div>
+      <div class="owner-kpis">
+        <div class="owner-kpi"><span>本月收入</span><strong>${formatOwnerMoney(totals.revenue)}</strong><small>${monthOrders.length} 張 Order</small></div>
+        <div class="owner-kpi"><span>訂單毛利</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>收入減產品及運輸成本</small></div>
+        <div class="owner-kpi owner-kpi-highlight"><span>本月淨利</span><strong>${formatOwnerMoney(netProfit)}</strong><small>淨利率 ${margin.toFixed(1)}%</small></div>
+        <div class="owner-kpi"><span>廣告帶來訂單</span><strong>${totals.adOrders}</strong><small>共 ${monthOrders.length} 張 Order</small></div>
+      </div>
+      <div class="owner-grid">
+        <section class="owner-panel"><h2>成本分拆</h2><div class="owner-lines">
+          <div><span>小糖成本</span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
+          <div><span>中國運費</span><strong>${formatOwnerMoney(totals.china)}</strong></div>
+          <div><span>本地送貨／司機</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
+          <div><span>補寄成本</span><strong>${formatOwnerMoney(totals.reissue)}</strong></div>
+          <div class="owner-line-total"><span>訂單成本合計</span><strong>${formatOwnerMoney(orderCosts)}</strong></div>
+          <div><span>Meta／Marketing</span><strong>${formatOwnerMoney(marketingSpend)}</strong></div>
+          <div><span>公司每月支出</span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+        </div></section>
+        <section class="owner-panel"><h2>Order 來自邊個 Ads／來源</h2>
+          ${campaignRows ? `<div class="owner-table-wrap"><table><thead><tr><th>Campaign / Source</th><th>Order</th><th>比例</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<div class="owner-empty">本月未有 Order。</div>'}
+        </section>
+      </div>
+      <div class="owner-grid">
+        <section class="owner-panel"><div class="owner-panel-head"><h2>每月固定及公司支出</h2><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+          ${missingExpenses.length ? `<div class="owner-alert">未見本月記錄：${missingExpenses.map(escapeHtml).join('、')}</div>` : '<div class="owner-ok">固定支出已按排程自動記錄，毋須逐張單據再入。</div>'}
+          ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>日期</th><th>金額</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
+        </section>
+        <section class="owner-panel"><div class="owner-panel-head"><h2>尚欠資料提醒</h2><a href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">前往補資料 →</a></div>
+          ${pendingRows ? `<ul class="owner-pending">${pendingRows}</ul>` : '<div class="owner-ok">所有 Order 成本資料已齊。</div>'}
+          <p class="owner-note">財務月份跟 Order Month & Year；即使下月先送貨，司機成本仍會計回原本落單月份。</p>
+        </section>
+      </div>
+      <div class="owner-footer-nav"><a href="/admin/dashboard?month=${previousMonth(selectedMonth)}">← 上一個月</a><a href="/admin/dashboard?month=${getHongKongMonth()}">返回今個月</a></div>
+    </div>`;
+
+    const extraHead = `<style>
+      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}}
+    </style>`;
+    res.send(renderPage(`老闆 Dashboard ${selectedMonth}`, content, extraHead));
+  } catch (error: any) {
+    console.error('Unable to render owner dashboard:', error);
+    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
 app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
   try {
     const selectedMonth = String(req.query.month || getHongKongMonth());
@@ -3601,7 +3758,7 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
     }).join('');
 
     const content = `<div class="doc-card"><div class="doc-body">
-      <div class="section-title">待補訂單成本</div>
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;"><div class="section-title" style="margin:0;flex:1;">待補訂單成本</div><a class="btn btn-outline" href="/admin/dashboard?month=${encodeURIComponent(selectedMonth)}">老闆 Dashboard</a></div>
       <p style="color:#64748b;margin-bottom:12px;">只顯示所選月份仍欠成本資料嘅訂單。中國運費如已經由 China Shipment 自動分配，毋須手動再填。</p>
       <form method="GET" action="/admin/costs" style="display:flex;gap:10px;align-items:end;margin-bottom:18px;">
         <label><span style="display:block;font-size:12px;color:#64748b;margin-bottom:5px;">月份</span><input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label>
