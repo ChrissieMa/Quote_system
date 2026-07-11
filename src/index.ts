@@ -317,17 +317,10 @@ const sumQuoteLocalDelivery = (items: any[]): number =>
     return sum + (Number.isFinite(value) ? value : 0);
   }, 0);
 
-const calculateLocalDeliveryFee = (totalWeightKg: number): number => {
-  const weight = Number(totalWeightKg) || 0;
-  if (weight <= 0) return 0;
-  if (weight <= 5) return 100;
-  return Math.round((100 + ((weight - 5) * 10)) * 100) / 100;
-};
-
 const buildDeliveryFeeRange = (localDeliveryAmount: number): string => {
   const amount = Number(localDeliveryAmount) || 0;
   if (amount <= 0) return '';
-  const lower = Math.ceil(amount / 100) * 100;
+  const lower = Math.floor(amount / 100) * 100;
   const upper = lower + 100;
   return `HK$${lower}–$${upper}`;
 };
@@ -354,7 +347,7 @@ const buildDeliveryWaiverText = (
 ): string => {
   const mode = String(fields['Delivery Charge Mode'] || '');
   const reason = String(fields['Delivery Offer Reason'] || '');
-  const amount = Number(localDeliveryAmount) || 0;
+  const range = buildDeliveryFeeRange(localDeliveryAmount);
   const validUntilText = String(validUntil || fields['Valid Until'] || '').trim();
 
   if (mode !== '已包本地送貨') {
@@ -367,7 +360,7 @@ const buildDeliveryWaiverText = (
       ? `Local delivery included | ${formatDeliveryOfferReasonEn(reason)}`
       : 'Local delivery included';
     const lines = [firstLine];
-    if (amount > 0) lines.push(`Delivery is calculated by estimated weight | HK$${amount.toFixed(2)} included in this quotation`);
+    if (range) lines.push(`Delivery fee is calculated by estimated weight | Estimated delivery fee approx. ${range}, now waived`);
     if (validUntilText) lines.push(`Offer valid until quotation valid-until date: ${validUntilText}`);
     return lines.join('\n');
   }
@@ -376,7 +369,7 @@ const buildDeliveryWaiverText = (
     ? `已包本地送貨｜${formatDeliveryOfferReasonZh(reason)}`
     : '已包本地送貨';
   const lines = [firstLine];
-  if (amount > 0) lines.push(`運費按預計重量計算｜HK$${amount.toFixed(2)} 已計入此報價`);
+  if (range) lines.push(`運費以重量計算｜預計運費約 ${range}，現已豁免`);
   if (validUntilText) lines.push(`優惠有效期為此報價有效期 ${validUntilText}`);
   return lines.join('\n');
 };
@@ -1559,7 +1552,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                     <th>Description</th>
                     <th>QTY</th>
                     <th>內地運費 ($)</th>
-                    <th>預計香港送貨重量 KG</th>
+                    <th>香港運費總數 ($)</th>
                     <th>利潤 ($)</th>
                     <th>Amount ($)</th>
                     <th></th>
@@ -1612,7 +1605,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
                     <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px"></td>
                     <td><input type="number" class="f-freight amount-input" step="0.01" style="width:80px" title="內地運費"></td>
-                    <td><input type="number" class="f-hk-weight amount-input" min="0.01" step="0.01" required style="width:95px" title="此 Item 的總重量；不會再乘 QTY"></td>
+                    <td><input type="number" class="f-hk-delivery amount-input" min="0" step="0.01" style="width:95px" title="輸入此 Item 的香港本地送貨估算總數"></td>
                     <td><input type="number" class="f-profit amount-input" step="0.01" style="width:80px"></td>
                     <td><input type="number" class="f-amt amount-input" step="0.01" style="width:90px;background:#f9fafb;" readonly></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
@@ -1627,17 +1620,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
 
           <div class="section">
             <div class="section-title">Pricing / 優惠及送貨設定</div>
-            <div class="form-row form-row-2">
-              <div class="form-group">
-                <label>全單預計香港送貨重量 KG</label>
-                <input type="number" id="totalHkDeliveryWeight" step="0.01" readonly style="background:#f9fafb;">
-              </div>
-              <div class="form-group">
-                <label>已包本地送貨費 ($)</label>
-                <input type="number" id="totalHkDeliveryFee" step="0.01" readonly style="background:#f9fafb;">
-                <div style="font-size:12px;color:#6b7280;margin-top:6px;">首 5kg $100；其後每 kg $10。全張單只計一次，沒有額外公司加價。</div>
-              </div>
-            </div>
             <div class="form-row form-row-3">
               <div class="form-group">
                 <label>Subtotal ($)</label>
@@ -1871,13 +1853,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       if (outerHInput) outerHInput.value = (h + inc.outerHeightIncrease).toFixed(1);
     }
 
-    function calculateLocalDeliveryFee(totalWeightKg) {
-      var weight = parseNum(totalWeightKg);
-      if (!(weight > 0)) return 0;
-      if (weight <= 5) return 100;
-      return Math.round((100 + ((weight - 5) * 10)) * 100) / 100;
-    }
-
     function getLightBoardPieceCount(row) {
       var qtyMap = getAccessoryQtyMap(row);
       var count = 0;
@@ -1905,12 +1880,12 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       return unitsPerSet * qty;
     }
 
-    function calcRowAmount(row, allocatedLocalDelivery) {
+    function calcRowAmount(row) {
       var dims = getDims(row);
       var l = dims.l, d = dims.d, h = dims.h;
       var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
       var freight = parseNum((row.querySelector('.f-freight') || {}).value);
-      var hkDelivery = parseNum(allocatedLocalDelivery);
+      var hkDelivery = parseNum((row.querySelector('.f-hk-delivery') || {}).value);
       var profit = parseNum((row.querySelector('.f-profit') || {}).value);
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
@@ -1977,7 +1952,6 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       // QTY 只應該倍增產品 / 配件本身金額。
       // 內地運費、香港運費及利潤均視為該行 item 的總數，由使用者或系統直接填入，不再因 QTY 被重複相乘。
       var lineAmount = (unitProductAmount * qty) + freight + hkDelivery + profit;
-      row.setAttribute('data-hk-delivery', String(hkDelivery || 0));
       var amountInput = row.querySelector('.f-amt');
       if (amountInput) amountInput.value = lineAmount.toFixed(2);
       return lineAmount;
@@ -2030,19 +2004,9 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
     function recalcSubtotal() {
       var sum = 0;
       var rows = Array.from(document.querySelectorAll('#itemsBody tr'));
-      var totalWeight = rows.reduce(function(total, row) {
-        return total + parseNum((row.querySelector('.f-hk-weight') || {}).value);
-      }, 0);
-      var deliveryFee = calculateLocalDeliveryFee(totalWeight);
-      var includeDelivery = getElValue('deliveryChargeMode') === '已包本地送貨';
-      var allocatedFee = includeDelivery ? deliveryFee : 0;
-      rows.forEach(function(row, index) {
-        sum += calcRowAmount(row, index === 0 ? allocatedFee : 0);
+      rows.forEach(function(row) {
+        sum += calcRowAmount(row);
       });
-      var weightInput = document.getElementById('totalHkDeliveryWeight');
-      var feeInput = document.getElementById('totalHkDeliveryFee');
-      if (weightInput) weightInput.value = totalWeight > 0 ? totalWeight.toFixed(2) : '';
-      if (feeInput) feeInput.value = allocatedFee > 0 ? allocatedFee.toFixed(2) : '';
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
     }
@@ -2222,13 +2186,12 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
           freight: (row.querySelector('.f-freight') || {}).value || '0',
-          estimatedHkDeliveryWeightKg: (row.querySelector('.f-hk-weight') || {}).value || '0',
-          hongKongDelivery: row.getAttribute('data-hk-delivery') || '0',
-          deliveryCostReserve: row.getAttribute('data-hk-delivery') || '0',
+          hongKongDelivery: (row.querySelector('.f-hk-delivery') || {}).value || '0',
+          deliveryCostReserve: (row.querySelector('.f-hk-delivery') || {}).value || '0',
           profit: (row.querySelector('.f-profit') || {}).value || '0',
           estimatedPackageUnits: String(getEstimatedPackageUnits(row) || 0),
-          localDeliveryOverride: 'false',
-          localDeliveryNotes: '香港運費按全單預計重量計算；首 5kg $100，續重每 kg $10，沒有額外加價',
+          localDeliveryOverride: 'true',
+          localDeliveryNotes: '香港運費由報價時人手輸入估算總數；客人版只顯示預計範圍',
           amount: (row.querySelector('.f-amt') || {}).value || '0'
         });
       });
@@ -2412,7 +2375,6 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       description: String(item.description || ''),
       qty: parseInt(String(item.qty)) || 1,
       freight: parseFloat(String(item.freight)) || 0,
-      estimatedHkDeliveryWeightKg: parseFloat(String(item.estimatedHkDeliveryWeightKg)) || 0,
       hongKongDelivery: parseFloat(String(item.hongKongDelivery ?? item.deliveryCostReserve ?? item.localDelivery)) || 0,
       deliveryCostReserve: parseFloat(String(item.deliveryCostReserve ?? item.hongKongDelivery ?? item.localDelivery)) || 0,
       profit: parseFloat(String(item.profit)) || 0,
@@ -2420,22 +2382,6 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       localDeliveryOverride: String(item.localDeliveryOverride) === 'true' || item.localDeliveryOverride === true,
       localDeliveryNotes: String(item.localDeliveryNotes || ''),
       amount: parseFloat(String(item.amount)) || 0,
-    }));
-
-    // Local delivery is calculated once for the whole quotation from the sum of
-    // each Item's entered total weight. Store the fee on the first Item only so
-    // linked Airtable rollups do not double-count multi-item orders.
-    const totalEstimatedHkDeliveryWeightKg = items.reduce(
-      (sum: number, item: any) => sum + (Number(item.estimatedHkDeliveryWeightKg) || 0),
-      0
-    );
-    const calculatedLocalDeliveryFee = calculateLocalDeliveryFee(totalEstimatedHkDeliveryWeightKg);
-    items = items.map((item: any, index: number) => ({
-      ...item,
-      hongKongDelivery: index === 0 ? calculatedLocalDeliveryFee : 0,
-      deliveryCostReserve: index === 0 ? calculatedLocalDeliveryFee : 0,
-      localDeliveryOverride: false,
-      localDeliveryNotes: '香港運費按全單預計重量計算；首 5kg $100，續重每 kg $10，沒有額外加價',
     }));
 
     const itemsJson = JSON.stringify(items);
@@ -2451,7 +2397,6 @@ app.post('/quote/create', async (req: Request, res: Response) => {
           item.levelHeights ? `層高 ${item.levelHeights}` : '',
           item.accessories ? `配件 ${Array.isArray(item.accessories) ? item.accessories.join(', ') : item.accessories}` : '',
           item.qty ? `QTY ${item.qty}` : '',
-          item.estimatedHkDeliveryWeightKg ? `預計香港送貨重量 ${item.estimatedHkDeliveryWeightKg}kg` : '',
           item.freight ? `內地運費 $${item.freight}` : '',
           item.hongKongDelivery ? `香港運費 $${item.hongKongDelivery}` : '',
           item.profit ? `利潤 $${item.profit}` : '',
@@ -3247,7 +3192,6 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
           'Product Amount': item.amount || 0,
           'Quoted China Freight HKD': Number(item.freight) || 0,
           'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
-          'Estimated HK Delivery Weight KG': Number(item.estimatedHkDeliveryWeightKg) || 0,
           'Quoted Profit HKD': Number(item.profit) || 0,
           'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
           'Local Delivery Override': Boolean(item.localDeliveryOverride),

@@ -9,10 +9,9 @@
 - Automatic `Monthly Finance` refresh on startup and every six hours.
 - Pending/refunded/cancelled marketing payments are excluded from finance totals.
 - Finance month and owner display use `Internal 1 Order No` (for example JUL2601), with the legacy ORD number only as fallback.
-- Create Quote now requires each Item's total estimated Hong Kong delivery weight.
-- The whole quotation's local delivery fee is calculated once: first 5 kg HK$100, then HK$10 per additional kg, with no LKS markup.
-- Multi-item quotations store the calculated fee on the first Item only to prevent Airtable rollups from double-counting; every Item keeps its own estimated weight.
-- The customer Quote states that the weight-based local delivery fee is included in the quotation.
+- Create Quote accepts one manually estimated Hong Kong local delivery total for each Item; weight is not required at quotation stage.
+- The entered delivery estimate remains included in the quotation calculation, but the customer Quote only shows the existing approximate fee range and never exposes the exact internal amount.
+- Actual Item weights and the driver fee rule are handled later in Delivery System, after the goods are ready.
 
 ## Required Railway variables
 
@@ -36,5 +35,5 @@ Open `https://<quote-system-domain>/admin/costs` and sign in using the Railway `
 2. Enter one or more missing supplier, China freight, or reissue costs and save.
 3. Confirm completed cost fields switch from inputs to values; the order disappears only when all required finance data is complete.
 4. Confirm the actual-cost fields, `Actual Profit HKD`, and matching `Monthly Finance` record update in Airtable.
-5. Create a test Quote with Item weights of 4 kg and 2.5 kg; confirm the total weight is 6.5 kg and the included local delivery fee is HK$115.
-6. Convert the test Quote and confirm each Order Item has its own `Estimated HK Delivery Weight KG`, while `Quoted Local Delivery HKD` is recorded once only.
+5. Create a test Quote with one manual local delivery estimate and confirm it is included in the total.
+6. Confirm the customer Quote shows only the approximate range, for example `預計運費約 HK$300–$400`, and does not show the exact internal amount.
