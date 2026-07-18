@@ -3756,7 +3756,21 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
   try {
     const selectedMonth = String(req.query.month || getHongKongMonth());
     monthBounds(selectedMonth);
-    const orders = await tableOrders.select().all();
+    const [orders, orderItems] = await Promise.all([
+      tableOrders.select().all(),
+      tableOrderItems.select().all(),
+    ]);
+    const orderItemsByOrderId = new Map<string, Array<(typeof orderItems)[number]>>();
+    for (const itemRecord of orderItems) {
+      const linkedOrders = Array.isArray(itemRecord.fields['Order'])
+        ? itemRecord.fields['Order'] as string[]
+        : [];
+      for (const orderId of linkedOrders) {
+        const linkedItems = orderItemsByOrderId.get(orderId) || [];
+        linkedItems.push(itemRecord);
+        orderItemsByOrderId.set(orderId, linkedItems);
+      }
+    }
     const pending = orders
       .filter(record => {
         const fields = record.fields;
@@ -3779,12 +3793,30 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
       const reissueCost = numberField(fields, 'Actual Reissue Cost HKD');
       const deliveryCost = numberField(fields, 'Actual Local Delivery Cost HKD');
       const hasDelivery = Array.isArray(fields['Deliveries']) && fields['Deliveries'].length > 0;
+      const linkedItems = (orderItemsByOrderId.get(record.id) || [])
+        .sort((a, b) => String(a.fields['Item No'] || a.id).localeCompare(String(b.fields['Item No'] || b.id)));
+      const supplierInput = supplierCost > 0
+        ? `<strong>HK$${supplierCost.toFixed(2)}</strong>`
+        : linkedItems.length > 0
+          ? `<div class="owner-item-costs">${linkedItems.map(itemRecord => {
+              const itemFields = itemRecord.fields;
+              const itemNo = String(itemFields['Item No'] || itemRecord.id);
+              const description = String(itemFields['Description'] || '').trim();
+              const qty = Math.max(1, Number(itemFields['QTY']) || 1);
+              const rawItemCost = itemFields['Supplier Cost HKD'];
+              const itemCost = typeof rawItemCost === 'number' && Number.isFinite(rawItemCost)
+                ? rawItemCost
+                : '';
+              return `<label class="owner-item-cost">
+                <span><strong>${escapeHtml(itemNo)}</strong>${qty > 1 ? ` × ${qty}` : ''}${description ? `<small>${escapeHtml(description)}</small>` : ''}</span>
+                <input name="supplier_item_${escapeHtml(itemRecord.id)}" type="number" min="0" step="0.01" inputmode="decimal" value="${itemCost}" placeholder="此 Item 小糖成本" aria-label="${escapeHtml(itemNo)} supplier cost">
+              </label>`;
+            }).join('')}</div>`
+          : `<input name="supplier_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="小糖成本" aria-label="${escapeHtml(orderNo)} supplier cost">`;
       return `<tr>
         <td><strong>${escapeHtml(orderNo)}</strong></td>
         <td><small>${escapeHtml(fields['Finance Data Status'] || '')}</small></td>
-        <td>${supplierCost > 0
-          ? `HK$${supplierCost.toFixed(2)}`
-          : `<input name="supplier_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="小糖成本" aria-label="${escapeHtml(orderNo)} supplier cost">`}</td>
+        <td>${supplierInput}</td>
         <td>${chinaFreight > 0
           ? `HK$${chinaFreight.toFixed(2)}`
           : `<input name="china_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="中國運費" aria-label="${escapeHtml(orderNo)} China freight">`}</td>
@@ -3795,7 +3827,7 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
 
     const content = `<div class="doc-card"><div class="doc-body">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;"><div class="section-title" style="margin:0;flex:1;">待補訂單成本</div><a class="btn btn-outline" href="/admin/dashboard?month=${encodeURIComponent(selectedMonth)}">老闆 Dashboard</a></div>
-      <p style="color:#64748b;margin-bottom:12px;">只顯示所選月份仍欠成本資料嘅訂單。中國運費如已經由 China Shipment 自動分配，毋須手動再填。</p>
+      <p style="color:#64748b;margin-bottom:12px;">只顯示所選月份仍欠成本資料嘅訂單。小糖成本按每個 Item 分開輸入，全部填妥後會自動加總返去 Order。中國運費如已經由 China Shipment 自動分配，毋須手動再填。</p>
       <form method="GET" action="/admin/costs" style="display:flex;gap:10px;align-items:end;margin-bottom:18px;">
         <label><span style="display:block;font-size:12px;color:#64748b;margin-bottom:5px;">月份</span><input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label>
         <button class="btn btn-outline" type="submit">查看</button>
@@ -3807,7 +3839,10 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
         <div style="margin-top:20px"><button class="btn btn-primary" type="submit">儲存並更新 Dashboard</button></div>
       </form>` : '<div class="alert alert-success">所選月份所有訂單成本已齊，暫時冇資料需要填。</div>'}
     </div></div>`;
-    res.send(renderPage('待補訂單成本', content));
+    const extraHead = `<style>
+      .owner-item-costs{display:grid;gap:9px;min-width:250px}.owner-item-cost{display:grid;grid-template-columns:minmax(110px,1fr) minmax(125px,150px);align-items:center;gap:9px;padding-bottom:8px;border-bottom:1px solid #eee}.owner-item-cost:last-child{padding-bottom:0;border-bottom:0}.owner-item-cost span{font-size:12px}.owner-item-cost small{display:block;margin-top:2px;color:#64748b;font-weight:400;max-width:220px;white-space:normal}.owner-item-cost input{width:100%}@media(max-width:600px){.owner-item-cost{grid-template-columns:1fr}.owner-item-cost small{max-width:none}}
+    </style>`;
+    res.send(renderPage('待補訂單成本', content, extraHead));
   } catch (error: any) {
     console.error('Unable to render supplier cost page:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
@@ -3819,13 +3854,24 @@ app.post('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
     if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
       return res.status(403).send('Invalid form token.');
     }
+    const selectedMonth = String(req.body.month || getHongKongMonth());
     const updatesById = new Map<string, FieldSet>();
+    const itemUpdatesById = new Map<string, FieldSet>();
     const writablePrefixes: Record<string, string> = {
       supplier_: 'Actual Supplier Cost HKD',
       china_: 'Actual China Freight HKD',
       reissue_: 'Actual Reissue Cost HKD',
     };
     for (const [key, rawValue] of Object.entries(req.body || {})) {
+      if (key.startsWith('supplier_item_')) {
+        const id = key.slice('supplier_item_'.length);
+        const raw = String(rawValue ?? '').trim();
+        if (!id || !raw) continue;
+        const value = Number(raw);
+        if (!Number.isFinite(value) || value < 0) continue;
+        itemUpdatesById.set(id, { 'Supplier Cost HKD': value });
+        continue;
+      }
       const prefix = Object.keys(writablePrefixes).find(candidate => key.startsWith(candidate));
       if (!prefix) continue;
       const id = key.slice(prefix.length);
@@ -3837,17 +3883,74 @@ app.post('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
       fields[writablePrefixes[prefix]] = value;
       updatesById.set(id, fields);
     }
+    const affectedOrderIds = new Set<string>();
+    const itemUpdates = Array.from(itemUpdatesById, ([id, fields]) => ({ id, fields }));
+    const existingOrderItems = itemUpdates.length > 0
+      ? await tableOrderItems.select().all()
+      : [];
+    for (const itemUpdate of itemUpdates) {
+      const existingItem = existingOrderItems.find(itemRecord => itemRecord.id === itemUpdate.id);
+      const linkedOrders = existingItem && Array.isArray(existingItem.fields['Order'])
+        ? existingItem.fields['Order'] as string[]
+        : [];
+      for (const orderId of linkedOrders) affectedOrderIds.add(orderId);
+    }
+    for (let index = 0; index < itemUpdates.length; index += 10) {
+      const updatedItems = await tableOrderItems.update(itemUpdates.slice(index, index + 10));
+      for (const itemRecord of updatedItems) {
+        const linkedOrders = Array.isArray(itemRecord.fields['Order'])
+          ? itemRecord.fields['Order'] as string[]
+          : [];
+        for (const orderId of linkedOrders) affectedOrderIds.add(orderId);
+      }
+    }
+
+    // Only write the Order-level total when every linked Item has a supplier
+    // cost. This keeps Finance Data Status pending if the owner fills one Item
+    // now and returns to complete the remaining Item later.
+    if (affectedOrderIds.size > 0) {
+      const allOrderItems = await tableOrderItems.select().all();
+      for (const orderId of affectedOrderIds) {
+        const linkedItems = allOrderItems.filter(itemRecord => {
+          const linkedOrders = Array.isArray(itemRecord.fields['Order'])
+            ? itemRecord.fields['Order'] as string[]
+            : [];
+          return linkedOrders.includes(orderId);
+        });
+        const allItemCostsEntered = linkedItems.length > 0 && linkedItems.every(itemRecord => {
+          const submittedFields = itemUpdatesById.get(itemRecord.id);
+          const value = submittedFields?.['Supplier Cost HKD'] ?? itemRecord.fields['Supplier Cost HKD'];
+          return typeof value === 'number' && Number.isFinite(value) && value >= 0;
+        });
+        if (!allItemCostsEntered) continue;
+        const supplierTotal = linkedItems.reduce((sum, itemRecord) => {
+          const submittedFields = itemUpdatesById.get(itemRecord.id);
+          const itemCost = Number(submittedFields?.['Supplier Cost HKD'] ?? itemRecord.fields['Supplier Cost HKD']) || 0;
+          // Supplier Cost HKD is already the actual total charged by 小糖 for
+          // this whole Order Item, so QTY must not multiply it a second time.
+          return sum + itemCost;
+        }, 0);
+        const fields = updatesById.get(orderId) || {};
+        fields['Actual Supplier Cost HKD'] = supplierTotal;
+        updatesById.set(orderId, fields);
+      }
+    }
+
     const updates = Array.from(updatesById, ([id, fields]) => ({ id, fields }));
-    if (!updates.length) return res.redirect('/admin/costs');
-    await tableOrders.update(updates);
+    if (!updates.length && !itemUpdates.length) {
+      return res.redirect(`/admin/costs?month=${encodeURIComponent(selectedMonth)}`);
+    }
+    for (let index = 0; index < updates.length; index += 10) {
+      await tableOrders.update(updates.slice(index, index + 10));
+    }
     const months = new Set<string>();
-    for (const update of updates) {
-      const record = await tableOrders.find(update.id);
+    const financeOrderIds = new Set([...updates.map(update => update.id), ...affectedOrderIds]);
+    for (const orderId of financeOrderIds) {
+      const record = await tableOrders.find(orderId);
       const month = getOrderFinanceMonth(record.fields['Internal 1 Order No'] || record.fields['Internal Order No']);
       if (month) months.add(month);
     }
     for (const month of months) await syncMonthlyFinance(month);
-    const selectedMonth = String(req.body.month || getHongKongMonth());
     res.redirect(`/admin/costs?month=${encodeURIComponent(selectedMonth)}&saved=1`);
   } catch (error: any) {
     console.error('Unable to save supplier costs:', error);
