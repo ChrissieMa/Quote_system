@@ -420,6 +420,106 @@ const getLinkedRecordId = (value: unknown): string | null => {
   return null;
 };
 
+const getAirtableRecordId = (value: unknown): string | null => {
+  if (typeof value === 'string' && value.trim()) return value.trim();
+  return getLinkedRecordId(value);
+};
+
+const getConvertedOrderForQuote = async (quoteFields: FieldSet): Promise<any | null> => {
+  const linkedOrderId = getAirtableRecordId(quoteFields['Order Ref']);
+  if (linkedOrderId) {
+    try {
+      return await tableOrders.find(linkedOrderId);
+    } catch (error) {
+      console.warn(`Unable to find converted Order ${linkedOrderId}; trying Source Quote Ref fallback.`, error);
+    }
+  }
+
+  const quoteNumber = String(quoteFields['Quote Number'] || '').trim();
+  if (!quoteNumber) return null;
+  const safeQuoteNumber = quoteNumber.replace(/'/g, "\\'");
+  try {
+    const matchingOrders = await tableOrders.select({
+      filterByFormula: `{Source Quote Ref} = '${safeQuoteNumber}'`,
+      maxRecords: 1,
+    }).firstPage();
+    return matchingOrders[0] || null;
+  } catch (error) {
+    console.warn(`Unable to find converted Order for Quote ${quoteNumber}.`, error);
+    return null;
+  }
+};
+
+const getTextOrFallback = (fields: FieldSet, fieldName: string, fallback: unknown): string => {
+  const value = fields[fieldName];
+  return value !== undefined && value !== null && String(value).trim() !== ''
+    ? String(value)
+    : String(fallback ?? '');
+};
+
+const getOrderItemAccessories = (value: unknown, fallback: unknown): string[] => {
+  if (!Array.isArray(value) || value.length === 0) {
+    return Array.isArray(fallback) ? fallback.map(item => String(item)) : [];
+  }
+  return value.map(item => {
+    if (typeof item === 'string') return item;
+    if (item && typeof (item as any).name === 'string') return (item as any).name;
+    return String(item ?? '');
+  }).filter(Boolean);
+};
+
+const overlayConfirmedOrderItem = (baseItem: any, itemRecord: any): any => {
+  const base = baseItem && typeof baseItem === 'object' ? baseItem : {};
+  const fields = itemRecord.fields as FieldSet;
+  const airtableDescription = String(fields['Description'] || '').trim();
+  const originalCompositeDescription = [base.itemType, base.forWhat, base.description]
+    .map(value => String(value || '').trim())
+    .filter(Boolean)
+    .join(' / ');
+  const description = airtableDescription && airtableDescription !== originalCompositeDescription
+    ? airtableDescription
+    : String(base.description || '');
+  const rawQty = fields['QTY'];
+  const qty = rawQty !== undefined && rawQty !== null && String(rawQty).trim() !== ''
+    ? Math.max(1, Number(rawQty) || 1)
+    : (base.qty || 1);
+
+  return {
+    ...base,
+    itemType: getTextOrFallback(fields, 'Item Type', base.itemType),
+    forWhat: getTextOrFallback(fields, 'For What', base.forWhat),
+    interL: getTextOrFallback(fields, 'Inter L', base.interL),
+    interD: getTextOrFallback(fields, 'Inter D', base.interD),
+    interH: getTextOrFallback(fields, 'Inter H', base.interH),
+    outerL: getTextOrFallback(fields, 'Outer L', base.outerL),
+    outerD: getTextOrFallback(fields, 'Outer D', base.outerD),
+    outerH: getTextOrFallback(fields, 'Outer H', base.outerH),
+    noOfLevels: fields['No. of Levels'] ?? base.noOfLevels ?? null,
+    levelHeights: getTextOrFallback(fields, 'Level Heights', base.levelHeights),
+    accessories: getOrderItemAccessories(fields['Accessories'], base.accessories),
+    description,
+    qty,
+    // Existing confirmed Item prices stay untouched. Product Amount is only
+    // used as a fallback for an Order Item that was added directly in Airtable.
+    amount: base.amount ?? Number(fields['Product Amount'] || 0),
+  };
+};
+
+const getConfirmedOrderItems = async (orderRecordId: string, baseItems: any[]): Promise<any[]> => {
+  const records = await tableOrderItems.select().all();
+  const linkedItems = records
+    .filter(record => {
+      const linkedOrders = Array.isArray(record.fields['Order'])
+        ? record.fields['Order'] as string[]
+        : [];
+      return linkedOrders.includes(orderRecordId);
+    })
+    .sort((a, b) => String(a.fields['Item No'] || a.id).localeCompare(String(b.fields['Item No'] || b.id)));
+
+  if (linkedItems.length === 0) return baseItems;
+  return linkedItems.map((itemRecord, index) => overlayConfirmedOrderItem(baseItems[index] || {}, itemRecord));
+};
+
 const getCustomerText = (fields: FieldSet, fieldName: string): string =>
   String(fields[fieldName] ?? '').trim();
 
@@ -2642,6 +2742,8 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
 
     const quote = records[0].fields;
+    const convertedOrder = await getConvertedOrderForQuote(quote);
+    const financialFields = convertedOrder?.fields || quote;
     const status = (quote['Status'] as string) || 'Draft';
     const quoteLanguage = ((quote['Quote Language'] as string) || '中文') === 'English' ? 'English' : '中文';
     const isEnglish = quoteLanguage === 'English';
@@ -2687,11 +2789,11 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
       return map[reason] || reason || 'Offer discount';
     };
     const buildShareDiscountText = (): string => {
-      if (!isEnglish) return (quote['Discount Display Text'] as string) || '';
-      const reason = mapDiscountReasonEn(String(quote['Discount Reason'] || ''));
-      const type = String(quote['Discount Type'] || '');
-      const amount = Number(quote['Discount Amount HKD'] || 0);
-      const multiplier = Number(quote['Discount Multiplier'] || 0);
+      if (!isEnglish) return (financialFields['Discount Display Text'] as string) || '';
+      const reason = mapDiscountReasonEn(String(financialFields['Discount Reason'] || ''));
+      const type = String(financialFields['Discount Type'] || '');
+      const amount = Number(financialFields['Discount Amount HKD'] || 0);
+      const multiplier = Number(financialFields['Discount Multiplier'] || 0);
       if (type === '指定金額扣減' && amount > 0) return `${reason}: HKD $${Math.ceil(amount)} off`;
       if (type === '百分比折扣' && multiplier > 0) return `${reason}: ${Math.round((1 - multiplier) * 100)}% off`;
       return 'Offer discount';
@@ -2699,14 +2801,20 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     // Parse items
     let items: any[] = [];
     items = parseQuoteItems(quote['Quote Items JSON']);
+    if (convertedOrder) {
+      items = await getConfirmedOrderItems(convertedOrder.id, items);
+    }
 
     const buildShareDeliveryText = (): string =>
-      buildDeliveryWaiverText(quote, isEnglish, sumQuoteLocalDelivery(items), quote['Valid Until']);
+      buildDeliveryWaiverText(financialFields, isEnglish, sumQuoteLocalDelivery(items), quote['Valid Until']);
 
-    const subtotal = (quote['Sub Total'] as number) || 0;
-    const discountRate = (quote['Discount'] as number) ?? 1;
-    const total = (quote['Total'] as number) || 0;
-    const discountAmount = Number(quote['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
+    const subtotal = Number(convertedOrder
+      ? (financialFields['Product Amount'] ?? quote['Sub Total'])
+      : financialFields['Sub Total']) || 0;
+    const total = Number(convertedOrder
+      ? (financialFields['Final Amount'] ?? quote['Total'])
+      : financialFields['Total']) || 0;
+    const discountAmount = Number(financialFields['Discount Value HKD'] || 0) || Math.max(0, subtotal - total);
     const discountDisplayText = discountAmount > 0 ? buildShareDiscountText() : '';
     const deliveryDisplayText = buildShareDeliveryText();
 
@@ -3343,6 +3451,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
         items = parseQuoteItems(sourceQuoteFields['Quote Items JSON']);
       }
     }
+    items = await getConfirmedOrderItems(order.id, items);
 
     const itemRows = items.length === 0
       ? `<tr><td colspan="15" style="text-align:center;color:#9ca3af;">${I.noItems}</td></tr>`
