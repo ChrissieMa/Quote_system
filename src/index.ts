@@ -1296,6 +1296,147 @@ const statusBadgeClass = (status: string): string => {
   return map[status] || 'badge-draft';
 };
 
+type PhoneMatch = {
+  type: 'Inquiry' | 'Quote' | 'Order' | 'Customer';
+  id: string;
+  title: string;
+  detail: string;
+  url?: string;
+};
+
+const phoneValueMatches = (value: unknown, normalizedPhone: string): boolean => {
+  if (Array.isArray(value)) return value.some(item => normalizePhone(item) === normalizedPhone);
+  return normalizePhone(value) === normalizedPhone;
+};
+
+const findPhoneMatches = async (phone: unknown): Promise<PhoneMatch[]> => {
+  const normalizedPhone = normalizePhone(phone);
+  if (!normalizedPhone) return [];
+
+  const [inquiries, quotes, orders, customers] = await Promise.all([
+    tableInquiries.select({ fields: ['Inquiry No', 'Inquiry Date', 'Customer Name', 'Phone', 'Channel', 'Inquiry Status'] }).all(),
+    tableQuotes.select({ fields: ['Quote Number', 'Quote Date', 'Status', 'Phone', 'Customer Phone', 'Public Token'] }).all(),
+    tableOrders.select({ fields: ['Internal 1 Order No', 'Invoice Number', 'Invoice Date', 'Status', 'Phone (from Customer)', 'Invoice Public Token'] }).all(),
+    tableCustomers.select({ fields: ['Customer ID', 'Customer Name', 'Phone'] }).all(),
+  ]);
+
+  const matches: PhoneMatch[] = [];
+  inquiries.forEach(record => {
+    const fields = record.fields;
+    if (!phoneValueMatches(fields['Phone'], normalizedPhone)) return;
+    matches.push({
+      type: 'Inquiry',
+      id: record.id,
+      title: String(fields['Inquiry No'] || 'Existing Inquiry'),
+      detail: [fields['Inquiry Date'], fields['Customer Name'], fields['Channel'], fields['Inquiry Status']].filter(Boolean).map(String).join(' · '),
+    });
+  });
+  quotes.forEach(record => {
+    const fields = record.fields;
+    if (!phoneValueMatches(fields['Phone'], normalizedPhone) && !phoneValueMatches(fields['Customer Phone'], normalizedPhone)) return;
+    const token = String(fields['Public Token'] || '').trim();
+    matches.push({
+      type: 'Quote',
+      id: record.id,
+      title: String(fields['Quote Number'] || 'Existing Quote'),
+      detail: [fields['Quote Date'], fields['Status']].filter(Boolean).map(String).join(' · '),
+      ...(token ? { url: `/quote/${encodeURIComponent(token)}` } : {}),
+    });
+  });
+  orders.forEach(record => {
+    const fields = record.fields;
+    if (!phoneValueMatches(fields['Phone (from Customer)'], normalizedPhone)) return;
+    const token = String(fields['Invoice Public Token'] || '').trim();
+    matches.push({
+      type: 'Order',
+      id: record.id,
+      title: String(fields['Internal 1 Order No'] || fields['Invoice Number'] || 'Existing Order'),
+      detail: [fields['Invoice Number'], fields['Invoice Date'], fields['Status']].filter(Boolean).map(String).join(' · '),
+      ...(token ? { url: `/invoice/${encodeURIComponent(token)}` } : {}),
+    });
+  });
+  customers.forEach(record => {
+    const fields = record.fields;
+    if (!phoneValueMatches(fields['Phone'], normalizedPhone)) return;
+    matches.push({
+      type: 'Customer',
+      id: record.id,
+      title: String(fields['Customer ID'] || 'Existing Customer'),
+      detail: String(fields['Customer Name'] || ''),
+    });
+  });
+  return matches;
+};
+
+const getMonthlyPerformanceRecordId = async (month: string): Promise<string | null> => {
+  const records = await tableMonthlyPerformance.select({ fields: ['Month'] }).all();
+  const record = records.find(item => String(item.fields['Month'] || '').trim() === month);
+  return record?.id || null;
+};
+
+const getTableSelectOptions = async (tableName: string, fieldName: string, fallback: string[]): Promise<string[]> => {
+  try {
+    const tables = await getAirtableMetadataTables();
+    const table = tables.find(item => item.name === tableName);
+    const choices = table?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
+    return choices.length ? choices : fallback;
+  } catch (error) {
+    console.warn(`Unable to load ${tableName}.${fieldName} options:`, error);
+    return fallback;
+  }
+};
+
+const mapQuoteChannelToInquiryChannel = (channel: string): string =>
+  channel === 'KOL' ? 'KOL / ToyTV' : channel;
+
+const renderPhoneMatches = (matches: PhoneMatch[]): string => {
+  if (!matches.length) return '';
+  return `<div class="alert alert-danger"><strong>呢個電話已有記錄，系統未有重複新增。</strong><div style="margin-top:8px;display:grid;gap:7px;">${matches.map(match => {
+    const label = `<strong>${escapeHtml(match.type)}｜${escapeHtml(match.title)}</strong>${match.detail ? `<br><span>${escapeHtml(match.detail)}</span>` : ''}`;
+    return match.url ? `<a href="${escapeHtml(match.url)}" target="_blank" style="display:block;color:inherit;">${label}</a>` : `<div>${label}</div>`;
+  }).join('')}</div></div>`;
+};
+
+const renderQuickInquiryForm = (
+  values: Record<string, string> = {},
+  matches: PhoneMatch[] = [],
+  errorMessage = '',
+  channelOptions: string[] = [],
+  productOptions: string[] = [],
+): string => {
+  const optionTags = (options: string[], selected: string) => options.map(option =>
+    `<option value="${escapeHtml(option)}"${option === selected ? ' selected' : ''}>${escapeHtml(option)}</option>`
+  ).join('');
+  const displayedChannels = Array.from(new Set([...channelOptions, 'Threads Organic']));
+  const hasBlockingMatch = matches.some(match => match.type !== 'Customer');
+  return `
+    <div class="doc-card">
+      ${docHeader('快速新增查詢', 'Quick Inquiry')}
+      <div class="doc-body">
+        ${errorMessage ? `<div class="alert alert-danger">${escapeHtml(errorMessage)}</div>` : ''}
+        ${renderPhoneMatches(matches)}
+        <form method="POST" action="/inquiry/create">
+          <div class="form-group">
+            <label>客人電話 *</label>
+            <input type="tel" inputmode="tel" autocomplete="tel" name="phone" id="quickInquiryPhone" required value="${escapeHtml(values.phone || '')}" placeholder="貼上 WhatsApp 電話，例如 +852 6898 3722">
+            <div id="phoneCheckResult" style="margin-top:8px;font-size:13px;"></div>
+          </div>
+          <div class="form-row form-row-2">
+            <div class="form-group"><label>客人名（選填）</label><input name="customerName" value="${escapeHtml(values.customerName || '')}"></div>
+            <div class="form-group"><label>查詢來源 *</label><select name="channel" required><option value="">請選擇</option>${optionTags(displayedChannels, values.channel || '')}</select></div>
+          </div>
+          <div class="form-row form-row-2">
+            <div class="form-group"><label>想問產品（選填）</label><select name="productInterest"><option value="">未決定</option>${optionTags(productOptions, values.productInterest || '')}</select></div>
+            <div class="form-group"><label>Campaign / Source Detail（選填）</label><input name="campaignSourceDetail" value="${escapeHtml(values.campaignSourceDetail || '')}" placeholder="例如 MAY2604 客人片／某個廣告"></div>
+          </div>
+          <div class="form-group"><label>簡短備註（選填）</label><textarea name="notes" rows="3" placeholder="例如：問 Hot Toys 展示盒，未提供尺寸">${escapeHtml(values.notes || '')}</textarea></div>
+          ${hasBlockingMatch ? `<label style="display:flex;align-items:flex-start;gap:8px;margin:4px 0 16px;"><input type="checkbox" name="forceNew" value="1" style="margin-top:4px;"><span>今次係另一件新產品，確認仍然建立一筆新查詢</span></label>` : ''}
+          <div style="display:flex;gap:10px;flex-wrap:wrap;"><button class="btn btn-primary" type="submit">儲存查詢</button><a class="btn btn-outline" href="/quotes">返回 Quote System</a></div>
+        </form>
+      </div>
+    </div>`;
+};
+
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /api/customers/search  — Search existing customers for Create Quote
@@ -1308,6 +1449,135 @@ app.get('/api/customers/search', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error(error);
     res.status(500).json({ error: error.message || 'Customer search failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROUTE: Quick Inquiry — mobile-friendly capture before a Quote exists
+// ═══════════════════════════════════════════════════════════════════════════
+app.get('/api/inquiries/check-phone', async (req: Request, res: Response) => {
+  try {
+    const phone = String(req.query.phone || '').trim();
+    const normalized = normalizePhone(phone);
+    if (!normalized) return res.json({ normalized: '', matches: [], blocking: false });
+    const matches = await findPhoneMatches(phone);
+    return res.json({ normalized, matches, blocking: matches.some(match => match.type !== 'Customer') });
+  } catch (error: any) {
+    console.error('Inquiry phone check failed:', error);
+    return res.status(500).json({ error: error.message || 'Phone check failed' });
+  }
+});
+
+app.get('/inquiry/create', async (_req: Request, res: Response) => {
+  const [channels, products] = await Promise.all([
+    getTableSelectOptions('Inquiries', 'Channel', ['Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic', 'Carousell', 'KOL / ToyTV', 'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other']),
+    getTableSelectOptions('Inquiries', 'Product Interest', ['Display Box', 'Display Case', 'Ready Stock', 'Reissue', 'Other']),
+  ]);
+  const extraHead = `<script>
+    document.addEventListener('DOMContentLoaded', function() {
+      var input = document.getElementById('quickInquiryPhone');
+      var result = document.getElementById('phoneCheckResult');
+      var timer;
+      if (!input || !result) return;
+      function checkPhone() {
+        var phone = input.value.trim();
+        if (phone.replace(/\\D/g, '').length < 7) { result.innerHTML = ''; return; }
+        fetch('/api/inquiries/check-phone?phone=' + encodeURIComponent(phone))
+          .then(function(response) { return response.json(); })
+          .then(function(data) {
+            result.innerHTML = '';
+            if (!data.matches || !data.matches.length) {
+              result.style.color = '#065f46';
+              result.textContent = '✓ 未發現相同電話記錄';
+              return;
+            }
+            result.style.color = data.blocking ? '#991b1b' : '#1e40af';
+            var heading = document.createElement('strong');
+            heading.textContent = data.blocking ? '⚠ 已有查詢／報價／訂單：' : 'ℹ 已有 Customer：';
+            result.appendChild(heading);
+            data.matches.forEach(function(match) {
+              var line = document.createElement('div');
+              line.textContent = match.type + '｜' + match.title + (match.detail ? '｜' + match.detail : '');
+              result.appendChild(line);
+            });
+          })
+          .catch(function() { result.textContent = '暫時未能檢查，儲存時會再核對。'; });
+      }
+      input.addEventListener('input', function() { clearTimeout(timer); timer = setTimeout(checkPhone, 450); });
+      input.addEventListener('blur', checkPhone);
+    });
+  </script>`;
+  res.send(renderPage('Quick Inquiry', renderQuickInquiryForm({}, [], '', channels, products), extraHead));
+});
+
+app.post('/inquiry/create', async (req: Request, res: Response) => {
+  const values: Record<string, string> = {
+    phone: String(req.body.phone || '').trim(),
+    customerName: String(req.body.customerName || '').trim(),
+    channel: String(req.body.channel || '').trim(),
+    productInterest: String(req.body.productInterest || '').trim(),
+    campaignSourceDetail: String(req.body.campaignSourceDetail || '').trim(),
+    notes: String(req.body.notes || '').trim(),
+  };
+  const [channels, products] = await Promise.all([
+    getTableSelectOptions('Inquiries', 'Channel', ['Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic', 'Carousell', 'KOL / ToyTV', 'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other']),
+    getTableSelectOptions('Inquiries', 'Product Interest', ['Display Box', 'Display Case', 'Ready Stock', 'Reissue', 'Other']),
+  ]);
+
+  try {
+    const normalizedPhone = normalizePhone(values.phone);
+    if (normalizedPhone.length < 7 || normalizedPhone.length > 15) {
+      return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請輸入正確電話號碼。', channels, products)));
+    }
+    if (!values.channel) {
+      return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請選擇查詢來源。', channels, products)));
+    }
+
+    const matches = await findPhoneMatches(values.phone);
+    const blockingMatches = matches.filter(match => match.type !== 'Customer');
+    if (blockingMatches.length > 0 && String(req.body.forceNew || '') !== '1') {
+      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, matches, '', channels, products)));
+    }
+
+    const existingCustomer = await findCustomerByPhone(values.phone);
+    const monthRecordId = await getMonthlyPerformanceRecordId(getHongKongMonth());
+    const isThreads = values.channel === 'Threads Organic';
+    const airtableChannel = isThreads ? 'Other' : values.channel;
+    const campaignDetail = values.campaignSourceDetail || (isThreads ? 'Threads Organic' : '');
+    const notes = [isThreads ? 'Source: Threads Organic' : '', values.notes].filter(Boolean).join('\n');
+    const fields: FieldSet = {
+      'Inquiry Date': getHongKongDate(),
+      ...(values.customerName ? { 'Customer Name': values.customerName } : {}),
+      'Phone': normalizedPhone,
+      'Channel': airtableChannel,
+      ...(campaignDetail ? { 'Campaign / Source Detail': campaignDetail } : {}),
+      ...(values.productInterest ? { 'Product Interest': values.productInterest } : {}),
+      'Inquiry Status': 'New',
+      ...(notes ? { 'Notes': notes } : {}),
+      ...(monthRecordId ? { 'Monthly Performance': [monthRecordId] } : {}),
+      ...(existingCustomer ? { 'Customer': [existingCustomer.id] } : {}),
+    };
+    const created = await tableInquiries.create([{ fields }]);
+    const inquiryId = created[0].id;
+    let inquiryNo = '';
+    try {
+      const refreshed = await tableInquiries.find(inquiryId);
+      inquiryNo = String(refreshed.fields['Inquiry No'] || '');
+    } catch { /* The record is already saved; formula refresh is optional. */ }
+
+    const customerMessage = existingCustomer
+      ? `<div class="alert alert-info">已認出舊客並連接 Customer：${escapeHtml(String(existingCustomer.fields['Customer ID'] || existingCustomer.fields['Customer Name'] || existingCustomer.id))}</div>`
+      : '';
+    return res.send(renderPage('Inquiry Saved', `
+      <div class="doc-card">${docHeader('查詢已儲存', 'Inquiry Saved')}<div class="doc-body">
+        <div class="alert alert-success">${escapeHtml(inquiryNo || '新查詢')} 已成功儲存，狀態為 New／未報價。</div>
+        ${customerMessage}
+        <div class="info-grid info-grid-2"><div class="info-block"><div class="lbl">Phone</div><div class="val">${escapeHtml(normalizedPhone)}</div></div><div class="info-block"><div class="lbl">Source</div><div class="val">${escapeHtml(values.channel)}</div></div></div>
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:20px;"><a class="btn btn-primary" href="/quote/create?inquiry=${encodeURIComponent(inquiryId)}">用此查詢建立 Quote</a><a class="btn btn-outline" href="/inquiry/create">再新增查詢</a><a class="btn btn-secondary" href="/quotes">返回 Dashboard</a></div>
+      </div></div>`));
+  } catch (error: any) {
+    console.error('Quick Inquiry create failed:', error);
+    return res.status(500).send(renderPage('Quick Inquiry Error', renderQuickInquiryForm(values, [], `儲存失敗：${error.message || 'Unknown error'}`, channels, products)));
   }
 });
 
@@ -1458,6 +1728,7 @@ app.get('/quotes', async (req: Request, res: Response) => {
         <h2 style="font-size:22px;font-weight:700;">Quote Dashboard</h2>
         <div style="display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end;">
           <a href="/admin/dashboard" class="btn btn-outline">老闆 Dashboard</a>
+          <a href="/inquiry/create" class="btn btn-outline">+ 新增查詢</a>
           <a href="/quote/create" class="btn btn-primary">+ New Quote</a>
         </div>
       </div>
@@ -1498,10 +1769,11 @@ app.get('/quotes', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quote/create
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/quote/create', async (_req: Request, res: Response) => {
+app.get('/quote/create', async (req: Request, res: Response) => {
   let inquiryOptions = '<option value="">不連結查詢</option>';
   let performanceMonthOptions = '<option value="">不連結月份</option>';
   let campaignOptions = '<option value="">請選擇 Campaign / Ads</option>';
+  const selectedInquiryRecordId = String(req.query.inquiry || '').trim();
 
   const [promotionTypeOptions, discountReasonOptions, deliveryOfferReasonOptions] = await Promise.all([
     getSharedSelectOptions('Promotion / Offer Type', ['首次落單優惠', 'ToyTV 專屬優惠', '現貨優惠']),
@@ -1518,7 +1790,8 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       const f = record.fields;
       const label = String(f['Inquiry Ref'] || f['Inquiry No'] || f['Customer Name'] || f['Phone'] || record.id);
       const channel = f['Channel'] ? ` · ${String(f['Channel'])}` : '';
-      return `<option value="${record.id}">${escapeHtml(label + channel)}</option>`;
+      const linkedMonthId = getLinkedRecordId(f['Monthly Performance']) || '';
+      return `<option value="${record.id}"${record.id === selectedInquiryRecordId ? ' selected' : ''} data-name="${escapeHtml(String(f['Customer Name'] || ''))}" data-phone="${escapeHtml(String(f['Phone'] || ''))}" data-channel="${escapeHtml(String(f['Channel'] || ''))}" data-campaign="${escapeHtml(String(f['Campaign / Source Detail'] || ''))}" data-month="${escapeHtml(linkedMonthId)}">${escapeHtml(label + channel)}</option>`;
     }).join('');
   } catch (error) {
     console.warn('Unable to load Inquiries for Create Quote:', error);
@@ -1608,7 +1881,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
             <div class="form-row form-row-2">
               <div class="form-group">
                 <label>Inquiry</label>
-                <select name="inquiryRecordId" id="inquiryRecordId">
+                <select name="inquiryRecordId" id="inquiryRecordId" onchange="handleInquiryChange()">
                   ${inquiryOptions}
                 </select>
               </div>
@@ -2181,6 +2454,36 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       return selectValue;
     }
 
+    function handleInquiryChange() {
+      var select = document.getElementById('inquiryRecordId');
+      if (!select) return;
+      var option = select.options[select.selectedIndex];
+      if (!option || !select.value) return;
+      var form = document.getElementById('quoteForm');
+      var name = String(option.getAttribute('data-name') || '');
+      var phone = String(option.getAttribute('data-phone') || '');
+      var channel = String(option.getAttribute('data-channel') || '');
+      var campaign = String(option.getAttribute('data-campaign') || '');
+      var month = String(option.getAttribute('data-month') || '');
+      if (form && name) form.querySelector('[name=contactName]').value = name;
+      if (form && phone) form.querySelector('[name=phone]').value = phone;
+      if (channel === 'KOL / ToyTV') channel = 'KOL';
+      if (channel) setElValue('quoteSourceChannel', channel);
+      if (month) setElValue('performanceMonthRecordId', month);
+      if (campaign) {
+        var campaignSelect = document.getElementById('campaignSourceDetail');
+        var manual = document.getElementById('campaignSourceDetailManual');
+        var found = false;
+        if (campaignSelect) {
+          Array.from(campaignSelect.options).forEach(function(item) {
+            if (item.value === campaign) { campaignSelect.value = campaign; found = true; }
+          });
+          if (!found) campaignSelect.value = '__manual__';
+        }
+        if (manual) { manual.value = found ? '' : campaign; manual.style.display = found ? 'none' : 'block'; }
+      }
+    }
+
     function setText(id, value) {
       var el = document.getElementById(id);
       if (el) el.textContent = value;
@@ -2479,6 +2782,7 @@ app.get('/quote/create', async (_req: Request, res: Response) => {
       });
       toggleDiscountInputs();
       toggleDeliveryInputs();
+      handleInquiryChange();
       recalcSubtotal();
     });
   </script>`;
@@ -2668,9 +2972,10 @@ app.post('/quote/create', async (req: Request, res: Response) => {
         const inquiryUpdateFields: FieldSet = {
           'Inquiry Status': 'Quoted',
           'Quote': [createdQuoteRecordId],
-          ...(performanceMonthRecordId ? { 'Performance Month': [performanceMonthRecordId] } : {}),
-          ...(quoteSourceChannel ? { 'Channel': quoteSourceChannel } : {}),
+          ...(performanceMonthRecordId ? { 'Monthly Performance': [performanceMonthRecordId] } : {}),
+          ...(quoteSourceChannel ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) } : {}),
           ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
+          ...(selectedCustomerId ? { 'Customer': [selectedCustomerId] } : {}),
         };
         await tableInquiries.update([{ id: inquiryRecordId, fields: inquiryUpdateFields }]);
       } else if (quoteSourceChannel || performanceMonthRecordId || campaignSourceDetail) {
@@ -2679,12 +2984,13 @@ app.post('/quote/create', async (req: Request, res: Response) => {
           'Inquiry Date': quoteDate,
           'Customer Name': quoteCustomerName || String(b.contactName || '').trim(),
           'Phone': quoteCustomerPhone || String(b.phone || '').trim(),
-          ...(quoteSourceChannel ? { 'Channel': quoteSourceChannel } : {}),
+          ...(quoteSourceChannel ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) } : {}),
           ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
           ...(firstItem.itemType ? { 'Product Interest': firstItem.itemType } : {}),
           'Inquiry Status': 'Quoted',
           'Quote': [createdQuoteRecordId],
-          ...(performanceMonthRecordId ? { 'Performance Month': [performanceMonthRecordId] } : {}),
+          ...(performanceMonthRecordId ? { 'Monthly Performance': [performanceMonthRecordId] } : {}),
+          ...(selectedCustomerId ? { 'Customer': [selectedCustomerId] } : {}),
           'Notes': `Auto-created from Create Quote ${quoteNumber}`,
         };
         const createdInquiryRecords = await tableInquiries.create([{ fields: autoInquiryFields }]);
@@ -3334,7 +3640,10 @@ app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
           'Item No': itemNo,
           'Month': itemMonthSelect,
           'Order': [orderRecordId],
-          'Description': [safeStr(item.itemType), safeStr(item.forWhat), safeStr(item.description)].filter(Boolean).join(' / '),
+          // Item Type and For What already have their own Airtable fields.
+          // Description must remain the customer's Quote Description only so
+          // production notes and Package Detail do not repeat product data.
+          'Description': safeStr(item.description),
           'QTY': item.qty || 1,
           'Product Amount': item.amount || 0,
           'Quoted China Freight HKD': Number(item.freight) || 0,
