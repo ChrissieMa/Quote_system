@@ -153,6 +153,7 @@ const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS!);
 const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
 const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
+const tableChinaShipments = base(process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS || 'China Shipments');
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
@@ -4189,6 +4190,23 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
         orderItemsByOrderId.set(orderId, linkedItems);
       }
     }
+    const ordersById = new Map(orders.map(record => [record.id, record]));
+    const shipmentCandidates = orderItems
+      .filter(itemRecord => {
+        const linkedShipments = Array.isArray(itemRecord.fields['China Shipments'])
+          ? itemRecord.fields['China Shipments'] as string[]
+          : [];
+        if (linkedShipments.length > 0) return false;
+        const linkedOrders = Array.isArray(itemRecord.fields['Order'])
+          ? itemRecord.fields['Order'] as string[]
+          : [];
+        const order = linkedOrders.map(orderId => ordersById.get(orderId)).find(Boolean);
+        if (!order) return false;
+        const status = String(order.fields['Status'] || '').trim().toLowerCase();
+        return status === 'paid' || status === '已付款';
+      })
+      .sort((a, b) => String(a.fields['Item No'] || a.fields['Item Ref'] || a.id)
+        .localeCompare(String(b.fields['Item No'] || b.fields['Item Ref'] || b.id), undefined, { numeric: true }));
     const pending = orders
       .filter(record => {
         const fields = record.fields;
@@ -4243,7 +4261,49 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
       </tr>`;
     }).join('');
 
-    const content = `<div class="doc-card"><div class="doc-body">
+    const shipmentRows = shipmentCandidates.map(itemRecord => {
+      const itemFields = itemRecord.fields;
+      const linkedOrders = Array.isArray(itemFields['Order']) ? itemFields['Order'] as string[] : [];
+      const order = linkedOrders.map(orderId => ordersById.get(orderId)).find(Boolean);
+      const orderNo = String(order?.fields['Internal 1 Order No'] || order?.fields['Internal Order No'] || '-');
+      const itemNo = String(itemFields['Item No'] || itemFields['Item Ref'] || itemRecord.id);
+      const itemType = String(itemFields['Item Type'] || '').trim();
+      const description = String(itemFields['Description'] || '').trim();
+      const existingWeight = numberField(itemFields, 'China Freight Weight Input KG');
+      return `<tr class="china-item-row">
+        <td><input class="china-item-check" type="checkbox" name="shipment_item_${escapeHtml(itemRecord.id)}" value="1" aria-label="選擇 ${escapeHtml(itemNo)}"></td>
+        <td><strong>${escapeHtml(itemNo)}</strong><small>${itemType ? escapeHtml(itemType) : ''}${description ? `<br>${escapeHtml(description)}` : ''}</small></td>
+        <td>${escapeHtml(orderNo)}</td>
+        <td><input class="china-weight-input" name="shipment_weight_${escapeHtml(itemRecord.id)}" type="number" min="0.01" step="0.01" inputmode="decimal" value="${existingWeight > 0 ? existingWeight : ''}" placeholder="KG" aria-label="${escapeHtml(itemNo)} 小糖實際重量"></td>
+      </tr>`;
+    }).join('');
+
+    const chinaSaved = String(req.query.chinaSaved || '') === '1';
+    const chinaSuccess = chinaSaved
+      ? `<div class="alert alert-success">中國運費批次 <strong>${escapeHtml(req.query.shipmentNo || '')}</strong> 已建立：${escapeHtml(req.query.itemCount || '')} 個 Item，總重量 ${escapeHtml(req.query.totalWeight || '')} KG，整批運費 RMB ${escapeHtml(req.query.freight || '')}。Airtable 會按每件重量比例自動分攤。</div>`
+      : '';
+
+    const chinaShipmentSection = `<div class="doc-card" style="margin-bottom:18px"><div class="doc-body">
+      <div class="section-title">建立中國運費批次</div>
+      <p style="color:#64748b;margin-bottom:14px;">勾選同一批由小糖交貨嘅 Order Items，逐件輸入小糖實際重量，再輸入整批順豐人民幣運費。可以跨月份選擇；SF 實際重量／計費重量只作記錄，唔會用嚟分攤。</p>
+      ${chinaSuccess}
+      ${shipmentCandidates.length ? `<form method="POST" action="/admin/china-shipments" id="chinaShipmentForm">
+        <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
+        <input type="hidden" name="month" value="${escapeHtml(selectedMonth)}">
+        <div class="china-shipment-fields">
+          <label><span>Shipment No.／順豐單號</span><input name="shipment_no" placeholder="可留空，系統自動產生"></label>
+          <label><span>Shipment Date *</span><input name="shipment_date" type="date" required value="${getHongKongDate()}"></label>
+          <label><span>整批 SF Freight RMB *</span><input id="chinaFreightRmb" name="sf_freight_rmb" type="number" min="0.01" step="0.01" inputmode="decimal" required placeholder="例如 556"></label>
+          <label><span>SF Actual Weight KG（記錄用）</span><input name="sf_actual_weight_kg" type="number" min="0" step="0.001" inputmode="decimal"></label>
+          <label><span>SF Chargeable Weight KG（記錄用）</span><input name="sf_chargeable_weight_kg" type="number" min="0" step="0.001" inputmode="decimal"></label>
+        </div>
+        <div class="china-live-summary">已選 <strong id="chinaSelectedCount">0</strong> 個 Item｜小糖總重量 <strong id="chinaTotalWeight">0.00</strong> KG｜平均 <strong id="chinaPerKg">—</strong> RMB/KG</div>
+        <div style="overflow-x:auto"><table class="items-table china-items-table"><thead><tr><th>選擇</th><th>Order Item</th><th>Order</th><th>小糖實際重量 KG</th></tr></thead><tbody>${shipmentRows}</tbody></table></div>
+        <div style="margin-top:18px"><button class="btn btn-primary" type="submit">建立批次並自動分攤中國運費</button></div>
+      </form>` : '<div class="alert alert-success">暫時冇未連接 China Shipment 嘅已付款 Order Item。</div>'}
+    </div></div>`;
+
+    const content = `${chinaShipmentSection}<div class="doc-card"><div class="doc-body">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:14px;"><div class="section-title" style="margin:0;flex:1;">待補訂單成本</div><a class="btn btn-outline" href="/admin/dashboard?month=${encodeURIComponent(selectedMonth)}">老闆 Dashboard</a></div>
       <p style="color:#64748b;margin-bottom:12px;">只顯示所選月份仍欠成本資料嘅訂單。小糖成本按每個 Item 分開輸入，全部填妥後會自動加總返去 Order。中國運費如已經由 China Shipment 自動分配，毋須手動再填。</p>
       <form method="GET" action="/admin/costs" style="display:flex;gap:10px;align-items:end;margin-bottom:18px;">
@@ -4259,11 +4319,157 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
     </div></div>`;
     const extraHead = `<style>
       .owner-item-costs{display:grid;gap:9px;min-width:250px}.owner-item-cost{display:grid;grid-template-columns:minmax(110px,1fr) minmax(125px,150px);align-items:center;gap:9px;padding-bottom:8px;border-bottom:1px solid #eee}.owner-item-cost:last-child{padding-bottom:0;border-bottom:0}.owner-item-cost span{font-size:12px}.owner-item-cost small{display:block;margin-top:2px;color:#64748b;font-weight:400;max-width:220px;white-space:normal}.owner-item-cost input{width:100%}@media(max-width:600px){.owner-item-cost{grid-template-columns:1fr}.owner-item-cost small{max-width:none}}
-    </style>`;
+      .china-shipment-fields{display:grid;grid-template-columns:repeat(3,minmax(170px,1fr));gap:12px;margin-bottom:14px}.china-shipment-fields label span{display:block;font-size:12px;font-weight:700;color:#64748b;margin-bottom:5px}.china-shipment-fields input,.china-weight-input{width:100%}.china-live-summary{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;padding:10px 12px;border-radius:8px;margin-bottom:12px}.china-items-table small{display:block;margin-top:3px;color:#64748b;font-weight:400;max-width:320px;white-space:normal}.china-items-table th:first-child,.china-items-table td:first-child{width:58px;text-align:center}.china-items-table .china-weight-input{min-width:110px}@media(max-width:760px){.china-shipment-fields{grid-template-columns:1fr 1fr}}@media(max-width:520px){.china-shipment-fields{grid-template-columns:1fr}}
+    </style><script>
+      document.addEventListener('DOMContentLoaded', function () {
+        var form = document.getElementById('chinaShipmentForm');
+        if (!form) return;
+        var freightInput = document.getElementById('chinaFreightRmb');
+        var rows = Array.prototype.slice.call(form.querySelectorAll('.china-item-row'));
+        function refreshChinaSummary() {
+          var count = 0;
+          var total = 0;
+          rows.forEach(function (row) {
+            var check = row.querySelector('.china-item-check');
+            var weight = row.querySelector('.china-weight-input');
+            if (check && check.checked) {
+              count += 1;
+              total += Number(weight && weight.value || 0) || 0;
+            }
+          });
+          var freight = Number(freightInput && freightInput.value || 0) || 0;
+          document.getElementById('chinaSelectedCount').textContent = String(count);
+          document.getElementById('chinaTotalWeight').textContent = total.toFixed(2);
+          document.getElementById('chinaPerKg').textContent = total > 0 && freight > 0 ? (freight / total).toFixed(4) : '—';
+        }
+        rows.forEach(function (row) {
+          var check = row.querySelector('.china-item-check');
+          var weight = row.querySelector('.china-weight-input');
+          if (check) check.addEventListener('change', refreshChinaSummary);
+          if (weight) weight.addEventListener('input', function () {
+            if (Number(weight.value) > 0 && check) check.checked = true;
+            refreshChinaSummary();
+          });
+        });
+        if (freightInput) freightInput.addEventListener('input', refreshChinaSummary);
+        form.addEventListener('submit', function (event) {
+          var selected = rows.filter(function (row) { var c = row.querySelector('.china-item-check'); return c && c.checked; });
+          if (!selected.length) { event.preventDefault(); window.alert('請至少選擇一個 Order Item。'); return; }
+          var missing = selected.some(function (row) { var w = row.querySelector('.china-weight-input'); return !(Number(w && w.value) > 0); });
+          if (missing) { event.preventDefault(); window.alert('請為所有已選 Item 輸入小糖實際重量。'); }
+        });
+        refreshChinaSummary();
+      });
+    </script>`;
     res.send(renderPage('待補訂單成本', content, extraHead));
   } catch (error: any) {
     console.error('Unable to render supplier cost page:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
+app.post('/admin/china-shipments', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
+      return res.status(403).send('Invalid form token.');
+    }
+    const selectedMonth = String(req.body.month || getHongKongMonth());
+    monthBounds(selectedMonth);
+    const shipmentDate = String(req.body.shipment_date || '').trim();
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(shipmentDate)) throw new Error('請輸入正確 Shipment Date。');
+
+    const sfFreightRmb = Number(req.body.sf_freight_rmb);
+    if (!Number.isFinite(sfFreightRmb) || sfFreightRmb <= 0) throw new Error('整批 SF Freight RMB 必須大過 0。');
+    const optionalNonNegativeNumber = (raw: unknown, label: string): number | null => {
+      const text = String(raw ?? '').trim();
+      if (!text) return null;
+      const value = Number(text);
+      if (!Number.isFinite(value) || value < 0) throw new Error(`${label} 必須係 0 或以上。`);
+      return value;
+    };
+    const sfActualWeight = optionalNonNegativeNumber(req.body.sf_actual_weight_kg, 'SF Actual Weight KG');
+    const sfChargeableWeight = optionalNonNegativeNumber(req.body.sf_chargeable_weight_kg, 'SF Chargeable Weight KG');
+
+    const selectedItemIds = Object.keys(req.body || {})
+      .filter(key => key.startsWith('shipment_item_') && String(req.body[key] || '') === '1')
+      .map(key => key.slice('shipment_item_'.length))
+      .filter(Boolean);
+    if (!selectedItemIds.length) throw new Error('請至少選擇一個 Order Item。');
+    if (new Set(selectedItemIds).size !== selectedItemIds.length) throw new Error('Order Item 選擇重複，請重新整理再試。');
+
+    const [allOrderItems, allOrders] = await Promise.all([
+      tableOrderItems.select().all(),
+      tableOrders.select().all(),
+    ]);
+    const orderItemsById = new Map(allOrderItems.map(record => [record.id, record]));
+    const ordersById = new Map(allOrders.map(record => [record.id, record]));
+    const itemUpdates: Array<{ id: string; fields: FieldSet }> = [];
+    const affectedMonths = new Set<string>();
+    let totalItemWeight = 0;
+
+    for (const itemId of selectedItemIds) {
+      const itemRecord = orderItemsById.get(itemId);
+      if (!itemRecord) throw new Error(`找不到 Order Item ${itemId}，請重新整理再試。`);
+      const linkedShipments = Array.isArray(itemRecord.fields['China Shipments'])
+        ? itemRecord.fields['China Shipments'] as string[]
+        : [];
+      if (linkedShipments.length > 0) {
+        throw new Error(`${String(itemRecord.fields['Item No'] || itemId)} 已連接其他 China Shipment，今次冇建立重複批次。`);
+      }
+      const weight = Number(req.body[`shipment_weight_${itemId}`]);
+      if (!Number.isFinite(weight) || weight <= 0) {
+        throw new Error(`請輸入 ${String(itemRecord.fields['Item No'] || itemId)} 嘅小糖實際重量。`);
+      }
+      totalItemWeight += weight;
+      itemUpdates.push({ id: itemId, fields: { 'China Freight Weight Input KG': weight } });
+
+      const linkedOrders = Array.isArray(itemRecord.fields['Order']) ? itemRecord.fields['Order'] as string[] : [];
+      for (const orderId of linkedOrders) {
+        const order = ordersById.get(orderId);
+        if (!order) continue;
+        const month = getOrderFinanceMonth(order.fields['Internal 1 Order No'] || order.fields['Internal Order No']);
+        if (month) affectedMonths.add(month);
+      }
+    }
+
+    let shipmentNo = String(req.body.shipment_no || '').trim();
+    if (!shipmentNo) {
+      shipmentNo = `SF-${shipmentDate.replace(/-/g, '')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
+    }
+    const escapedShipmentNo = shipmentNo.replace(/'/g, "\\'");
+    const duplicate = await tableChinaShipments.select({
+      filterByFormula: `{Shipment No.} = '${escapedShipmentNo}'`,
+      maxRecords: 1,
+    }).firstPage();
+    if (duplicate.length > 0) throw new Error(`Shipment No. ${shipmentNo} 已存在，請輸入另一個單號。`);
+
+    for (let index = 0; index < itemUpdates.length; index += 10) {
+      await tableOrderItems.update(itemUpdates.slice(index, index + 10));
+    }
+
+    const shipmentFields: FieldSet = {
+      'Shipment No.': shipmentNo,
+      'Shipment Date': shipmentDate,
+      'Order Items': selectedItemIds,
+      'SF Freight RMB': sfFreightRmb,
+    };
+    if (sfActualWeight !== null) shipmentFields['SF Actual Weight KG'] = sfActualWeight;
+    if (sfChargeableWeight !== null) shipmentFields['SF Chargeable Weight KG'] = sfChargeableWeight;
+    await tableChinaShipments.create([{ fields: shipmentFields }]);
+
+    for (const month of affectedMonths) await syncMonthlyFinance(month);
+    const params = new URLSearchParams({
+      month: selectedMonth,
+      chinaSaved: '1',
+      shipmentNo,
+      itemCount: String(selectedItemIds.length),
+      totalWeight: totalItemWeight.toFixed(2),
+      freight: sfFreightRmb.toFixed(2),
+    });
+    res.redirect(`/admin/costs?${params.toString()}`);
+  } catch (error: any) {
+    console.error('Unable to create China Shipment:', error);
+    res.status(500).send(renderPage('建立中國運費批次失敗', `<div class="alert alert-danger">${escapeHtml(error.message)}</div><a class="btn btn-outline" href="/admin/costs">返回補成本資料</a>`));
   }
 });
 
