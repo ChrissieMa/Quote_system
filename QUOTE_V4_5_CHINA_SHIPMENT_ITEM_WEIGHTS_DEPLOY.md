@@ -4,7 +4,9 @@
 
 - `/admin/costs` 新增「建立中國運費批次」。
 - 可以跨月份勾選同一批 Order Items，例如 JUN2602、JUN2603、JUL2601–JUL2604。
-- 每個 Order Item 分開輸入小糖提供的實際重量 KG。
+- 每個 Order Item 先輸入實際貨物件數，再逐件輸入小糖提供的實際重量 KG。
+- 系統自動加總同一 Order Item 內所有貨件重量，再以 Item 總重量參與分攤。
+- 貨物件數、逐件重量明細及 Item 總重量都會保存，方便日後對數。
 - 輸入整批 `SF Freight RMB` 後，自動建立一筆 `China Shipments` record 並連結全部已選 Items。
 - Airtable 繼續按以下正式公式分攤：
 
@@ -20,6 +22,8 @@
 正式 Airtable 已新增：
 
 - `Order Items → China Freight Weight Input KG`
+- `Order Items → China Freight Piece Count`
+- `Order Items → China Freight Piece Weights KG`
 
 `Order Items → China Freight Weight KG` 已改為：
 
@@ -34,7 +38,7 @@
 2. Commit / Push。
 3. 等 Railway 自動重新部署。
 4. 開啟 `/admin/costs?month=2026-07`。
-5. 在「建立中國運費批次」勾選 Items、輸入每件 KG 及整批運費。
+5. 在「建立中國運費批次」勾選 Items、輸入每個 Item 有幾多件貨、逐件 KG 及整批運費。
 
 不需要修改現有 Railway Variables。`AIRTABLE_TABLE_CHINA_SHIPMENTS` 可不設定，系統預設使用 `China Shipments`。
 
@@ -48,4 +52,4 @@
 - JUL2604
 - 整批 SF Freight RMB：556
 
-仍須取得以上每個 Order Item 的小糖實際重量，全部重量填齊後才可建立批次。
+仍須取得以上每個 Order Item 的實際貨物件數及每一件貨的小糖實際重量，全部填齊後才可建立批次。

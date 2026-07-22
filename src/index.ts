@@ -4270,22 +4270,43 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
       const itemType = String(itemFields['Item Type'] || '').trim();
       const description = String(itemFields['Description'] || '').trim();
       const existingWeight = numberField(itemFields, 'China Freight Weight Input KG');
+      const savedPieceWeights = String(itemFields['China Freight Piece Weights KG'] || '')
+        .split(/[\n,]+/)
+        .map(value => Number(value.trim()))
+        .filter(value => Number.isFinite(value) && value > 0);
+      const savedPieceCount = Number(itemFields['China Freight Piece Count']);
+      const pieceCount = Number.isInteger(savedPieceCount) && savedPieceCount > 0
+        ? savedPieceCount
+        : savedPieceWeights.length > 0
+          ? savedPieceWeights.length
+          : existingWeight > 0
+            ? 1
+            : 0;
+      const pieceWeights = savedPieceWeights.length > 0
+        ? savedPieceWeights
+        : existingWeight > 0
+          ? [existingWeight]
+          : [];
+      const pieceInputs = pieceCount > 0
+        ? Array.from({ length: pieceCount }, (_, index) => `<label class="china-piece-weight-label"><span>第 ${index + 1} 件</span><input class="china-piece-weight" name="shipment_piece_weight_${escapeHtml(itemRecord.id)}_${index + 1}" type="number" min="0.01" step="0.01" inputmode="decimal" value="${pieceWeights[index] || ''}" placeholder="KG" aria-label="${escapeHtml(itemNo)} 第 ${index + 1} 件重量"></label>`).join('')
+        : '<small class="china-piece-empty">先輸入件數</small>';
       return `<tr class="china-item-row">
         <td><input class="china-item-check" type="checkbox" name="shipment_item_${escapeHtml(itemRecord.id)}" value="1" aria-label="選擇 ${escapeHtml(itemNo)}"></td>
         <td><strong>${escapeHtml(itemNo)}</strong><small>${itemType ? escapeHtml(itemType) : ''}${description ? `<br>${escapeHtml(description)}` : ''}</small></td>
         <td>${escapeHtml(orderNo)}</td>
-        <td><input class="china-weight-input" name="shipment_weight_${escapeHtml(itemRecord.id)}" type="number" min="0.01" step="0.01" inputmode="decimal" value="${existingWeight > 0 ? existingWeight : ''}" placeholder="KG" aria-label="${escapeHtml(itemNo)} 小糖實際重量"></td>
+        <td><input class="china-piece-count" name="shipment_piece_count_${escapeHtml(itemRecord.id)}" type="number" min="1" max="100" step="1" inputmode="numeric" value="${pieceCount || ''}" placeholder="件數" aria-label="${escapeHtml(itemNo)} 貨物件數"></td>
+        <td><div class="china-piece-weights" data-item-id="${escapeHtml(itemRecord.id)}">${pieceInputs}</div><small class="china-item-weight-summary">Item 總重量：<strong class="china-item-total">${existingWeight > 0 ? existingWeight.toFixed(2) : '0.00'}</strong> KG</small></td>
       </tr>`;
     }).join('');
 
     const chinaSaved = String(req.query.chinaSaved || '') === '1';
     const chinaSuccess = chinaSaved
-      ? `<div class="alert alert-success">中國運費批次 <strong>${escapeHtml(req.query.shipmentNo || '')}</strong> 已建立：${escapeHtml(req.query.itemCount || '')} 個 Item，總重量 ${escapeHtml(req.query.totalWeight || '')} KG，整批運費 RMB ${escapeHtml(req.query.freight || '')}。Airtable 會按每件重量比例自動分攤。</div>`
+      ? `<div class="alert alert-success">中國運費批次 <strong>${escapeHtml(req.query.shipmentNo || '')}</strong> 已建立：${escapeHtml(req.query.itemCount || '')} 個 Item、${escapeHtml(req.query.pieceCount || '')} 件貨，總重量 ${escapeHtml(req.query.totalWeight || '')} KG，整批運費 RMB ${escapeHtml(req.query.freight || '')}。Airtable 會按各 Item 總重量比例自動分攤。</div>`
       : '';
 
     const chinaShipmentSection = `<div class="doc-card" style="margin-bottom:18px"><div class="doc-body">
       <div class="section-title">建立中國運費批次</div>
-      <p style="color:#64748b;margin-bottom:14px;">勾選同一批由小糖交貨嘅 Order Items，逐件輸入小糖實際重量，再輸入整批順豐人民幣運費。可以跨月份選擇；SF 實際重量／計費重量只作記錄，唔會用嚟分攤。</p>
+      <p style="color:#64748b;margin-bottom:14px;">勾選同一批由小糖交貨嘅 Order Items，輸入每個 Item 有幾多件貨，再逐件輸入小糖實際重量。系統會先加總每個 Item 重量，再按比例分攤整批順豐人民幣運費。可以跨月份選擇；SF 實際重量／計費重量只作記錄。</p>
       ${chinaSuccess}
       ${shipmentCandidates.length ? `<form method="POST" action="/admin/china-shipments" id="chinaShipmentForm">
         <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
@@ -4297,8 +4318,8 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
           <label><span>SF Actual Weight KG（記錄用）</span><input name="sf_actual_weight_kg" type="number" min="0" step="0.001" inputmode="decimal"></label>
           <label><span>SF Chargeable Weight KG（記錄用）</span><input name="sf_chargeable_weight_kg" type="number" min="0" step="0.001" inputmode="decimal"></label>
         </div>
-        <div class="china-live-summary">已選 <strong id="chinaSelectedCount">0</strong> 個 Item｜小糖總重量 <strong id="chinaTotalWeight">0.00</strong> KG｜平均 <strong id="chinaPerKg">—</strong> RMB/KG</div>
-        <div style="overflow-x:auto"><table class="items-table china-items-table"><thead><tr><th>選擇</th><th>Order Item</th><th>Order</th><th>小糖實際重量 KG</th></tr></thead><tbody>${shipmentRows}</tbody></table></div>
+        <div class="china-live-summary">已選 <strong id="chinaSelectedCount">0</strong> 個 Item｜共 <strong id="chinaSelectedPieces">0</strong> 件貨｜小糖總重量 <strong id="chinaTotalWeight">0.00</strong> KG｜平均 <strong id="chinaPerKg">—</strong> RMB/KG</div>
+        <div style="overflow-x:auto"><table class="items-table china-items-table"><thead><tr><th>選擇</th><th>Order Item</th><th>Order</th><th>有幾多件貨</th><th>每件實際重量 KG</th></tr></thead><tbody>${shipmentRows}</tbody></table></div>
         <div style="margin-top:18px"><button class="btn btn-primary" type="submit">建立批次並自動分攤中國運費</button></div>
       </form>` : '<div class="alert alert-success">暫時冇未連接 China Shipment 嘅已付款 Order Item。</div>'}
     </div></div>`;
@@ -4319,7 +4340,7 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
     </div></div>`;
     const extraHead = `<style>
       .owner-item-costs{display:grid;gap:9px;min-width:250px}.owner-item-cost{display:grid;grid-template-columns:minmax(110px,1fr) minmax(125px,150px);align-items:center;gap:9px;padding-bottom:8px;border-bottom:1px solid #eee}.owner-item-cost:last-child{padding-bottom:0;border-bottom:0}.owner-item-cost span{font-size:12px}.owner-item-cost small{display:block;margin-top:2px;color:#64748b;font-weight:400;max-width:220px;white-space:normal}.owner-item-cost input{width:100%}@media(max-width:600px){.owner-item-cost{grid-template-columns:1fr}.owner-item-cost small{max-width:none}}
-      .china-shipment-fields{display:grid;grid-template-columns:repeat(3,minmax(170px,1fr));gap:12px;margin-bottom:14px}.china-shipment-fields label span{display:block;font-size:12px;font-weight:700;color:#64748b;margin-bottom:5px}.china-shipment-fields input,.china-weight-input{width:100%}.china-live-summary{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;padding:10px 12px;border-radius:8px;margin-bottom:12px}.china-items-table small{display:block;margin-top:3px;color:#64748b;font-weight:400;max-width:320px;white-space:normal}.china-items-table th:first-child,.china-items-table td:first-child{width:58px;text-align:center}.china-items-table .china-weight-input{min-width:110px}@media(max-width:760px){.china-shipment-fields{grid-template-columns:1fr 1fr}}@media(max-width:520px){.china-shipment-fields{grid-template-columns:1fr}}
+      .china-shipment-fields{display:grid;grid-template-columns:repeat(3,minmax(170px,1fr));gap:12px;margin-bottom:14px}.china-shipment-fields label span{display:block;font-size:12px;font-weight:700;color:#64748b;margin-bottom:5px}.china-shipment-fields input{width:100%}.china-live-summary{background:#fff7ed;border:1px solid #fed7aa;color:#9a3412;padding:10px 12px;border-radius:8px;margin-bottom:12px}.china-items-table small{display:block;margin-top:3px;color:#64748b;font-weight:400;max-width:320px;white-space:normal}.china-items-table th:first-child,.china-items-table td:first-child{width:58px;text-align:center}.china-piece-count{width:90px}.china-piece-weights{display:grid;grid-template-columns:repeat(2,minmax(105px,1fr));gap:7px;min-width:240px}.china-piece-weight-label span{display:block;font-size:11px;font-weight:700;color:#64748b;margin-bottom:3px}.china-piece-weight{width:100%}.china-piece-empty{padding:8px 0}.china-item-weight-summary{margin-top:7px!important;color:#9a3412!important}.china-item-total{font-weight:800}@media(max-width:760px){.china-shipment-fields{grid-template-columns:1fr 1fr}.china-piece-weights{grid-template-columns:1fr}}@media(max-width:520px){.china-shipment-fields{grid-template-columns:1fr}}
     </style><script>
       document.addEventListener('DOMContentLoaded', function () {
         var form = document.getElementById('chinaShipmentForm');
@@ -4328,35 +4349,80 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
         var rows = Array.prototype.slice.call(form.querySelectorAll('.china-item-row'));
         function refreshChinaSummary() {
           var count = 0;
+          var pieces = 0;
           var total = 0;
           rows.forEach(function (row) {
             var check = row.querySelector('.china-item-check');
-            var weight = row.querySelector('.china-weight-input');
+            var countInput = row.querySelector('.china-piece-count');
+            var itemTotal = Array.prototype.slice.call(row.querySelectorAll('.china-piece-weight')).reduce(function (sum, input) {
+              return sum + (Number(input.value) || 0);
+            }, 0);
+            var totalNode = row.querySelector('.china-item-total');
+            if (totalNode) totalNode.textContent = itemTotal.toFixed(2);
             if (check && check.checked) {
               count += 1;
-              total += Number(weight && weight.value || 0) || 0;
+              pieces += Number(countInput && countInput.value || 0) || 0;
+              total += itemTotal;
             }
           });
           var freight = Number(freightInput && freightInput.value || 0) || 0;
           document.getElementById('chinaSelectedCount').textContent = String(count);
+          document.getElementById('chinaSelectedPieces').textContent = String(pieces);
           document.getElementById('chinaTotalWeight').textContent = total.toFixed(2);
           document.getElementById('chinaPerKg').textContent = total > 0 && freight > 0 ? (freight / total).toFixed(4) : '—';
         }
+        function rebuildPieceInputs(row) {
+          var countInput = row.querySelector('.china-piece-count');
+          var container = row.querySelector('.china-piece-weights');
+          var check = row.querySelector('.china-item-check');
+          if (!countInput || !container) return;
+          var oldValues = Array.prototype.slice.call(container.querySelectorAll('.china-piece-weight')).map(function (input) { return input.value; });
+          var count = Math.min(100, Math.max(0, Math.floor(Number(countInput.value) || 0)));
+          container.innerHTML = '';
+          if (!count) {
+            var empty = document.createElement('small');
+            empty.className = 'china-piece-empty';
+            empty.textContent = '先輸入件數';
+            container.appendChild(empty);
+            refreshChinaSummary();
+            return;
+          }
+          if (check) check.checked = true;
+          for (var index = 0; index < count; index += 1) {
+            var label = document.createElement('label');
+            label.className = 'china-piece-weight-label';
+            var span = document.createElement('span');
+            span.textContent = '第 ' + (index + 1) + ' 件';
+            var input = document.createElement('input');
+            input.className = 'china-piece-weight';
+            input.name = 'shipment_piece_weight_' + container.getAttribute('data-item-id') + '_' + (index + 1);
+            input.type = 'number'; input.min = '0.01'; input.step = '0.01'; input.inputMode = 'decimal'; input.placeholder = 'KG';
+            input.value = oldValues[index] || '';
+            input.addEventListener('input', function () { if (check) check.checked = true; refreshChinaSummary(); });
+            label.appendChild(span); label.appendChild(input); container.appendChild(label);
+          }
+          refreshChinaSummary();
+        }
         rows.forEach(function (row) {
           var check = row.querySelector('.china-item-check');
-          var weight = row.querySelector('.china-weight-input');
+          var countInput = row.querySelector('.china-piece-count');
           if (check) check.addEventListener('change', refreshChinaSummary);
-          if (weight) weight.addEventListener('input', function () {
-            if (Number(weight.value) > 0 && check) check.checked = true;
-            refreshChinaSummary();
+          if (countInput) countInput.addEventListener('input', function () { rebuildPieceInputs(row); });
+          Array.prototype.slice.call(row.querySelectorAll('.china-piece-weight')).forEach(function (input) {
+            input.addEventListener('input', function () { if (check) check.checked = true; refreshChinaSummary(); });
           });
         });
         if (freightInput) freightInput.addEventListener('input', refreshChinaSummary);
         form.addEventListener('submit', function (event) {
           var selected = rows.filter(function (row) { var c = row.querySelector('.china-item-check'); return c && c.checked; });
           if (!selected.length) { event.preventDefault(); window.alert('請至少選擇一個 Order Item。'); return; }
-          var missing = selected.some(function (row) { var w = row.querySelector('.china-weight-input'); return !(Number(w && w.value) > 0); });
-          if (missing) { event.preventDefault(); window.alert('請為所有已選 Item 輸入小糖實際重量。'); }
+          var invalid = selected.some(function (row) {
+            var countInput = row.querySelector('.china-piece-count');
+            var count = Number(countInput && countInput.value);
+            var weights = Array.prototype.slice.call(row.querySelectorAll('.china-piece-weight'));
+            return !Number.isInteger(count) || count <= 0 || weights.length !== count || weights.some(function (input) { return !(Number(input.value) > 0); });
+          });
+          if (invalid) { event.preventDefault(); window.alert('請為所有已選 Item 輸入件數及每一件貨嘅實際重量。'); }
         });
         refreshChinaSummary();
       });
@@ -4406,6 +4472,7 @@ app.post('/admin/china-shipments', requireAdmin, async (req: Request, res: Respo
     const itemUpdates: Array<{ id: string; fields: FieldSet }> = [];
     const affectedMonths = new Set<string>();
     let totalItemWeight = 0;
+    let totalPieceCount = 0;
 
     for (const itemId of selectedItemIds) {
       const itemRecord = orderItemsById.get(itemId);
@@ -4416,12 +4483,30 @@ app.post('/admin/china-shipments', requireAdmin, async (req: Request, res: Respo
       if (linkedShipments.length > 0) {
         throw new Error(`${String(itemRecord.fields['Item No'] || itemId)} 已連接其他 China Shipment，今次冇建立重複批次。`);
       }
-      const weight = Number(req.body[`shipment_weight_${itemId}`]);
-      if (!Number.isFinite(weight) || weight <= 0) {
-        throw new Error(`請輸入 ${String(itemRecord.fields['Item No'] || itemId)} 嘅小糖實際重量。`);
+      const itemLabel = String(itemRecord.fields['Item No'] || itemId);
+      const pieceCount = Number(req.body[`shipment_piece_count_${itemId}`]);
+      if (!Number.isInteger(pieceCount) || pieceCount <= 0 || pieceCount > 100) {
+        throw new Error(`請輸入 ${itemLabel} 正確嘅貨物件數（1–100）。`);
       }
+      const pieceWeights: number[] = [];
+      for (let pieceIndex = 1; pieceIndex <= pieceCount; pieceIndex += 1) {
+        const pieceWeight = Number(req.body[`shipment_piece_weight_${itemId}_${pieceIndex}`]);
+        if (!Number.isFinite(pieceWeight) || pieceWeight <= 0) {
+          throw new Error(`請輸入 ${itemLabel} 第 ${pieceIndex} 件貨嘅實際重量。`);
+        }
+        pieceWeights.push(pieceWeight);
+      }
+      const weight = pieceWeights.reduce((sum, pieceWeight) => sum + pieceWeight, 0);
       totalItemWeight += weight;
-      itemUpdates.push({ id: itemId, fields: { 'China Freight Weight Input KG': weight } });
+      totalPieceCount += pieceCount;
+      itemUpdates.push({
+        id: itemId,
+        fields: {
+          'China Freight Piece Count': pieceCount,
+          'China Freight Piece Weights KG': pieceWeights.join('\n'),
+          'China Freight Weight Input KG': Number(weight.toFixed(3)),
+        },
+      });
 
       const linkedOrders = Array.isArray(itemRecord.fields['Order']) ? itemRecord.fields['Order'] as string[] : [];
       for (const orderId of linkedOrders) {
@@ -4463,6 +4548,7 @@ app.post('/admin/china-shipments', requireAdmin, async (req: Request, res: Respo
       chinaSaved: '1',
       shipmentNo,
       itemCount: String(selectedItemIds.length),
+      pieceCount: String(totalPieceCount),
       totalWeight: totalItemWeight.toFixed(2),
       freight: sfFreightRmb.toFixed(2),
     });
