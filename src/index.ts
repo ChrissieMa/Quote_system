@@ -709,6 +709,55 @@ const getOrderFinanceMonth = (orderNo: unknown): string | null => {
   return `20${match[2]}-${MONTH_CODES[match[1]]}`;
 };
 
+const getOrderSequenceKey = (orderNo: unknown): number | null => {
+  const match = String(orderNo || '').toUpperCase().match(/^([A-Z]{3})(\d{2})(\d{2})$/);
+  if (!match || !MONTH_CODES[match[1]]) return null;
+  return (Number(match[2]) * 10000) + (Number(MONTH_CODES[match[1]]) * 100) + Number(match[3]);
+};
+
+const DRIVER_SHARE_START_ORDER_KEY = 260602; // JUN2602
+const DRIVER_SHARE_RATE = 0.90;
+
+const usesQuotedDeliveryDriverShare = (orderNo: unknown): boolean => {
+  const key = getOrderSequenceKey(orderNo);
+  return key !== null && key >= DRIVER_SHARE_START_ORDER_KEY;
+};
+
+const getDriverPayable = (fields: FieldSet): number => {
+  const formulaValue = fields['Driver Payable HKD'];
+  if (formulaValue !== undefined && formulaValue !== null && String(formulaValue).trim() !== '') {
+    const value = Number(formulaValue);
+    if (Number.isFinite(value)) return value;
+  }
+
+  const overrideValue = fields['Driver Payable Override HKD'];
+  if (overrideValue !== undefined && overrideValue !== null && String(overrideValue).trim() !== '') {
+    const value = Number(overrideValue);
+    if (Number.isFinite(value)) return value;
+  }
+
+  const orderNo = fields['Internal 1 Order No'] || fields['Internal Order No'];
+  if (usesQuotedDeliveryDriverShare(orderNo)) {
+    return Number((numberField(fields, 'Quoted Local Delivery Total HKD') * DRIVER_SHARE_RATE).toFixed(2));
+  }
+  return numberField(fields, 'Actual Local Delivery Cost HKD');
+};
+
+const getOutstandingFinanceStatus = (fields: FieldSet): string => {
+  const rawStatus = String(fields['Finance Data Status'] || '').trim();
+  if (!rawStatus) return '';
+  const orderNo = fields['Internal 1 Order No'] || fields['Internal Order No'];
+  return rawStatus
+    .split('|')
+    .map(part => part.trim())
+    .filter(part => part && (part.includes('⏳') || /尚欠|未有|未建立|missing/i.test(part)))
+    // From JUN2602 onward the driver payable is already known from the quote:
+    // 90% to the driver and 10% retained by LKS. A not-yet-created Delivery is
+    // therefore not missing finance data.
+    .filter(part => !(usesQuotedDeliveryDriverShare(orderNo) && part.includes('未建立 Delivery')))
+    .join(' | ');
+};
+
 const monthBounds = (month: string) => {
   const [year, monthNumber] = month.split('-').map(Number);
   if (!year || !monthNumber || monthNumber < 1 || monthNumber > 12) throw new Error('Invalid month; use YYYY-MM');
@@ -790,16 +839,16 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     sum.revenue += numberField(fields, 'Final Amount');
     sum.supplier += numberField(fields, 'Supplier Cost Used HKD') || numberField(fields, 'Actual Supplier Cost HKD') || numberField(fields, 'Cost');
     sum.china += numberField(fields, 'China Freight Used HKD') || numberField(fields, 'Actual China Freight HKD') || numberField(fields, 'China Freight Cost HKD');
-    sum.delivery += numberField(fields, 'Actual Local Delivery Cost HKD');
+    sum.delivery += getDriverPayable(fields);
     sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
-    sum.gross += numberField(fields, 'Actual Profit HKD');
-    if (String(fields['Finance Data Status'] || '').trim()) sum.pending += 1;
+    if (getOutstandingFinanceStatus(fields)) sum.pending += 1;
     if (fields['Is Ad Attributed Order']) sum.adOrders += 1;
     return sum;
-  }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, gross: 0, pending: 0, adOrders: 0 });
+  }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, pending: 0, adOrders: 0 });
 
   const marketingSpend = monthMarketing.reduce((sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0);
   const businessExpenses = monthExpenses.reduce((sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0);
+  const orderGrossProfit = totals.revenue - totals.supplier - totals.china - totals.delivery - totals.reissue;
   const missingExpenseItems = '';
   const financeStatus = totals.pending > 0 ? '暫計／尚欠訂單成本資料' : 'Complete';
   const fields: FieldSet = {
@@ -807,14 +856,14 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     'Month Start': start,
     'Month End': end,
     'Order Count': monthOrders.length,
-    'Total Revenue': totals.revenue,
-    'Supplier Cost': totals.supplier,
-    'China Freight': totals.china,
-    'Local Delivery': totals.delivery,
-    'Reissue': totals.reissue,
-    'Order Gross Profit': totals.gross,
-    'Marketing Spend': marketingSpend,
-    'Business Expenses': businessExpenses,
+    'Total Revenue HKD': totals.revenue,
+    'Supplier Cost HKD': totals.supplier,
+    'China Freight HKD': totals.china,
+    'Local Delivery Cost HKD': totals.delivery,
+    'Reissue Cost HKD': totals.reissue,
+    'Order Gross Profit HKD': orderGrossProfit,
+    'Marketing Spend HKD': marketingSpend,
+    'Business Expenses HKD': businessExpenses,
     'Ad Attributed Orders': totals.adOrders,
     'Pending Cost Orders': totals.pending,
     'Missing Expense Items': missingExpenseItems,
@@ -4037,11 +4086,13 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     // Refresh Airtable's Monthly Finance row before presenting the live figures.
     await syncMonthlyFinance(selectedMonth);
 
-    const [orders, marketing, expenses, checklist] = await Promise.all([
+    const [orders, marketing, expenses, checklist, orderItems, chinaShipments] = await Promise.all([
       tableOrders.select().all(),
       tableMarketingSpend.select().all(),
       tableBusinessExpenses.select().all(),
       tableExpenseChecklist.select().all(),
+      tableOrderItems.select().all(),
+      tableChinaShipments.select().all(),
     ]);
 
     const monthOrders = orders
@@ -4068,9 +4119,9 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       sum.china += numberField(fields, 'China Freight Used HKD')
         || numberField(fields, 'Actual China Freight HKD')
         || numberField(fields, 'China Freight Cost HKD');
-      sum.delivery += numberField(fields, 'Actual Local Delivery Cost HKD');
+      sum.delivery += getDriverPayable(fields);
       sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
-      if (String(fields['Finance Data Status'] || '').trim()) sum.pending += 1;
+      if (getOutstandingFinanceStatus(fields)) sum.pending += 1;
       if (fields['Is Ad Attributed Order'] || String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
       return sum;
     }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, pending: 0, adOrders: 0 });
@@ -4113,9 +4164,53 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       }).join('');
 
     const pendingRows = monthOrders
-      .filter(record => String(record.fields['Finance Data Status'] || '').trim())
-      .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(record.fields['Finance Data Status'] || '尚欠成本')}</li>`)
+      .filter(record => getOutstandingFinanceStatus(record.fields))
+      .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(getOutstandingFinanceStatus(record.fields) || '尚欠成本')}</li>`)
       .join('');
+
+    const ordersById = new Map(orders.map(record => [record.id, record]));
+    const orderItemsById = new Map(orderItems.map(record => [record.id, record]));
+    const driverBatchRows = chinaShipments.flatMap(shipment => {
+      const linkedItemIds = Array.isArray(shipment.fields['Order Items'])
+        ? shipment.fields['Order Items'] as string[]
+        : [];
+      const linkedOrderIds = new Set<string>();
+      for (const itemId of linkedItemIds) {
+        const item = orderItemsById.get(itemId);
+        const itemOrderIds = Array.isArray(item?.fields['Order']) ? item?.fields['Order'] as string[] : [];
+        itemOrderIds.forEach(orderId => linkedOrderIds.add(orderId));
+      }
+      const linkedOrders = Array.from(linkedOrderIds)
+        .map(orderId => ordersById.get(orderId))
+        .filter((record): record is NonNullable<typeof record> => Boolean(record))
+        .filter(record => usesQuotedDeliveryDriverShare(record.fields['Internal 1 Order No'] || record.fields['Internal Order No']));
+      if (linkedOrders.length === 0) return [];
+
+      const monthlyTotals = new Map<string, number>();
+      let batchTotal = 0;
+      for (const order of linkedOrders) {
+        const orderMonth = getOrderFinanceMonth(order.fields['Internal 1 Order No'] || order.fields['Internal Order No']);
+        if (!orderMonth) continue;
+        const payable = getDriverPayable(order.fields);
+        batchTotal += payable;
+        monthlyTotals.set(orderMonth, (monthlyTotals.get(orderMonth) || 0) + payable);
+      }
+      if (!monthlyTotals.has(selectedMonth)) return [];
+
+      const monthSplit = Array.from(monthlyTotals.entries())
+        .sort((a, b) => a[0].localeCompare(b[0]))
+        .map(([month, amount]) => `${escapeHtml(month)}：<strong>${formatOwnerMoney(amount)}</strong>`)
+        .join('<br>');
+      const orderNumbers = linkedOrders
+        .map(order => String(order.fields['Internal 1 Order No'] || order.fields['Internal Order No'] || order.id))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .join('、');
+      return [`<tr>
+        <td><strong>${escapeHtml(shipment.fields['Shipment No.'] || shipment.id)}</strong><small>${escapeHtml(orderNumbers)}</small></td>
+        <td>${monthSplit}</td>
+        <td><strong>${formatOwnerMoney(batchTotal)}</strong></td>
+      </tr>`];
+    }).join('');
 
     const statusClass = totals.pending || missingExpenses.length ? 'owner-status warning' : 'owner-status complete';
     const statusText = totals.pending || missingExpenses.length ? '暫計｜仍有資料待補' : '本月資料完整';
@@ -4138,7 +4233,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         <section class="owner-panel"><h2>成本分拆</h2><div class="owner-lines">
           <div><span>小糖成本</span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
           <div><span>中國運費</span><strong>${formatOwnerMoney(totals.china)}</strong></div>
-          <div><span>本地送貨／司機</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
+          <div><span>實際司機費</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
           <div><span>補寄成本</span><strong>${formatOwnerMoney(totals.reissue)}</strong></div>
           <div class="owner-line-total"><span>訂單成本合計</span><strong>${formatOwnerMoney(orderCosts)}</strong></div>
           <div><span>Meta／Marketing</span><strong>${formatOwnerMoney(marketingSpend)}</strong></div>
@@ -4149,13 +4244,19 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         </section>
       </div>
       <div class="owner-grid">
+        <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>司機付款（按到港批次）</h2><strong>實際司機費</strong></div>
+          ${driverBatchRows ? `<div class="owner-table-wrap"><table><thead><tr><th>批次／包括訂單</th><th>成本月份分拆</th><th>要過畀司機總額</th></tr></thead><tbody>${driverBatchRows}</tbody></table></div>` : '<div class="owner-empty">本月未有已連接 China Shipment 嘅司機付款批次。</div>'}
+          <p class="owner-note">由 JUN2602 起，實際司機費＝報價香港運費 × 90%；同一批貨可跨月份付款，但成本按各 Order 原本月份分開入帳。</p>
+        </section>
+      </div>
+      <div class="owner-grid">
         <section class="owner-panel"><div class="owner-panel-head"><h2>每月固定及公司支出</h2><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
           ${missingExpenses.length ? `<div class="owner-alert">未見本月記錄：${missingExpenses.map(escapeHtml).join('、')}</div>` : '<div class="owner-ok">固定支出已按排程自動記錄，毋須逐張單據再入。</div>'}
           ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>日期</th><th>金額</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
         </section>
         <section class="owner-panel"><div class="owner-panel-head"><h2>尚欠資料提醒</h2><a href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">前往補資料 →</a></div>
           ${pendingRows ? `<ul class="owner-pending">${pendingRows}</ul>` : '<div class="owner-ok">所有 Order 成本資料已齊。</div>'}
-          <p class="owner-note">財務月份跟 Order Month & Year；即使下月先送貨，司機成本仍會計回原本落單月份。</p>
+          <p class="owner-note">財務月份跟 Order Month & Year；即使下月先送貨，實際司機費仍會計回原本落單月份。</p>
         </section>
       </div>
       <div class="owner-footer-nav"><a href="/admin/dashboard?month=${previousMonth(selectedMonth)}">← 上一個月</a><a href="/admin/dashboard?month=${getHongKongMonth()}">返回今個月</a></div>
@@ -4212,7 +4313,7 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
         const fields = record.fields;
         const orderNo = fields['Internal 1 Order No'] || fields['Internal Order No'];
         return getOrderFinanceMonth(orderNo) === selectedMonth
-          && String(fields['Finance Data Status'] || '').trim() !== '';
+          && getOutstandingFinanceStatus(fields) !== '';
       })
       .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
         .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])));
@@ -4227,7 +4328,7 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
         || numberField(fields, 'Actual China Freight HKD')
         || numberField(fields, 'China Freight Cost HKD');
       const reissueCost = numberField(fields, 'Actual Reissue Cost HKD');
-      const deliveryCost = numberField(fields, 'Actual Local Delivery Cost HKD');
+      const deliveryCost = getDriverPayable(fields);
       const hasDelivery = Array.isArray(fields['Deliveries']) && fields['Deliveries'].length > 0;
       const linkedItems = (orderItemsByOrderId.get(record.id) || [])
         .sort((a, b) => String(a.fields['Item No'] || a.id).localeCompare(String(b.fields['Item No'] || b.id)));
@@ -4251,13 +4352,15 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
           : `<input name="supplier_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="小糖成本" aria-label="${escapeHtml(orderNo)} supplier cost">`;
       return `<tr>
         <td><strong>${escapeHtml(orderNo)}</strong></td>
-        <td><small>${escapeHtml(fields['Finance Data Status'] || '')}</small></td>
+        <td><small>${escapeHtml(getOutstandingFinanceStatus(fields))}</small></td>
         <td>${supplierInput}</td>
         <td>${chinaFreight > 0
           ? `HK$${chinaFreight.toFixed(2)}`
           : `<input name="china_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" placeholder="中國運費" aria-label="${escapeHtml(orderNo)} China freight">`}</td>
         <td><input name="reissue_${escapeHtml(record.id)}" type="number" min="0" step="0.01" inputmode="decimal" value="${reissueCost > 0 ? reissueCost : ''}" placeholder="如有" aria-label="${escapeHtml(orderNo)} reissue cost"></td>
-        <td>${hasDelivery ? `已建立｜HK$${deliveryCost.toFixed(2)}` : '等候 Delivery System 建立'}</td>
+        <td>${usesQuotedDeliveryDriverShare(orderNo)
+          ? `HK$${deliveryCost.toFixed(2)}｜報價運費90%`
+          : hasDelivery ? `已建立｜HK$${deliveryCost.toFixed(2)}` : '等候 Delivery System 建立'}</td>
       </tr>`;
     }).join('');
 
