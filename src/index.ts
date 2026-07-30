@@ -25,6 +25,15 @@ import {
   resolveSourceAlias,
   type ShortQuoteClarification,
 } from './quote-short';
+import {
+  analyzeQuoteDeletion,
+  issueDeleteConfirmation,
+  maintenanceSnapshotFingerprint,
+  requiredDeleteConfirmation,
+  verifyDeleteConfirmation,
+  type MaintenanceRecord,
+  type QuoteDeletionSnapshot,
+} from './production-maintenance';
 
 dotenv.config();
 
@@ -36,6 +45,7 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
+const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
 
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 
@@ -321,7 +331,10 @@ const requireAdmin = (req: Request, res: Response, next: () => void) => {
 type AirtableMetadataField = {
   name: string;
   type: string;
-  options?: { choices?: Array<{ name: string }> };
+  options?: {
+    choices?: Array<{ name: string }>;
+    linkedTableId?: string;
+  };
 };
 
 type AirtableMetadataTable = {
@@ -710,6 +723,205 @@ const getQuoteShortMetadata = async (): Promise<QuoteShortMetadata> => {
     discountReasonOptions: fieldChoices(discountReason),
     deliveryOfferReasonOptions: fieldChoices(deliveryOfferReason),
     inquiryChannelOptions: fieldChoices(inquiryChannel),
+  };
+};
+
+const safeFormulaLiteral = (value: unknown): string => String(value ?? '').replace(/'/g, "\\'");
+
+const linkedRecordIds = (value: unknown): string[] => {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap(item => {
+    if (typeof item === 'string' && item.trim()) return [item.trim()];
+    if (item && typeof (item as any).id === 'string') return [String((item as any).id)];
+    return [];
+  });
+};
+
+const toMaintenanceRecord = (
+  table: AirtableMetadataTable,
+  record: { id: string; fields: FieldSet },
+): MaintenanceRecord => ({
+  tableId: table.id,
+  tableName: table.name,
+  id: record.id,
+  fields: JSON.parse(JSON.stringify(record.fields || {})) as Record<string, unknown>,
+});
+
+const recordContainsMaintenanceToken = (record: { id: string; fields: FieldSet }, tokens: Set<string>): boolean => {
+  const searchable = `${record.id}\n${JSON.stringify(record.fields || {})}`.toLocaleUpperCase();
+  return [...tokens].some(token => token.length >= 3 && searchable.includes(token.toLocaleUpperCase()));
+};
+
+const maintenanceRecordSummary = (record: MaintenanceRecord) => {
+  const identifiers = [
+    'Quote Number',
+    'Internal 1 Order No',
+    'Internal Order No',
+    'Invoice Number',
+    'Receipt Number',
+    'Delivery No',
+    'Shipping No',
+    'Status',
+  ].flatMap(field => {
+    const value = record.fields[field];
+    return value === undefined || value === null || String(value).trim() === ''
+      ? []
+      : [{ field, value: String(value) }];
+  });
+  return {
+    table: record.tableName,
+    recordId: record.id,
+    identifiers,
+  };
+};
+
+const getQuoteByNumber = async (quoteNo: string) => {
+  const records = await tableQuotes.select({
+    filterByFormula: `{Quote Number} = '${safeFormulaLiteral(quoteNo)}'`,
+    maxRecords: 2,
+  }).firstPage();
+  if (records.length > 1) throw new Error(`Duplicate Quote Number detected: ${quoteNo}.`);
+  return records[0] || null;
+};
+
+const buildQuoteDeletionSnapshot = async (rawQuoteNo: unknown): Promise<QuoteDeletionSnapshot> => {
+  const quoteNo = String(rawQuoteNo || '').trim().toLocaleUpperCase();
+  if (!/^QT-\d{4}-\d{4,}$/.test(quoteNo)) throw new Error('An exact Quote No is required.');
+
+  const [tables, quoteRecord] = await Promise.all([
+    getAirtableMetadataTables(),
+    getQuoteByNumber(quoteNo),
+  ]);
+  if (!quoteRecord) throw new Error(`Quote not found: ${quoteNo}.`);
+
+  const quotesMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
+  const ordersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+  const orderItemsMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDER_ITEMS, 'Order Items');
+  const customersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_CUSTOMERS, 'Customers');
+  if (!quotesMeta || !ordersMeta || !orderItemsMeta || !customersMeta) {
+    throw new Error('Required production Airtable table metadata is incomplete.');
+  }
+
+  const quote = toMaintenanceRecord(quotesMeta, quoteRecord);
+  const convertedMarkerNames = [
+    'Converted Order No',
+    'Converted Invoice No',
+    'Order Ref',
+    'Invoice Public Token',
+    'Converted At',
+  ];
+  const convertedMarkers = Object.fromEntries(
+    convertedMarkerNames.map(field => [field, quote.fields[field] ?? '']),
+  );
+
+  const initialTokens = new Set<string>([
+    quote.id,
+    quoteNo,
+    ...convertedMarkerNames.flatMap(field => {
+      const value = quote.fields[field];
+      return [
+        ...(Array.isArray(value) ? linkedRecordIds(value) : []),
+        ...(value !== undefined && value !== null && !Array.isArray(value) ? [String(value)] : []),
+      ];
+    }),
+  ].map(value => String(value).trim()).filter(Boolean));
+
+  const orderRecords = await base(ordersMeta.id).select().all();
+  const explicitOrderIds = new Set(linkedRecordIds(quote.fields['Order Ref']));
+  const matchedOrders = orderRecords
+    .filter(record => explicitOrderIds.has(record.id) || recordContainsMaintenanceToken(record, initialTokens))
+    .map(record => toMaintenanceRecord(ordersMeta, record));
+
+  const expandedTokens = new Set(initialTokens);
+  for (const order of matchedOrders) {
+    expandedTokens.add(order.id);
+    for (const field of ['Internal 1 Order No', 'Internal Order No', 'Invoice Number', 'Source Quote Ref']) {
+      const value = order.fields[field];
+      if (value !== undefined && value !== null && String(value).trim()) expandedTokens.add(String(value).trim());
+    }
+  }
+
+  const linkedCandidateTables = tables.filter(table => {
+    if ([quotesMeta.id, customersMeta.id, ordersMeta.id].includes(table.id)) return false;
+    if (table.id === orderItemsMeta.id) return true;
+    if (/receipt|delivery/i.test(table.name)) return true;
+    return table.fields.some(field =>
+      field.type === 'multipleRecordLinks'
+      && [quotesMeta.id, ordersMeta.id, orderItemsMeta.id].includes(String(field.options?.linkedTableId || ''))
+    );
+  });
+
+  const dependencies: QuoteDeletionSnapshot['dependencies'] = {
+    orders: matchedOrders,
+    orderItems: [],
+    receipts: [],
+    deliveries: [],
+    other: [],
+  };
+  const matchedDependencyTableIds = new Set<string>(matchedOrders.map(item => item.tableId));
+  for (const table of linkedCandidateTables) {
+    const records = await base(table.id).select().all();
+    const matches = records
+      .filter(record => recordContainsMaintenanceToken(record, expandedTokens))
+      .map(record => toMaintenanceRecord(table, record));
+    if (matches.length === 0) continue;
+    matchedDependencyTableIds.add(table.id);
+    if (table.id === orderItemsMeta.id) dependencies.orderItems.push(...matches);
+    else if (/receipt/i.test(table.name)) dependencies.receipts.push(...matches);
+    else if (/delivery/i.test(table.name)) dependencies.deliveries.push(...matches);
+    else dependencies.other.push(...matches);
+  }
+
+  const protectedNotDeleted: MaintenanceRecord[] = [];
+  for (const customerId of linkedRecordIds(quote.fields.Customer)) {
+    try {
+      const record = await tableCustomers.find(customerId);
+      protectedNotDeleted.push({
+        tableId: customersMeta.id,
+        tableName: customersMeta.name,
+        id: record.id,
+        fields: {
+          'Customer ID': record.fields['Customer ID'] ?? '',
+          'Customer Name': record.fields['Customer Name'] ?? '',
+          Phone: record.fields.Phone ?? '',
+        },
+      });
+    } catch {
+      protectedNotDeleted.push({
+        tableId: customersMeta.id,
+        tableName: customersMeta.name,
+        id: customerId,
+        fields: { note: 'Linked Customer record could not be read.' },
+      });
+    }
+  }
+
+  const relevantTableIds = new Set([
+    quotesMeta.id,
+    ordersMeta.id,
+    orderItemsMeta.id,
+    customersMeta.id,
+    ...matchedDependencyTableIds,
+  ]);
+  const schema = tables
+    .filter(table => relevantTableIds.has(table.id))
+    .map(table => ({
+      tableId: table.id,
+      tableName: table.name,
+      fields: table.fields.map(field => ({
+        name: field.name,
+        type: field.type,
+        ...(field.options?.linkedTableId ? { linkedTableId: field.options.linkedTableId } : {}),
+      })),
+    }));
+
+  return {
+    capturedAt: new Date().toISOString(),
+    quote,
+    schema,
+    convertedMarkers,
+    dependencies,
+    protectedNotDeleted,
   };
 };
 
@@ -1926,6 +2138,146 @@ app.post('/api/quote-pilot/lookup', requireQuotePilotApi, async (req: Request, r
     ));
   } catch (error: any) {
     return res.status(400).json({ error: error?.message || 'Unable to look up Quote.' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// API: Phase 2C.3 restricted production deletion
+// Preview is read-only and returns a signed lock over the exact record and all
+// discovered downstream dependencies. Confirm re-reads and compares that lock,
+// then deletes only the one Quotes record.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/production-maintenance/delete-preview', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    const snapshot = await buildQuoteDeletionSnapshot(req.body?.quoteNo);
+    const analysis = analyzeQuoteDeletion(snapshot);
+    const { confirmationSecret } = getQuotePilotSecrets();
+    const confirmationId = analysis.canDelete
+      ? issueDeleteConfirmation(snapshot, confirmationSecret)
+      : null;
+    return res.json({
+      operation: 'deleteQuote',
+      readOnly: true,
+      quote: {
+        quoteNo: analysis.quoteNo,
+        recordId: snapshot.quote.id,
+        status: analysis.status,
+        quoteDate: snapshot.quote.fields['Quote Date'] ?? null,
+        customer: snapshot.quote.fields['Customer Name'] ?? snapshot.quote.fields['Contact Name'] ?? null,
+        total: snapshot.quote.fields.Total ?? null,
+      },
+      convertedMarkers: snapshot.convertedMarkers,
+      dependencies: {
+        orders: snapshot.dependencies.orders.map(maintenanceRecordSummary),
+        orderItems: snapshot.dependencies.orderItems.map(maintenanceRecordSummary),
+        receipts: snapshot.dependencies.receipts.map(maintenanceRecordSummary),
+        deliveries: snapshot.dependencies.deliveries.map(maintenanceRecordSummary),
+        other: snapshot.dependencies.other.map(maintenanceRecordSummary),
+      },
+      protectedNotDeleted: snapshot.protectedNotDeleted.map(maintenanceRecordSummary),
+      schema: snapshot.schema.map(table => ({
+        table: table.tableName,
+        fields: table.fields.map(field => ({
+          name: field.name,
+          type: field.type,
+          ...(field.linkedTableId ? { linkedTableId: field.linkedTableId } : {}),
+        })),
+      })),
+      analysis,
+      confirmationId,
+      requiredConfirmation: analysis.canDelete ? requiredDeleteConfirmation(analysis.quoteNo) : null,
+      expiresInMinutes: analysis.canDelete ? 30 : null,
+      backup: snapshot,
+      productionWrite: false,
+      productionWriteCount: 0,
+    });
+  } catch (error: any) {
+    return res.status(400).json({ error: error?.message || 'Unable to inspect Quote dependencies.' });
+  }
+});
+
+app.post('/api/production-maintenance/delete-confirm', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    const confirmationId = String(req.body?.confirmationId || '').trim();
+    const confirmationText = String(req.body?.confirmationText || '').trim();
+    const { confirmationSecret } = getQuotePilotSecrets();
+    const locked = verifyDeleteConfirmation(confirmationId, confirmationSecret);
+    const required = requiredDeleteConfirmation(locked.quoteNo);
+    if (confirmationText !== required) {
+      return res.status(409).json({ error: `Deletion requires the exact confirmation text: ${required}` });
+    }
+
+    const currentRecord = await getQuoteByNumber(locked.quoteNo);
+    if (!currentRecord) {
+      return res.json({
+        operation: 'deleteQuote',
+        quoteNo: locked.quoteNo,
+        recordId: locked.recordId,
+        deleted: false,
+        alreadyAbsent: true,
+        idempotentReplay: true,
+        productionWrite: false,
+        productionWriteCount: 0,
+        audit: {
+          confirmationText,
+          after: { exists: false },
+        },
+      });
+    }
+
+    const currentSnapshot = await buildQuoteDeletionSnapshot(locked.quoteNo);
+    const currentAnalysis = analyzeQuoteDeletion(currentSnapshot);
+    if (currentSnapshot.quote.id !== locked.recordId) {
+      return res.status(409).json({ error: 'Quote record identity changed. Generate a new delete preview.' });
+    }
+    if (maintenanceSnapshotFingerprint(currentSnapshot) !== locked.snapshotFingerprint) {
+      return res.status(409).json({ error: 'Quote or dependency state changed. Generate a new delete preview.' });
+    }
+    if (!currentAnalysis.canDelete) {
+      return res.status(409).json({
+        error: 'Quote is no longer eligible for deletion.',
+        blockers: currentAnalysis.blockers,
+      });
+    }
+
+    const inFlightKey = crypto.createHash('sha256').update(confirmationId).digest('hex');
+    const existingInFlight = maintenanceDeleteInFlight.get(inFlightKey);
+    if (existingInFlight) return res.json(await existingInFlight);
+    const deletion = (async (): Promise<Record<string, unknown>> => {
+      await tableQuotes.destroy([locked.recordId]);
+      const afterRecord = await getQuoteByNumber(locked.quoteNo);
+      if (afterRecord) throw new Error('Quote still exists after deletion attempt.');
+      return {
+        operation: 'deleteQuote',
+        quoteNo: locked.quoteNo,
+        recordId: locked.recordId,
+        deleted: true,
+        alreadyAbsent: false,
+        idempotentReplay: false,
+        deletedTables: ['Quotes'],
+        protectedNotDeleted: currentAnalysis.willNotDelete,
+        productionWrite: true,
+        productionWriteCount: 1,
+        audit: {
+          confirmationText,
+          before: currentSnapshot,
+          after: {
+            verifiedAt: new Date().toISOString(),
+            exists: false,
+          },
+        },
+      };
+    })();
+    maintenanceDeleteInFlight.set(inFlightKey, deletion);
+    try {
+      return res.json(await deletion);
+    } finally {
+      maintenanceDeleteInFlight.delete(inFlightKey);
+    }
+  } catch (error: any) {
+    const message = error?.message || 'Unable to delete Quote.';
+    const status = /confirmation|expired|changed|eligible|identity/i.test(message) ? 409 : 500;
+    return res.status(status).json({ error: message });
   }
 });
 

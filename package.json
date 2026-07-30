@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "ts-node src/index.ts",
     "build": "tsc",
-    "test": "node --test -r ts-node/register src/quote-pilot.test.ts src/quote-lookup.test.ts src/quote-short.test.ts",
+    "test": "node --test -r ts-node/register src/quote-pilot.test.ts src/quote-lookup.test.ts src/quote-short.test.ts src/production-maintenance.test.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {
