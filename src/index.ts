@@ -1123,17 +1123,41 @@ const appendMutation = (
   });
 };
 
+const formalAccessoryName = (rawName: string): string => {
+  const name = String(rawName || '').trim();
+  const aliases: Record<string, string> = {
+    上燈: '獨立燈板 - 上燈',
+    下燈: '獨立燈板 - 下燈',
+    '獨立燈板-上燈': '獨立燈板 - 上燈',
+    '獨立燈板-下燈': '獨立燈板 - 下燈',
+    背鏡: '背板鏡面',
+    背圖: '背板圖片',
+    白色刻字: '前板白色刻字',
+    彩色刻字: '前板彩色刻字',
+  };
+  return aliases[name] || name;
+};
+
+const normalizeAccessoryMap = (value: Record<string, number>): Record<string, number> =>
+  Object.fromEntries(Object.entries(value).map(([name, qty]) => [formalAccessoryName(name), qty]));
+
 const accessoryMapFromStoredItem = (item: Record<string, unknown>): Record<string, number> => {
-  const values = Array.isArray(item.accessories) ? item.accessories : [];
+  const values = Array.isArray(item.accessories)
+    ? item.accessories
+    : Array.isArray(item.Accessories)
+      ? item.Accessories
+      : [];
   const fromList = Object.fromEntries(values.map(value => {
     const match = String(value).match(/^(.*?)\s+x(\d+)$/i);
-    return match ? [match[1].trim(), Number(match[2])] : [String(value), 1];
+    return match
+      ? [formalAccessoryName(match[1]), Number(match[2])]
+      : [formalAccessoryName(String(value)), 1];
   }));
   const fromQuantityMap = item.accessoryQty
     && typeof item.accessoryQty === 'object'
     && !Array.isArray(item.accessoryQty)
     ? Object.fromEntries(Object.entries(item.accessoryQty as Record<string, unknown>)
-      .map(([name, qty]) => [name, Number(qty) || 1]))
+      .map(([name, qty]) => [formalAccessoryName(name), Number(qty) || 1]))
     : {};
   return { ...fromList, ...fromQuantityMap };
 };
@@ -1157,7 +1181,9 @@ const calculatedItemFromStored = (
   quantity: changes.quantity ?? Number(item.qty ?? item.QTY ?? 1),
   levels: Number(item.noOfLevels ?? item['No. of Levels'] ?? 1),
   levelHeights: String(item.levelHeights ?? item['Level Heights'] ?? ''),
-  accessories: changes.accessories || accessoryMapFromStoredItem(item),
+  accessories: changes.accessories
+    ? normalizeAccessoryMap(changes.accessories)
+    : accessoryMapFromStoredItem(item),
   description: String(item.description ?? item.Description ?? ''),
   chinaFreight: changes.chinaFreight ?? Number(item.freight ?? item['Quoted China Freight HKD'] ?? 0),
   hongKongDelivery: changes.hongKongDelivery ?? Number(item.hongKongDelivery ?? item['Quoted Local Delivery HKD'] ?? 0),
@@ -1456,16 +1482,44 @@ const buildOrderItemMutation = async (
     throw new Error(`Exact Order Item was not found. Available items: ${candidates.join(', ') || 'none'}.`);
   }
   const calculated = calculatedItemFromStored(selected.fields as Record<string, unknown>, changes);
-  const after: Record<string, unknown> = {
-    'Inter L': calculated.interL,
-    'Inter D': calculated.interD,
-    'Inter H': calculated.interH,
-    'Outer L': calculated.outerL,
-    'Outer D': calculated.outerD,
-    'Outer H': calculated.outerH,
-    QTY: calculated.qty,
-    Accessories: calculated.accessories,
-  };
+  const after: Record<string, unknown> = {};
+  if (changes.innerDimensions) {
+    after['Inter L'] = calculated.interL;
+    after['Inter D'] = calculated.interD;
+    after['Inter H'] = calculated.interH;
+  }
+  if (changes.innerDimensions || changes.accessories) {
+    after['Outer L'] = calculated.outerL;
+    after['Outer D'] = calculated.outerD;
+    after['Outer H'] = calculated.outerH;
+  }
+  if (changes.quantity !== undefined) after.QTY = calculated.qty;
+  if (changes.accessories) {
+    const options = fieldChoices(requireMetadataField(orderItemsMeta, 'Order Items', 'Accessories', 'multipleSelects'));
+    const optionAliases: Record<string, string[]> = {
+      '獨立燈板 - 上燈': ['獨立燈板 - 上燈', '上燈'],
+      '獨立燈板 - 下燈': ['獨立燈板 - 下燈', '下燈'],
+      '獨立燈板 - 上下燈': ['獨立燈板 - 上下燈', '上下燈'],
+      背板鏡面: ['背板鏡面', '背鏡'],
+      背板圖片: ['背板圖片', '背圖'],
+      前板白色刻字: ['前板白色刻字', '白色刻字'],
+      前板彩色刻字: ['前板彩色刻字', '彩色刻字'],
+    };
+    after.Accessories = Object.entries(calculated.accessoryQty).map(([formalName, qty]) => {
+      const candidates = optionAliases[formalName] || [formalName];
+      const exactCandidates = qty > 1
+        ? candidates.flatMap(candidate => [`${candidate} x${qty}`, candidate])
+        : candidates;
+      const existing = exactCandidates.find(candidate => options.includes(candidate));
+      if (!existing) {
+        throw new Error(`Order Items accessory is not an existing production option: ${formalName}.`);
+      }
+      if (qty > 1 && !existing.toLocaleLowerCase().endsWith(`x${qty}`)) {
+        throw new Error(`Production has no existing quantity-${qty} option for accessory: ${formalName}.`);
+      }
+      return existing;
+    });
+  }
   if (changes.pricingMode === 'reprice') {
     after['Product Amount'] = calculated.amount;
     after['Quoted China Freight HKD'] = calculated.freight;
@@ -1479,14 +1533,6 @@ const buildOrderItemMutation = async (
         ? ['number', 'currency']
         : ['singleLineText', 'multilineText'];
     assertExistingWritableField(orderItemsMeta, field, allowed);
-  }
-  if (changes.accessories) {
-    const options = fieldChoices(requireMetadataField(orderItemsMeta, 'Order Items', 'Accessories', 'multipleSelects'));
-    for (const accessory of calculated.accessories) {
-      if (!options.includes(accessory)) {
-        throw new Error(`Order Items accessory is not an existing production option: ${accessory}.`);
-      }
-    }
   }
   appendMutation(
     mutations,
@@ -1512,7 +1558,10 @@ const buildOrderItemMutation = async (
     labelMayReflectChange: true,
     deliveryMayReflectChange: true,
     notes: changes.pricingMode === 'specOnly'
-      ? ['Only Order Item specification fields change; confirmed prices remain untouched.']
+      ? [
+        `Resolved ${changes.itemNo || `itemIndex ${changes.itemIndex || 1}`} to linked Order Item ${String(selected.fields['Item No'] || selected.id)}.`,
+        'Only explicitly requested Order Item specification fields change; confirmed prices remain untouched.',
+      ]
       : ['Order Item and Order Product Amount are repriced through the current Quote v4.6 calculator.'],
   };
 };
