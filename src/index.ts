@@ -1124,15 +1124,18 @@ const appendMutation = (
 };
 
 const accessoryMapFromStoredItem = (item: Record<string, unknown>): Record<string, number> => {
-  if (item.accessoryQty && typeof item.accessoryQty === 'object' && !Array.isArray(item.accessoryQty)) {
-    return Object.fromEntries(Object.entries(item.accessoryQty as Record<string, unknown>)
-      .map(([name, qty]) => [name, Number(qty) || 1]));
-  }
   const values = Array.isArray(item.accessories) ? item.accessories : [];
-  return Object.fromEntries(values.map(value => {
+  const fromList = Object.fromEntries(values.map(value => {
     const match = String(value).match(/^(.*?)\s+x(\d+)$/i);
     return match ? [match[1].trim(), Number(match[2])] : [String(value), 1];
   }));
+  const fromQuantityMap = item.accessoryQty
+    && typeof item.accessoryQty === 'object'
+    && !Array.isArray(item.accessoryQty)
+    ? Object.fromEntries(Object.entries(item.accessoryQty as Record<string, unknown>)
+      .map(([name, qty]) => [name, Number(qty) || 1]))
+    : {};
+  return { ...fromList, ...fromQuantityMap };
 };
 
 const calculatedItemFromStored = (
@@ -1342,7 +1345,33 @@ const buildQuoteItemMutation = (
   }
   const current = items[itemIndex - 1];
   const calculated = calculatedItemFromStored(current, changes);
-  items[itemIndex - 1] = calculated as unknown as Record<string, unknown>;
+  items[itemIndex - 1] = {
+    ...current,
+    itemType: calculated.itemType,
+    forWhat: calculated.forWhat,
+    interL: calculated.interL,
+    interD: calculated.interD,
+    interH: calculated.interH,
+    outerL: calculated.outerL,
+    outerD: calculated.outerD,
+    outerH: calculated.outerH,
+    noOfLevels: calculated.noOfLevels,
+    levelHeights: calculated.levelHeights,
+    accessories: calculated.accessories,
+    accessoryQty: calculated.accessoryQty,
+    description: calculated.description,
+    qty: calculated.qty,
+    freight: calculated.freight,
+    hongKongDelivery: calculated.hongKongDelivery,
+    deliveryCostReserve: calculated.hongKongDelivery,
+    profit: calculated.profit,
+    estimatedPackageUnits: calculated.estimatedPackageUnits,
+    amount: calculated.amount,
+    // Preserve existing workflow flags/notes unless a separate approved
+    // feature explicitly changes them.
+    localDeliveryOverride: current.localDeliveryOverride ?? calculated.localDeliveryOverride,
+    localDeliveryNotes: current.localDeliveryNotes ?? calculated.localDeliveryNotes,
+  };
   const subtotal = Math.round(items.reduce((sum, item) => sum + Number(item.amount || 0), 0) * 100) / 100;
   const discountValue = Math.round(quoteDiscountValue(target.record.fields, subtotal) * 100) / 100;
   const total = Math.max(0, Math.ceil(subtotal - discountValue));
