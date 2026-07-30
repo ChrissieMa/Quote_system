@@ -2,6 +2,16 @@ import express, { Request, Response } from 'express';
 import Airtable, { FieldSet } from 'airtable';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import {
+  buildPilotPreview,
+  idempotencyPublicToken,
+  issueConfirmationId,
+  PILOT_CONFIRMATION_TEXT,
+  toCreateQuoteBody,
+  verifyConfirmationId,
+  type PilotQuoteInput,
+  type PilotOffer,
+} from './quote-pilot';
 
 dotenv.config();
 
@@ -11,6 +21,8 @@ app.use(express.urlencoded({ extended: true }));
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
+const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 
@@ -172,6 +184,104 @@ const safeEqual = (left: string, right: string): boolean => {
   const a = Buffer.from(left);
   const b = Buffer.from(right);
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+};
+
+const getQuotePilotSecrets = () => ({
+  apiKey: String(process.env.QUOTE_PILOT_API_KEY || '').trim(),
+  confirmationSecret: String(process.env.QUOTE_PILOT_CONFIRMATION_SECRET || '').trim(),
+});
+
+const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => {
+  const { apiKey, confirmationSecret } = getQuotePilotSecrets();
+  if (!apiKey || !confirmationSecret) {
+    return res.status(503).json({ error: 'Quote Pilot is not configured.' });
+  }
+  const auth = String(req.headers.authorization || '');
+  const supplied = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
+  if (!supplied || !safeEqual(supplied, apiKey)) return res.status(401).json({ error: 'Unauthorized.' });
+  return next();
+};
+
+const buildAuthoritativeQuoteBody = (rawBody: any): any => {
+  const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
+  const promotionType = String(rawBody?.promotionType || '').trim();
+  const supportedPromotions = new Set(['ToyTV 專屬優惠', '首次落單優惠', '新客戶免運費', '現貨優惠']);
+  let offer: PilotOffer = { kind: 'none' };
+  if (supportedPromotions.has(promotionType)) {
+    offer = { kind: 'promotion', promotionType: promotionType as Extract<PilotOffer, { kind: 'promotion' }>['promotionType'] };
+  } else if (String(rawBody?.discountType || '') === '百分比折扣') {
+    offer = {
+      kind: 'percentage',
+      multiplier: Number(rawBody?.discountMultiplier),
+      reason: String(rawBody?.discountReason || '').trim(),
+    };
+  } else if (String(rawBody?.discountType || '') === '指定金額扣減') {
+    offer = {
+      kind: 'fixed',
+      amountHkd: Number(rawBody?.discountAmountHkd || 0),
+      reason: String(rawBody?.discountReason || '').trim(),
+    };
+  }
+  const input: PilotQuoteInput = {
+    customer: String(rawBody?.contactName || 'Create Quote'),
+    phone: String(rawBody?.phone || 'not-provided'),
+    contactMethod: rawBody?.contactMethod,
+    deliveryOfferReason: String(rawBody?.deliveryOfferReason || '').trim(),
+    offer,
+    items: rawItems.map((item: any) => {
+      const accessoryQty: Record<string, number> = {};
+      if (item?.accessoryQty && typeof item.accessoryQty === 'object') {
+        for (const [name, qty] of Object.entries(item.accessoryQty)) accessoryQty[name] = Number(qty);
+      }
+      for (const entry of Array.isArray(item?.accessories) ? item.accessories : []) {
+        const text = String(entry || '').trim();
+        const match = text.match(/^(.*?)\s+x(\d+)$/);
+        if (match) accessoryQty[match[1]] = Number(match[2]);
+        else if (text) accessoryQty[text] = 1;
+      }
+      const itemType = String(item?.itemType || '') as PilotQuoteInput['items'][number]['itemType'];
+      const outerDimensions = itemType.includes('Display Case') ? {
+        length: Number(item?.outerL),
+        depth: Number(item?.outerD),
+        height: Number(item?.outerH),
+      } : undefined;
+      return {
+        itemType,
+        forWhat: String(item?.forWhat || ''),
+        innerDimensions: {
+          length: Number(item?.interL),
+          depth: Number(item?.interD),
+          height: Number(item?.interH),
+        },
+        outerDimensions,
+        quantity: Number(item?.qty || 1),
+        levels: item?.noOfLevels ? Number(item.noOfLevels) : undefined,
+        levelHeights: String(item?.levelHeights || ''),
+        accessories: accessoryQty,
+        description: String(item?.description || ''),
+        chinaFreight: Number(item?.freight || 0),
+        hongKongDelivery: Number(item?.hongKongDelivery ?? item?.deliveryCostReserve ?? item?.localDelivery ?? 0),
+        profit: Number(item?.profit || 0),
+      };
+    }),
+  };
+  const preview = buildPilotPreview(input);
+  return {
+    ...rawBody,
+    items: preview.items,
+    subtotal: preview.subtotal,
+    total: preview.finalTotal,
+    promotionType: preview.promotionType,
+    discountType: preview.discountType,
+    discountMultiplier: preview.discountMultiplier ?? '',
+    discountAmountHkd: preview.discountAmountHkd,
+    discountReason: preview.discountReason,
+    discountValueHkd: preview.discountValueHkd,
+    discountDisplayText: preview.discountDisplayText,
+    deliveryChargeMode: preview.deliveryChargeMode,
+    deliveryOfferReason: preview.deliveryOfferReason,
+    deliveryDisplayText: preview.deliveryDisplayText,
+  };
 };
 
 const requireAdmin = (req: Request, res: Response, next: () => void) => {
@@ -1499,6 +1609,100 @@ app.get('/api/customers/search', async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error(error);
     res.status(500).json({ error: error.message || 'Customer search failed' });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// API: Natural-language Quote Write Pilot
+// Two-step, server-authenticated and fail-closed:
+//   1) preview signs the exact calculated payload
+//   2) create accepts only that signed payload plus the exact confirmation text
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/quote-pilot/preview', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    const input = req.body as PilotQuoteInput;
+    const preview = buildPilotPreview(input);
+    const { confirmationSecret } = getQuotePilotSecrets();
+    const confirmationId = issueConfirmationId(input, confirmationSecret);
+    return res.json({
+      preview,
+      confirmationId,
+      requiredConfirmation: PILOT_CONFIRMATION_TEXT,
+      expiresInMinutes: 120,
+      dryRun: true,
+    });
+  } catch (error: any) {
+    return res.status(400).json({ error: error?.message || 'Unable to preview quote.' });
+  }
+});
+
+app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    const confirmationId = String(req.body?.confirmationId || '').trim();
+    const confirmationText = String(req.body?.confirmationText || '').trim();
+    if (confirmationText !== PILOT_CONFIRMATION_TEXT) {
+      return res.status(409).json({ error: `Creation requires the exact confirmation text: ${PILOT_CONFIRMATION_TEXT}` });
+    }
+    const { confirmationSecret } = getQuotePilotSecrets();
+    const { input, preview } = verifyConfirmationId(confirmationId, confirmationSecret);
+    const publicToken = idempotencyPublicToken(confirmationId, confirmationSecret);
+
+    const existing = await tableQuotes.select({
+      filterByFormula: `{Public Token} = '${publicToken}'`,
+      maxRecords: 1,
+    }).firstPage();
+    if (existing.length > 0) {
+      const fields = existing[0].fields;
+      return res.json({
+        quoteNumber: String(fields['Quote Number'] || ''),
+        total: Number(fields['Total'] || preview.finalTotal),
+        shareView: `${PUBLIC_BASE_URL}/quote/${publicToken}`,
+        idempotentReplay: true,
+      });
+    }
+
+    const existingInFlight = pilotCreateInFlight.get(publicToken);
+    if (existingInFlight) return res.json(await existingInFlight);
+
+    const creation = (async (): Promise<Record<string, unknown>> => {
+      const body: Record<string, unknown> = {
+        ...toCreateQuoteBody(input, preview),
+        notes: DEFAULT_QUOTE_NOTES,
+        terms: DEFAULT_TERMS,
+        __pilotPublicToken: publicToken,
+      };
+      const officialCustomer = await findCustomerByPhone(preview.phone);
+      if (officialCustomer) {
+        body.customerRecordId = officialCustomer.id;
+        body.customerSource = 'customers';
+      }
+      const internalResponse = await fetch(`http://127.0.0.1:${PORT}/quote/create`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-LKS-Quote-Pilot-Internal': PILOT_INTERNAL_TOKEN,
+        },
+        body: JSON.stringify(body),
+      });
+      const result = await internalResponse.json() as Record<string, unknown>;
+      if (!internalResponse.ok) throw new Error(String(result.error || 'Create Quote flow failed.'));
+      return {
+        quoteNumber: result.quoteNumber,
+        total: result.total,
+        shareView: result.publicLink,
+        idempotentReplay: false,
+      };
+    })();
+    pilotCreateInFlight.set(publicToken, creation);
+    try {
+      return res.json(await creation);
+    } finally {
+      pilotCreateInFlight.delete(publicToken);
+    }
+  } catch (error: any) {
+    const message = error?.message || 'Unable to create quote.';
+    const status = /expired|confirmation|Invalid/i.test(message) ? 409 : 500;
+    return res.status(status).json({ error: message });
   }
 });
 
@@ -2845,7 +3049,11 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/quote/create', async (req: Request, res: Response) => {
   try {
-    const b = req.body;
+    // Both the existing Create Quote UI and the Natural-language Pilot pass
+    // through this single authoritative v4.6 calculator before any write.
+    const b = buildAuthoritativeQuoteBody(req.body);
+    const internalPilotHeader = String(req.headers['x-lks-quote-pilot-internal'] || '');
+    const isPilotInternal = internalPilotHeader.length > 0 && safeEqual(internalPilotHeader, PILOT_INTERNAL_TOKEN);
 
     // Body is JSON from fetch — items is already a clean array
     let items: any[] = Array.isArray(b.items) ? b.items : [];
@@ -2937,7 +3145,11 @@ app.post('/quote/create', async (req: Request, res: Response) => {
       : deliveryChargeMode));
 
     const quoteNumber = await getNextNumber(tableQuotes, 'Quote Number', 'QT');
-    const publicToken = generateToken();
+    const requestedPilotToken = isPilotInternal ? String(b.__pilotPublicToken || '').trim() : '';
+    if (requestedPilotToken && !/^[a-f0-9]{32}$/.test(requestedPilotToken)) {
+      throw new Error('Invalid internal Quote Pilot public token.');
+    }
+    const publicToken = requestedPilotToken || generateToken();
     const quoteDate = new Date().toISOString().split('T')[0];
 
     let selectedCustomerId = String(b.customerRecordId || '').trim();
@@ -3056,6 +3268,15 @@ app.post('/quote/create', async (req: Request, res: Response) => {
 
     const publicLink = `${PUBLIC_BASE_URL}/quote/${publicToken}`;
     const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${publicToken}/customer-info`;
+
+    if (isPilotInternal) {
+      return res.json({
+        quoteNumber,
+        total,
+        publicLink,
+        customerInfoLink,
+      });
+    }
 
     res.send(renderPage('Quote Created', `
       <div class="doc-card">
