@@ -1358,7 +1358,9 @@ const buildQuoteItemMutation = (
     noOfLevels: calculated.noOfLevels,
     levelHeights: calculated.levelHeights,
     accessories: calculated.accessories,
-    accessoryQty: calculated.accessoryQty,
+    accessoryQty: changes.accessories
+      ? calculated.accessoryQty
+      : (current.accessoryQty ?? calculated.accessoryQty),
     description: calculated.description,
     qty: calculated.qty,
     freight: calculated.freight,
