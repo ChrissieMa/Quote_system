@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import {
   buildPilotPreview,
+  calculatePilotItem,
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
@@ -34,6 +35,15 @@ import {
   type MaintenanceRecord,
   type QuoteDeletionSnapshot,
 } from './production-maintenance';
+import {
+  issueMutationConfirmation,
+  makeMutationPlan,
+  mutationFieldsMatch,
+  mutationPlanFingerprint,
+  verifyMutationConfirmation,
+  type ProductionMutationPlan,
+  type ProductionMutationRecord,
+} from './production-mutation';
 
 dotenv.config();
 
@@ -46,6 +56,9 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
+const maintenanceMutationPlans = new Map<string, ProductionMutationPlan>();
+const maintenanceMutationCompleted = new Map<string, Record<string, unknown>>();
+const maintenanceMutationInFlight = new Map<string, Promise<Record<string, unknown>>>();
 
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 
@@ -923,6 +936,752 @@ const buildQuoteDeletionSnapshot = async (rawQuoteNo: unknown): Promise<QuoteDel
     dependencies,
     protectedNotDeleted,
   };
+};
+
+type ProductionEditTarget =
+  | { type: 'quote'; quoteNo: string }
+  | { type: 'order'; orderNo: string }
+  | { type: 'customer'; phone?: string; customer?: string; customerRecordId?: string };
+
+type ProductionContactChanges = {
+  name?: string;
+  phone?: string;
+  email?: string;
+  address?: string;
+  syncLinked?: boolean;
+};
+
+type ProductionItemChanges = {
+  itemIndex?: number;
+  itemNo?: string;
+  innerDimensions?: { length: number; depth: number; height: number };
+  quantity?: number;
+  accessories?: Record<string, number>;
+  chinaFreight?: number;
+  hongKongDelivery?: number;
+  profit?: number;
+  pricingMode?: 'specOnly' | 'reprice';
+};
+
+type ProductionEditRequest = {
+  target: ProductionEditTarget;
+  contact?: ProductionContactChanges;
+  item?: ProductionItemChanges;
+};
+
+type ResolvedProductionTarget = {
+  type: 'quote' | 'order' | 'customer';
+  identifier: string;
+  meta: AirtableMetadataTable;
+  record: any;
+  tables: AirtableMetadataTable[];
+};
+
+const cloneFieldValue = (value: unknown): unknown =>
+  value === undefined ? null : JSON.parse(JSON.stringify(value));
+
+const pickMutationFields = (fields: FieldSet, names: string[]): Record<string, unknown> =>
+  Object.fromEntries(names.map(name => [name, cloneFieldValue(fields[name])]));
+
+const assertExistingWritableField = (
+  table: AirtableMetadataTable,
+  fieldName: string,
+  allowedTypes: string[],
+): void => {
+  const field = requireMetadataField(table, table.name, fieldName);
+  if (!allowedTypes.includes(field.type)) {
+    throw new Error(`${table.name}.${fieldName} is ${field.type} and is not writable by this assistant.`);
+  }
+};
+
+const getOrderByNumber = async (rawOrderNo: unknown) => {
+  const orderNo = String(rawOrderNo || '').trim();
+  if (!orderNo || orderNo.length > 80) throw new Error('An exact Order No is required.');
+  const records = await tableOrders.select({
+    fields: ['Internal 1 Order No', 'Internal Order No', 'Invoice Number', 'Status', 'Customer', 'Source Quote Ref', 'Product Amount'],
+  }).all();
+  const matches = records.filter(record =>
+    ['Internal 1 Order No', 'Internal Order No', 'Invoice Number']
+      .some(field => String(record.fields[field] || '').trim().toLocaleUpperCase() === orderNo.toLocaleUpperCase())
+  );
+  if (matches.length > 1) throw new Error(`Order identifier is not unique: ${orderNo}.`);
+  return matches[0] || null;
+};
+
+const resolveProductionTarget = async (
+  rawTarget: unknown,
+): Promise<ResolvedProductionTarget | { selectionRequired: true; candidates: unknown[] }> => {
+  const target = rawTarget && typeof rawTarget === 'object'
+    ? rawTarget as Record<string, unknown>
+    : {};
+  const type = String(target.type || '');
+  const tables = await getAirtableMetadataTables();
+  const quotesMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
+  const ordersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+  const customersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_CUSTOMERS, 'Customers');
+  if (!quotesMeta || !ordersMeta || !customersMeta) {
+    throw new Error('Required production Airtable metadata is incomplete.');
+  }
+  if (type === 'quote') {
+    const quoteNo = String(target.quoteNo || '').trim().toLocaleUpperCase();
+    if (!/^QT-\d{4}-\d{4,}$/.test(quoteNo)) throw new Error('An exact Quote No is required.');
+    const record = await getQuoteByNumber(quoteNo);
+    if (!record) throw new Error(`Quote not found: ${quoteNo}.`);
+    return { type, identifier: quoteNo, meta: quotesMeta, record, tables };
+  }
+  if (type === 'order') {
+    const record = await getOrderByNumber(target.orderNo);
+    if (!record) throw new Error(`Order not found: ${String(target.orderNo || '').trim()}.`);
+    const identifier = String(
+      record.fields['Internal 1 Order No']
+      || record.fields['Internal Order No']
+      || record.fields['Invoice Number']
+      || target.orderNo
+    ).trim();
+    return { type, identifier, meta: ordersMeta, record, tables };
+  }
+  if (type === 'customer') {
+    const customerRecordId = String(target.customerRecordId || '').trim();
+    const phone = normalizePhone(target.phone);
+    const name = String(target.customer || '').trim().toLocaleLowerCase();
+    const supplied = [customerRecordId, phone, name].filter(Boolean);
+    if (supplied.length !== 1) {
+      throw new Error('Customer lookup requires exactly one selected record, phone, or customer name.');
+    }
+    if (customerRecordId) {
+      const record = await tableCustomers.find(customerRecordId);
+      return {
+        type,
+        identifier: String(record.fields['Customer ID'] || record.fields['Customer Name'] || record.id),
+        meta: customersMeta,
+        record,
+        tables,
+      };
+    }
+    const records = await tableCustomers.select({
+      fields: ['Customer ID', 'Customer Name', 'Phone', 'Email', 'Address'],
+    }).all();
+    const matches = records.filter(record => phone
+      ? normalizePhone(record.fields.Phone) === phone
+      : String(record.fields['Customer Name'] || '').trim().toLocaleLowerCase().includes(name)
+    );
+    if (matches.length !== 1) {
+      return {
+        selectionRequired: true,
+        candidates: matches.slice(0, 20).map(record => ({
+          customerRecordId: record.id,
+          customerId: record.fields['Customer ID'] || null,
+          customer: record.fields['Customer Name'] || null,
+          phone: record.fields.Phone || null,
+        })),
+      };
+    }
+    const record = matches[0];
+    return {
+      type,
+      identifier: String(record.fields['Customer ID'] || record.fields['Customer Name'] || record.id),
+      meta: customersMeta,
+      record,
+      tables,
+    };
+  }
+  throw new Error('Target type must be quote, order, or customer.');
+};
+
+const appendMutation = (
+  mutations: ProductionMutationRecord[],
+  table: AirtableMetadataTable,
+  record: any,
+  identifier: string,
+  after: Record<string, unknown>,
+): void => {
+  const fields = Object.keys(after);
+  if (!fields.length) return;
+  const before = pickMutationFields(record.fields, fields);
+  const changedAfter = Object.fromEntries(Object.entries(after).filter(([field, value]) =>
+    JSON.stringify(before[field] ?? null) !== JSON.stringify(value ?? null)
+  ));
+  if (!Object.keys(changedAfter).length) return;
+  const existing = mutations.find(mutation =>
+    mutation.tableId === table.id && mutation.recordId === record.id
+  );
+  if (existing) {
+    existing.before = {
+      ...existing.before,
+      ...pickMutationFields(record.fields, Object.keys(changedAfter)),
+    };
+    existing.after = { ...existing.after, ...changedAfter };
+    return;
+  }
+  mutations.push({
+    tableId: table.id,
+    tableName: table.name,
+    recordId: record.id,
+    identifier,
+    before: pickMutationFields(record.fields, Object.keys(changedAfter)),
+    after: changedAfter,
+  });
+};
+
+const accessoryMapFromStoredItem = (item: Record<string, unknown>): Record<string, number> => {
+  if (item.accessoryQty && typeof item.accessoryQty === 'object' && !Array.isArray(item.accessoryQty)) {
+    return Object.fromEntries(Object.entries(item.accessoryQty as Record<string, unknown>)
+      .map(([name, qty]) => [name, Number(qty) || 1]));
+  }
+  const values = Array.isArray(item.accessories) ? item.accessories : [];
+  return Object.fromEntries(values.map(value => {
+    const match = String(value).match(/^(.*?)\s+x(\d+)$/i);
+    return match ? [match[1].trim(), Number(match[2])] : [String(value), 1];
+  }));
+};
+
+const calculatedItemFromStored = (
+  item: Record<string, unknown>,
+  changes: ProductionItemChanges,
+) => calculatePilotItem({
+  itemType: String(item.itemType || item['Item Type'] || '') as any,
+  forWhat: String(item.forWhat || item['For What'] || ''),
+  innerDimensions: changes.innerDimensions || {
+    length: Number(item.interL ?? item['Inter L']),
+    depth: Number(item.interD ?? item['Inter D']),
+    height: Number(item.interH ?? item['Inter H']),
+  },
+  outerDimensions: {
+    length: Number(item.outerL ?? item['Outer L']),
+    depth: Number(item.outerD ?? item['Outer D']),
+    height: Number(item.outerH ?? item['Outer H']),
+  },
+  quantity: changes.quantity ?? Number(item.qty ?? item.QTY ?? 1),
+  levels: Number(item.noOfLevels ?? item['No. of Levels'] ?? 1),
+  levelHeights: String(item.levelHeights ?? item['Level Heights'] ?? ''),
+  accessories: changes.accessories || accessoryMapFromStoredItem(item),
+  description: String(item.description ?? item.Description ?? ''),
+  chinaFreight: changes.chinaFreight ?? Number(item.freight ?? item['Quoted China Freight HKD'] ?? 0),
+  hongKongDelivery: changes.hongKongDelivery ?? Number(item.hongKongDelivery ?? item['Quoted Local Delivery HKD'] ?? 0),
+  profit: changes.profit ?? Number(item.profit ?? item['Quoted Profit HKD'] ?? 0),
+});
+
+const quoteDescriptionSummary = (items: Array<Record<string, unknown>>): string =>
+  items.map(item => [
+    item.itemType,
+    item.forWhat,
+    item.description,
+    item.interL && item.interD && item.interH ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}` : '',
+    item.outerL && item.outerD && item.outerH ? `外尺寸 ${item.outerL}*${item.outerD}*${item.outerH}` : '',
+    item.accessories ? `配件 ${(item.accessories as unknown[]).join(', ')}` : '',
+    item.qty ? `QTY ${item.qty}` : '',
+    item.freight ? `內地運費 $${item.freight}` : '',
+    item.hongKongDelivery ? `香港運費 $${item.hongKongDelivery}` : '',
+    item.profit ? `利潤 $${item.profit}` : '',
+    item.amount ? `$${item.amount}` : '',
+  ].filter(Boolean).join(' | ')).join('\n');
+
+const quoteDiscountValue = (fields: FieldSet, subtotal: number): number => {
+  const type = String(fields['Discount Type'] || '');
+  if (type === '百分比折扣') {
+    const multiplier = Number(fields['Discount Multiplier']);
+    return Number.isFinite(multiplier) ? Math.max(0, subtotal * (1 - multiplier)) : 0;
+  }
+  if (type === '指定金額扣減') {
+    return Math.max(0, Math.min(Number(fields['Discount Amount HKD']) || 0, subtotal));
+  }
+  return 0;
+};
+
+const findRelatedDeliveries = async (
+  tables: AirtableMetadataTable[],
+  tokens: Set<string>,
+): Promise<Array<{ meta: AirtableMetadataTable; record: any; addressFields: string[] }>> => {
+  const deliveryTables = tables.filter(table => /delivery/i.test(table.name));
+  const results: Array<{ meta: AirtableMetadataTable; record: any; addressFields: string[] }> = [];
+  for (const meta of deliveryTables) {
+    const addressFields = meta.fields
+      .filter(field => /address|地址|location/i.test(field.name)
+        && ['singleLineText', 'multilineText'].includes(field.type))
+      .map(field => field.name);
+    const records = await base(meta.id).select().all();
+    for (const record of records.filter(item => recordContainsMaintenanceToken(item, tokens))) {
+      results.push({ meta, record, addressFields });
+    }
+  }
+  return results;
+};
+
+const buildContactMutations = async (
+  target: ResolvedProductionTarget,
+  contact: ProductionContactChanges,
+  mutations: ProductionMutationRecord[],
+  notes: string[],
+): Promise<void> => {
+  const supplied = Object.entries(contact).filter(([key, value]) => key !== 'syncLinked' && value !== undefined);
+  if (!supplied.length) return;
+  const allowedTypes = ['singleLineText', 'multilineText', 'phoneNumber', 'email'];
+  const quoteMeta = findMetadataTable(target.tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes')!;
+  const customerMeta = findMetadataTable(target.tables, process.env.AIRTABLE_TABLE_CUSTOMERS, 'Customers')!;
+  let linkedCustomer: any | null = null;
+  const customerId = target.type === 'customer'
+    ? target.record.id
+    : getLinkedRecordId(target.record.fields.Customer);
+  if (customerId) {
+    try { linkedCustomer = await tableCustomers.find(customerId); } catch { linkedCustomer = null; }
+  }
+
+  const quoteAfter: Record<string, unknown> = {};
+  if (target.type === 'quote') {
+    if (contact.name !== undefined) {
+      assertExistingWritableField(quoteMeta, 'Contact Name', allowedTypes);
+      assertExistingWritableField(quoteMeta, 'Customer Name', allowedTypes);
+      quoteAfter['Contact Name'] = contact.name.trim();
+      quoteAfter['Customer Name'] = contact.name.trim();
+    }
+    if (contact.phone !== undefined) {
+      assertExistingWritableField(quoteMeta, 'Phone', allowedTypes);
+      assertExistingWritableField(quoteMeta, 'Customer Phone', allowedTypes);
+      quoteAfter.Phone = contact.phone.trim();
+      quoteAfter['Customer Phone'] = contact.phone.trim();
+    }
+    if (contact.email !== undefined) {
+      assertExistingWritableField(quoteMeta, 'Customer Email', allowedTypes);
+      quoteAfter['Customer Email'] = contact.email.trim();
+    }
+    if (contact.address !== undefined) {
+      assertExistingWritableField(quoteMeta, 'Chinese Delivery Address', allowedTypes);
+      quoteAfter['Chinese Delivery Address'] = contact.address.trim();
+    }
+    appendMutation(mutations, quoteMeta, target.record, target.identifier, quoteAfter);
+  }
+
+  if (target.type === 'customer') linkedCustomer = target.record;
+  if ((target.type === 'customer' || contact.syncLinked) && linkedCustomer) {
+    const customerAfter: Record<string, unknown> = {};
+    const mapping: Array<[keyof ProductionContactChanges, string]> = [
+      ['name', 'Customer Name'],
+      ['phone', 'Phone'],
+      ['email', 'Email'],
+      ['address', 'Address'],
+    ];
+    for (const [input, field] of mapping) {
+      if (contact[input] === undefined) continue;
+      assertExistingWritableField(customerMeta, field, allowedTypes);
+      customerAfter[field] = String(contact[input]).trim();
+    }
+    appendMutation(mutations, customerMeta, linkedCustomer, String(linkedCustomer.fields['Customer ID'] || linkedCustomer.id), customerAfter);
+  } else if (target.type !== 'quote' || linkedCustomer) {
+    notes.push('Linked Customer snapshot was inspected but is not changed unless syncLinked is explicitly true.');
+  }
+
+  if (contact.syncLinked && linkedCustomer) {
+    const linkedQuotes = await tableQuotes.select().all();
+    for (const quote of linkedQuotes.filter(record =>
+      linkedRecordIds(record.fields.Customer).includes(linkedCustomer.id)
+      && !(target.type === 'quote' && record.id === target.record.id)
+    )) {
+      const after: Record<string, unknown> = {};
+      if (contact.name !== undefined) {
+        after['Contact Name'] = contact.name.trim();
+        after['Customer Name'] = contact.name.trim();
+      }
+      if (contact.phone !== undefined) {
+        after.Phone = contact.phone.trim();
+        after['Customer Phone'] = contact.phone.trim();
+      }
+      if (contact.email !== undefined) after['Customer Email'] = contact.email.trim();
+      if (contact.address !== undefined) after['Chinese Delivery Address'] = contact.address.trim();
+      for (const field of Object.keys(after)) {
+        assertExistingWritableField(quoteMeta, field, allowedTypes);
+      }
+      appendMutation(
+        mutations,
+        quoteMeta,
+        quote,
+        String(quote.fields['Quote Number'] || quote.id),
+        after,
+      );
+    }
+    notes.push('Linked Order customer fields are Airtable lookups; they follow the Customer record without direct writes.');
+  }
+
+  const tokens = new Set<string>([
+    target.record.id,
+    target.identifier,
+    ...(customerId ? [customerId] : []),
+  ]);
+  const deliveries = await findRelatedDeliveries(target.tables, tokens);
+  if (deliveries.length) {
+    notes.push(`Found ${deliveries.length} linked Delivery record(s) with address-capable fields.`);
+  }
+  if (contact.address !== undefined && contact.syncLinked) {
+    for (const delivery of deliveries) {
+      if (!delivery.addressFields.length) {
+        notes.push(`${delivery.meta.name}.${delivery.record.id} has no writable formal address field.`);
+        continue;
+      }
+      const after = Object.fromEntries(delivery.addressFields.map(field => [field, contact.address!.trim()]));
+      appendMutation(mutations, delivery.meta, delivery.record, delivery.record.id, after);
+    }
+  }
+};
+
+const buildQuoteItemMutation = (
+  target: ResolvedProductionTarget,
+  changes: ProductionItemChanges,
+  mutations: ProductionMutationRecord[],
+): ProductionMutationPlan['impact'] => {
+  if (target.type !== 'quote') throw new Error('Quote item changes require an exact Quote target.');
+  const status = String(target.record.fields.Status || '');
+  const converted = ['Converted Order No', 'Converted Invoice No', 'Order Ref', 'Converted At']
+    .some(field => String(target.record.fields[field] || '').trim());
+  if (!/^(draft|test)$/i.test(status) || converted) {
+    throw new Error('Quote item repricing is allowed only for an unconverted Draft／Test Quote.');
+  }
+  const items = parseQuoteItems(target.record.fields['Quote Items JSON'])
+    .map(item => ({ ...item })) as Array<Record<string, unknown>>;
+  const itemIndex = Number(changes.itemIndex || 1);
+  if (!Number.isInteger(itemIndex) || itemIndex < 1 || itemIndex > items.length) {
+    throw new Error(`Quote has ${items.length} item(s); provide an exact itemIndex.`);
+  }
+  const current = items[itemIndex - 1];
+  const calculated = calculatedItemFromStored(current, changes);
+  items[itemIndex - 1] = calculated as unknown as Record<string, unknown>;
+  const subtotal = Math.round(items.reduce((sum, item) => sum + Number(item.amount || 0), 0) * 100) / 100;
+  const discountValue = Math.round(quoteDiscountValue(target.record.fields, subtotal) * 100) / 100;
+  const total = Math.max(0, Math.ceil(subtotal - discountValue));
+  const quotedProfit = items.reduce((sum, item) => sum + Number(item.profit || 0), 0);
+  const quotedDelivery = items.reduce((sum, item) => sum + Number(item.hongKongDelivery || 0), 0);
+  const estimatedNetProfit = Math.round(
+    (quotedProfit - discountValue + quotedDelivery * (1 - DRIVER_SHARE_RATE)) * 100
+  ) / 100;
+  const after = {
+    'Quote Items JSON': JSON.stringify(items),
+    'Description Summary': quoteDescriptionSummary(items),
+    'Sub Total': subtotal,
+    Total: total,
+  };
+  for (const [field, types] of Object.entries({
+    'Quote Items JSON': ['multilineText'],
+    'Description Summary': ['multilineText'],
+    'Sub Total': ['currency', 'number'],
+    Total: ['currency', 'number'],
+  })) assertExistingWritableField(target.meta, field, types);
+  appendMutation(mutations, target.meta, target.record, target.identifier, after);
+  return {
+    pricingChanged: true,
+    oldTotal: Number(target.record.fields.Total || 0),
+    newTotal: total,
+    estimatedNetProfit,
+    quoteLinkChanged: false,
+    invoiceMayReflectChange: false,
+    labelMayReflectChange: false,
+    deliveryMayReflectChange: false,
+    notes: [
+      'Authoritative Quote v4.6 pricing recalculated outer dimensions, product/accessories, freight, delivery and Quoted Profit.',
+      'Estimated Net Profit = Quoted Profit − discount deduction + 10% company delivery retention; it is not Actual Profit.',
+    ],
+  };
+};
+
+const getOrderItemsForMutation = async (orderRecordId: string) => {
+  const records = await tableOrderItems.select().all();
+  return records
+    .filter(record => linkedRecordIds(record.fields.Order).includes(orderRecordId))
+    .sort((a, b) => String(a.fields['Item No'] || a.id).localeCompare(String(b.fields['Item No'] || b.id)));
+};
+
+const buildOrderItemMutation = async (
+  target: ResolvedProductionTarget,
+  changes: ProductionItemChanges,
+  mutations: ProductionMutationRecord[],
+): Promise<ProductionMutationPlan['impact']> => {
+  if (target.type !== 'order') throw new Error('Order Item changes require an exact Order target.');
+  if (!changes.pricingMode) {
+    throw new Error('Converted Order requires pricingMode: specOnly or reprice.');
+  }
+  if (changes.pricingMode === 'specOnly'
+    && [changes.chinaFreight, changes.hongKongDelivery, changes.profit].some(value => value !== undefined)) {
+    throw new Error('Freight or profit changes require pricingMode reprice.');
+  }
+  const orderItemsMeta = findMetadataTable(
+    target.tables,
+    process.env.AIRTABLE_TABLE_ORDER_ITEMS,
+    'Order Items',
+  );
+  if (!orderItemsMeta) throw new Error('Order Items metadata is missing.');
+  const records = await getOrderItemsForMutation(target.record.id);
+  const itemNo = String(changes.itemNo || '').trim().toLocaleUpperCase();
+  const selected = itemNo
+    ? records.find(record => String(record.fields['Item No'] || '').trim().toLocaleUpperCase() === itemNo)
+    : records[Number(changes.itemIndex || 1) - 1];
+  if (!selected) throw new Error('Exact Order Item was not found; provide itemNo or itemIndex.');
+  const calculated = calculatedItemFromStored(selected.fields as Record<string, unknown>, changes);
+  const after: Record<string, unknown> = {
+    'Inter L': calculated.interL,
+    'Inter D': calculated.interD,
+    'Inter H': calculated.interH,
+    'Outer L': calculated.outerL,
+    'Outer D': calculated.outerD,
+    'Outer H': calculated.outerH,
+    QTY: calculated.qty,
+    Accessories: calculated.accessories,
+  };
+  if (changes.pricingMode === 'reprice') {
+    after['Product Amount'] = calculated.amount;
+    after['Quoted China Freight HKD'] = calculated.freight;
+    after['Quoted Local Delivery HKD'] = calculated.hongKongDelivery;
+    after['Quoted Profit HKD'] = calculated.profit;
+  }
+  for (const [field, value] of Object.entries(after)) {
+    const allowed = field === 'Accessories'
+      ? ['multipleSelects']
+      : typeof value === 'number'
+        ? ['number', 'currency']
+        : ['singleLineText', 'multilineText'];
+    assertExistingWritableField(orderItemsMeta, field, allowed);
+  }
+  if (changes.accessories) {
+    const options = fieldChoices(requireMetadataField(orderItemsMeta, 'Order Items', 'Accessories', 'multipleSelects'));
+    for (const accessory of calculated.accessories) {
+      if (!options.includes(accessory)) {
+        throw new Error(`Order Items accessory is not an existing production option: ${accessory}.`);
+      }
+    }
+  }
+  appendMutation(
+    mutations,
+    orderItemsMeta,
+    selected,
+    String(selected.fields['Item No'] || selected.id),
+    after,
+  );
+  let newTotal = Number(target.record.fields['Product Amount'] || 0);
+  if (changes.pricingMode === 'reprice') {
+    newTotal = Math.round(records.reduce((sum, record) =>
+      sum + (record.id === selected.id ? calculated.amount : Number(record.fields['Product Amount'] || 0)), 0
+    ) * 100) / 100;
+    assertExistingWritableField(target.meta, 'Product Amount', ['currency', 'number']);
+    appendMutation(mutations, target.meta, target.record, target.identifier, { 'Product Amount': newTotal });
+  }
+  return {
+    pricingChanged: changes.pricingMode === 'reprice',
+    oldTotal: Number(target.record.fields['Product Amount'] || 0),
+    newTotal,
+    quoteLinkChanged: false,
+    invoiceMayReflectChange: true,
+    labelMayReflectChange: true,
+    deliveryMayReflectChange: true,
+    notes: changes.pricingMode === 'specOnly'
+      ? ['Only Order Item specification fields change; confirmed prices remain untouched.']
+      : ['Order Item and Order Product Amount are repriced through the current Quote v4.6 calculator.'],
+  };
+};
+
+const registerMutationPlan = (
+  plan: ProductionMutationPlan,
+  confirmationSecret: string,
+) => {
+  const confirmationId = issueMutationConfirmation(plan, confirmationSecret);
+  maintenanceMutationPlans.set(plan.nonce, plan);
+  return {
+    operation: plan.operation,
+    target: plan.target,
+    confirmationId,
+    requiredConfirmation: plan.requiredConfirmation,
+    expiresInMinutes: 30,
+    mutations: plan.mutations.map(mutation => ({
+      table: mutation.tableName,
+      recordId: mutation.recordId,
+      identifier: mutation.identifier,
+      before: mutation.before,
+      after: mutation.after,
+    })),
+    impact: plan.impact,
+    backup: plan,
+    productionWrite: false,
+    productionWriteCount: 0,
+  };
+};
+
+const buildProductionEditPreview = async (body: unknown) => {
+  const request = body && typeof body === 'object' ? body as ProductionEditRequest : {} as ProductionEditRequest;
+  if (!request.target) throw new Error('A mutation target is required.');
+  const resolved = await resolveProductionTarget(request.target);
+  if ('selectionRequired' in resolved) {
+    return {
+      operation: 'edit',
+      selectionRequired: true,
+      candidates: resolved.candidates,
+      confirmationId: null,
+      productionWrite: false,
+      productionWriteCount: 0,
+    };
+  }
+  if (!request.contact && !request.item) throw new Error('At least one allowed contact or item change is required.');
+  const mutations: ProductionMutationRecord[] = [];
+  const notes: string[] = [];
+  if (request.contact) await buildContactMutations(resolved, request.contact, mutations, notes);
+  let impact: ProductionMutationPlan['impact'] = {
+    pricingChanged: false,
+    quoteLinkChanged: false,
+    invoiceMayReflectChange: resolved.type === 'order',
+    labelMayReflectChange: resolved.type === 'order',
+    deliveryMayReflectChange: Boolean(request.contact?.address),
+    notes,
+  };
+  if (request.item) {
+    impact = resolved.type === 'quote'
+      ? buildQuoteItemMutation(resolved, request.item, mutations)
+      : await buildOrderItemMutation(resolved, request.item, mutations);
+    impact.notes.push(...notes);
+  }
+  if (!mutations.length) throw new Error('Requested values already match production; no write is needed.');
+  if (mutations.length > 50) throw new Error('Mutation affects more than 50 records and is blocked for manual review.');
+  const plan = makeMutationPlan('edit', resolved.identifier, mutations, impact);
+  const { confirmationSecret } = getQuotePilotSecrets();
+  return registerMutationPlan(plan, confirmationSecret);
+};
+
+const chooseExistingCancelStatus = (
+  table: AirtableMetadataTable,
+): string => {
+  const status = requireMetadataField(table, table.name, 'Status', 'singleSelect');
+  const choices = fieldChoices(status);
+  const candidates = ['Cancelled', 'Canceled', '取消', '作廢', 'Void'];
+  const value = candidates.find(candidate =>
+    choices.some(choice => choice.toLocaleLowerCase() === candidate.toLocaleLowerCase())
+  );
+  if (!value) {
+    throw new Error(`${table.name}.Status has no existing cancellation/void option; no new select option was created.`);
+  }
+  return choices.find(choice => choice.toLocaleLowerCase() === value.toLocaleLowerCase())!;
+};
+
+const buildProductionCancelPreview = async (body: unknown) => {
+  const request = body && typeof body === 'object' ? body as { target?: ProductionEditTarget } : {};
+  if (!request.target || !['quote', 'order'].includes(request.target.type)) {
+    throw new Error('Cancel requires an exact Quote or Order target.');
+  }
+  const resolved = await resolveProductionTarget(request.target);
+  if ('selectionRequired' in resolved) throw new Error('Cancel target must be exact.');
+  const cancelStatus = chooseExistingCancelStatus(resolved.meta);
+  const currentStatus = String(resolved.record.fields.Status || '');
+  if (currentStatus.toLocaleLowerCase() === cancelStatus.toLocaleLowerCase()) {
+    return {
+      operation: 'cancel',
+      target: resolved.identifier,
+      alreadyCancelled: true,
+      productionWrite: false,
+      productionWriteCount: 0,
+    };
+  }
+  const mutations: ProductionMutationRecord[] = [];
+  appendMutation(mutations, resolved.meta, resolved.record, resolved.identifier, { Status: cancelStatus });
+  const plan = makeMutationPlan('cancel', resolved.identifier, mutations, {
+    pricingChanged: false,
+    quoteLinkChanged: false,
+    invoiceMayReflectChange: resolved.type === 'order',
+    labelMayReflectChange: resolved.type === 'order',
+    deliveryMayReflectChange: resolved.type === 'order',
+    notes: [
+      'This changes Status only; no Customer, Quote, Order Item, Receipt, Payment or Delivery record is deleted.',
+      `Production existing Status option verified: ${cancelStatus}.`,
+    ],
+  });
+  const { confirmationSecret } = getQuotePilotSecrets();
+  return registerMutationPlan(plan, confirmationSecret);
+};
+
+const executeProductionMutation = async (
+  confirmationId: string,
+  confirmationText: string,
+  expectedOperation: 'edit' | 'cancel',
+) => {
+  const { confirmationSecret } = getQuotePilotSecrets();
+  const lock = verifyMutationConfirmation(confirmationId, confirmationSecret);
+  if (lock.operation !== expectedOperation) throw new Error('Confirmation belongs to a different operation.');
+  const completed = maintenanceMutationCompleted.get(confirmationId);
+  if (completed) return completed;
+  const plan = maintenanceMutationPlans.get(lock.nonce);
+  if (!plan || mutationPlanFingerprint(plan) !== lock.fingerprint) {
+    throw new Error('Mutation plan is unavailable or changed. Generate a new preview.');
+  }
+  if (confirmationText !== plan.requiredConfirmation) {
+    throw new Error(`Mutation requires the exact confirmation text: ${plan.requiredConfirmation}`);
+  }
+  const existing = maintenanceMutationInFlight.get(confirmationId);
+  if (existing) return existing;
+  const operation = (async () => {
+    const currentRecords: Array<{ mutation: ProductionMutationRecord; record: any }> = [];
+    let allAlreadyApplied = true;
+    for (const mutation of plan.mutations) {
+      const record = await base(mutation.tableId).find(mutation.recordId);
+      const current = record.fields as Record<string, unknown>;
+      if (mutationFieldsMatch(current, mutation.after)) {
+        currentRecords.push({ mutation, record });
+        continue;
+      }
+      allAlreadyApplied = false;
+      if (!mutationFieldsMatch(current, mutation.before)) {
+        throw new Error(`${mutation.tableName}.${mutation.identifier} changed since preview. Generate a new preview.`);
+      }
+      currentRecords.push({ mutation, record });
+    }
+    if (allAlreadyApplied) {
+      const replay = {
+        operation: plan.operation,
+        target: plan.target,
+        applied: false,
+        idempotentReplay: true,
+        productionWrite: false,
+        productionWriteCount: 0,
+        audit: { plan, afterVerified: true },
+      };
+      maintenanceMutationCompleted.set(confirmationId, replay);
+      return replay;
+    }
+    const grouped = new Map<string, ProductionMutationRecord[]>();
+    for (const mutation of plan.mutations) {
+      const values = grouped.get(mutation.tableId) || [];
+      values.push(mutation);
+      grouped.set(mutation.tableId, values);
+    }
+    for (const [tableId, mutations] of grouped) {
+      for (let index = 0; index < mutations.length; index += 10) {
+        await base(tableId).update(mutations.slice(index, index + 10).map(mutation => ({
+          id: mutation.recordId,
+          fields: mutation.after as FieldSet,
+        })));
+      }
+    }
+    const after: unknown[] = [];
+    for (const mutation of plan.mutations) {
+      const record = await base(mutation.tableId).find(mutation.recordId);
+      if (!mutationFieldsMatch(record.fields as Record<string, unknown>, mutation.after)) {
+        throw new Error(`Post-write verification failed for ${mutation.tableName}.${mutation.identifier}.`);
+      }
+      after.push({
+        table: mutation.tableName,
+        recordId: mutation.recordId,
+        identifier: mutation.identifier,
+        fields: pickMutationFields(record.fields, Object.keys(mutation.after)),
+      });
+    }
+    const result = {
+      operation: plan.operation,
+      target: plan.target,
+      applied: true,
+      idempotentReplay: false,
+      productionWrite: true,
+      productionWriteCount: plan.mutations.length,
+      audit: { plan, after, verifiedAt: new Date().toISOString() },
+    };
+    maintenanceMutationCompleted.set(confirmationId, result);
+    return result;
+  })();
+  maintenanceMutationInFlight.set(confirmationId, operation);
+  try {
+    return await operation;
+  } finally {
+    maintenanceMutationInFlight.delete(confirmationId);
+  }
 };
 
 const getHongKongDateAfterDays = (days: number): string => {
@@ -2277,6 +3036,50 @@ app.post('/api/production-maintenance/delete-confirm', requireQuotePilotApi, asy
   } catch (error: any) {
     const message = error?.message || 'Unable to delete Quote.';
     const status = /confirmation|expired|changed|eligible|identity/i.test(message) ? 409 : 500;
+    return res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/production-maintenance/edit-preview', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    return res.json(await buildProductionEditPreview(req.body));
+  } catch (error: any) {
+    return res.status(400).json({ error: error?.message || 'Unable to preview production edit.' });
+  }
+});
+
+app.post('/api/production-maintenance/edit-confirm', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    return res.json(await executeProductionMutation(
+      String(req.body?.confirmationId || '').trim(),
+      String(req.body?.confirmationText || '').trim(),
+      'edit',
+    ));
+  } catch (error: any) {
+    const message = error?.message || 'Unable to apply production edit.';
+    const status = /confirmation|expired|changed|unavailable|different/i.test(message) ? 409 : 500;
+    return res.status(status).json({ error: message });
+  }
+});
+
+app.post('/api/production-maintenance/cancel-preview', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    return res.json(await buildProductionCancelPreview(req.body));
+  } catch (error: any) {
+    return res.status(400).json({ error: error?.message || 'Unable to preview cancellation.' });
+  }
+});
+
+app.post('/api/production-maintenance/cancel-confirm', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    return res.json(await executeProductionMutation(
+      String(req.body?.confirmationId || '').trim(),
+      String(req.body?.confirmationText || '').trim(),
+      'cancel',
+    ));
+  } catch (error: any) {
+    const message = error?.message || 'Unable to apply cancellation.';
+    const status = /confirmation|expired|changed|unavailable|different/i.test(message) ? 409 : 500;
     return res.status(status).json({ error: message });
   }
 });
