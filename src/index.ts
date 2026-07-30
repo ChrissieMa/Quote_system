@@ -7,6 +7,8 @@ import {
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
+  PILOT_CONFIRMATION_TEXTS,
+  SHORT_QUOTE_CONFIRMATION_TEXT,
   toCreateQuoteBody,
   verifyConfirmationId,
   type PilotQuoteInput,
@@ -17,6 +19,12 @@ import {
   validateQuoteLookupQuery,
   type StoredQuoteRecord,
 } from './quote-lookup';
+import {
+  parseShortQuoteText,
+  resolveOfferPreset,
+  resolveSourceAlias,
+  type ShortQuoteClarification,
+} from './quote-short';
 
 dotenv.config();
 
@@ -524,7 +532,9 @@ const findCustomerByPhone = async (phone: unknown) => {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
 
-  const customers = await tableCustomers.select({ fields: ['Phone'] }).all();
+  const customers = await tableCustomers.select({
+    fields: ['Phone', 'Customer Name', 'Customer ID', 'Email', 'Address'],
+  }).all();
   return customers.find((customer: any) => normalizePhone(customer.fields['Phone']) === normalized) || null;
 };
 
@@ -638,6 +648,147 @@ const getConfirmedOrderItems = async (orderRecordId: string, baseItems: any[]): 
 
 const getCustomerText = (fields: FieldSet, fieldName: string): string =>
   String(fields[fieldName] ?? '').trim();
+
+type QuoteShortMetadata = {
+  fieldTypes: Record<string, string>;
+  quoteSourceOptions: string[];
+  promotionOptions: string[];
+  discountTypeOptions: string[];
+  discountReasonOptions: string[];
+  deliveryOfferReasonOptions: string[];
+  inquiryChannelOptions: string[];
+};
+
+const requireMetadataField = (
+  table: AirtableMetadataTable | undefined,
+  tableName: string,
+  fieldName: string,
+  expectedType?: string,
+): AirtableMetadataField => {
+  if (!table) throw new Error(`Production Airtable table not found: ${tableName}.`);
+  const field = table.fields.find(item => item.name === fieldName);
+  if (!field) throw new Error(`Production Airtable field not found: ${tableName}.${fieldName}.`);
+  if (expectedType && field.type !== expectedType) {
+    throw new Error(
+      `Production Airtable field type mismatch: ${tableName}.${fieldName} is ${field.type}, expected ${expectedType}.`,
+    );
+  }
+  return field;
+};
+
+const fieldChoices = (field: AirtableMetadataField): string[] =>
+  Array.from(new Set(field.options?.choices?.map(choice => String(choice.name).trim()).filter(Boolean) || []));
+
+const getQuoteShortMetadata = async (): Promise<QuoteShortMetadata> => {
+  const tables = await getAirtableMetadataTables();
+  const quotes = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
+  const inquiries = findMetadataTable(tables, process.env.AIRTABLE_TABLE_INQUIRIES, 'Inquiries');
+  const quoteSource = requireMetadataField(quotes, 'Quotes', 'Quote Source / Channel', 'singleSelect');
+  const promotion = requireMetadataField(quotes, 'Quotes', 'Promotion / Offer Type', 'singleSelect');
+  const discountType = requireMetadataField(quotes, 'Quotes', 'Discount Type', 'singleSelect');
+  const discountReason = requireMetadataField(quotes, 'Quotes', 'Discount Reason', 'singleSelect');
+  const deliveryOfferReason = requireMetadataField(quotes, 'Quotes', 'Delivery Offer Reason', 'singleSelect');
+  const validUntil = requireMetadataField(quotes, 'Quotes', 'Valid Until');
+  const quoteItems = requireMetadataField(quotes, 'Quotes', 'Quote Items JSON');
+  const total = requireMetadataField(quotes, 'Quotes', 'Total');
+  const inquiryChannel = requireMetadataField(inquiries, 'Inquiries', 'Channel', 'singleSelect');
+  return {
+    fieldTypes: {
+      'Quotes.Quote Source / Channel': quoteSource.type,
+      'Quotes.Promotion / Offer Type': promotion.type,
+      'Quotes.Discount Type': discountType.type,
+      'Quotes.Discount Reason': discountReason.type,
+      'Quotes.Delivery Offer Reason': deliveryOfferReason.type,
+      'Quotes.Valid Until': validUntil.type,
+      'Quotes.Quote Items JSON': quoteItems.type,
+      'Quotes.Total': total.type,
+      'Inquiries.Channel': inquiryChannel.type,
+    },
+    quoteSourceOptions: fieldChoices(quoteSource),
+    promotionOptions: fieldChoices(promotion),
+    discountTypeOptions: fieldChoices(discountType),
+    discountReasonOptions: fieldChoices(discountReason),
+    deliveryOfferReasonOptions: fieldChoices(deliveryOfferReason),
+    inquiryChannelOptions: fieldChoices(inquiryChannel),
+  };
+};
+
+const getHongKongDateAfterDays = (days: number): string => {
+  const today = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
+  const start = new Date(`${today}T00:00:00+08:00`);
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date(start.getTime() + (days * 24 * 60 * 60 * 1000)));
+};
+
+const resolveShortQuoteRequest = async (
+  shortText: string,
+): Promise<
+  | { clarification: ShortQuoteClarification }
+  | { input: PilotQuoteInput; metadata: QuoteShortMetadata }
+> => {
+  const parsed = parseShortQuoteText(shortText);
+  if (parsed.kind === 'clarification') return { clarification: parsed };
+  if (parsed.itemType === 'Display Case 疊高展示櫃') {
+    return {
+      clarification: {
+        kind: 'clarification',
+        code: 'display-case-details-required',
+        message: 'Quote v4.6 的展示櫃外尺寸及層數維持人手輸入；請補充外尺寸及層數後再預覽。',
+        options: ['補充外尺寸及層數', '改為展示盒', '取消'],
+      },
+    };
+  }
+
+  const metadata = await getQuoteShortMetadata();
+  const source = resolveSourceAlias(parsed.sourceAlias, metadata.quoteSourceOptions);
+  if (source.clarification) return { clarification: source.clarification };
+  const offer = resolveOfferPreset(parsed, metadata.discountReasonOptions);
+  if (offer.clarification) return { clarification: offer.clarification };
+  if (!metadata.discountTypeOptions.includes('指定金額扣減') && offer.offer?.kind === 'fixed') {
+    return {
+      clarification: {
+        kind: 'clarification',
+        code: 'discount-type-unavailable',
+        message: 'Production 現時沒有「指定金額扣減」正式選項，不能安全套用此優惠。',
+      },
+    };
+  }
+
+  const officialCustomer = await findCustomerByPhone(parsed.phone);
+  const customerName = officialCustomer
+    ? getCustomerText(officialCustomer.fields, 'Customer Name') || 'Mr/Miss'
+    : 'Mr/Miss';
+  const input: PilotQuoteInput = {
+    customer: customerName,
+    phone: parsed.phone,
+    contactMethod: 'WhatsApp',
+    quoteSourceChannel: source.value,
+    validUntil: getHongKongDateAfterDays(parsed.validUntilDays),
+    customerMatch: officialCustomer ? 'existing' : 'fallback',
+    offerPresetLabel: offer.label,
+    entryMode: 'short',
+    offer: offer.offer,
+    items: [{
+      itemType: parsed.itemType,
+      innerDimensions: parsed.innerDimensions,
+      quantity: parsed.quantity,
+      accessories: parsed.accessories,
+      chinaFreight: parsed.chinaFreight,
+      hongKongDelivery: parsed.hongKongDelivery,
+      profit: parsed.profit,
+    }],
+  };
+  return { input, metadata };
+};
 
 const buildCustomerSearchDisplay = (fields: FieldSet): string => {
   const customerId = getCustomerText(fields, 'Customer ID') || getCustomerText(fields, 'Customer Display');
@@ -1625,16 +1776,44 @@ app.get('/api/customers/search', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/api/quote-pilot/preview', requireQuotePilotApi, async (req: Request, res: Response) => {
   try {
-    const input = req.body as PilotQuoteInput;
+    const shortText = typeof req.body?.shortText === 'string' ? req.body.shortText.trim() : '';
+    let input: PilotQuoteInput;
+    let metadata: QuoteShortMetadata | null = null;
+    if (shortText) {
+      const resolved = await resolveShortQuoteRequest(shortText);
+      if ('clarification' in resolved) {
+        return res.json({
+          preview: null,
+          clarification: resolved.clarification,
+          requiredConfirmation: null,
+          dryRun: true,
+          productionWrite: false,
+        });
+      }
+      input = resolved.input;
+      metadata = resolved.metadata;
+    } else {
+      input = req.body as PilotQuoteInput;
+    }
     const preview = buildPilotPreview(input);
     const { confirmationSecret } = getQuotePilotSecrets();
     const confirmationId = issueConfirmationId(input, confirmationSecret);
+    const requiredConfirmation = input.entryMode === 'short'
+      ? SHORT_QUOTE_CONFIRMATION_TEXT
+      : PILOT_CONFIRMATION_TEXT;
     return res.json({
       preview,
       confirmationId,
-      requiredConfirmation: PILOT_CONFIRMATION_TEXT,
+      requiredConfirmation,
       expiresInMinutes: 120,
       dryRun: true,
+      productionWrite: false,
+      productionSchema: metadata ? {
+        verified: true,
+        fieldTypes: metadata.fieldTypes,
+        mappedQuoteSource: preview.quoteSourceChannel,
+        mappedOfferPreset: preview.offerPresetLabel,
+      } : undefined,
     });
   } catch (error: any) {
     return res.status(400).json({ error: error?.message || 'Unable to preview quote.' });
@@ -1645,11 +1824,17 @@ app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, r
   try {
     const confirmationId = String(req.body?.confirmationId || '').trim();
     const confirmationText = String(req.body?.confirmationText || '').trim();
-    if (confirmationText !== PILOT_CONFIRMATION_TEXT) {
-      return res.status(409).json({ error: `Creation requires the exact confirmation text: ${PILOT_CONFIRMATION_TEXT}` });
+    if (!(PILOT_CONFIRMATION_TEXTS as readonly string[]).includes(confirmationText)) {
+      return res.status(409).json({ error: 'Creation requires the exact confirmation text from the latest preview.' });
     }
     const { confirmationSecret } = getQuotePilotSecrets();
     const { input, preview } = verifyConfirmationId(confirmationId, confirmationSecret);
+    const expectedConfirmation = input.entryMode === 'short'
+      ? SHORT_QUOTE_CONFIRMATION_TEXT
+      : PILOT_CONFIRMATION_TEXT;
+    if (confirmationText !== expectedConfirmation) {
+      return res.status(409).json({ error: `Creation requires the exact confirmation text: ${expectedConfirmation}` });
+    }
     const publicToken = idempotencyPublicToken(confirmationId, confirmationSecret);
 
     const existing = await tableQuotes.select({
@@ -1660,6 +1845,7 @@ app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, r
       const fields = existing[0].fields;
       return res.json({
         quoteNumber: String(fields['Quote Number'] || ''),
+        customer: String(fields['Customer Name'] || fields['Contact Name'] || preview.customer),
         total: Number(fields['Total'] || preview.finalTotal),
         shareView: `${PUBLIC_BASE_URL}/quote/${publicToken}`,
         idempotentReplay: true,
@@ -1693,6 +1879,7 @@ app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, r
       if (!internalResponse.ok) throw new Error(String(result.error || 'Create Quote flow failed.'));
       return {
         quoteNumber: result.quoteNumber,
+        customer: preview.customer,
         total: result.total,
         shareView: result.publicLink,
         idempotentReplay: false,

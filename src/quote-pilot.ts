@@ -1,7 +1,13 @@
 import crypto from 'crypto';
 
 export const PILOT_CONFIRMATION_TEXT = '確認開報價';
+export const SHORT_QUOTE_CONFIRMATION_TEXT = '確認開單';
+export const PILOT_CONFIRMATION_TEXTS = [
+  PILOT_CONFIRMATION_TEXT,
+  SHORT_QUOTE_CONFIRMATION_TEXT,
+] as const;
 export const PILOT_CONFIRMATION_TTL_MS = 2 * 60 * 60 * 1000;
+export const DRIVER_SHARE_RATE = 0.90;
 
 export const PILOT_ITEM_TYPES = [
   'Display box 展示盒',
@@ -50,6 +56,11 @@ export type PilotQuoteInput = {
   offer?: PilotOffer;
   deliveryOfferReason?: string;
   contactMethod?: 'WhatsApp' | 'IG' | 'Facebook' | '網頁搜尋';
+  quoteSourceChannel?: string;
+  validUntil?: string;
+  customerMatch?: 'existing' | 'fallback' | 'supplied';
+  offerPresetLabel?: string;
+  entryMode?: 'detailed' | 'short';
 };
 
 export type CalculatedPilotItem = {
@@ -74,6 +85,10 @@ export type CalculatedPilotItem = {
   estimatedPackageUnits: number;
   localDeliveryOverride: true;
   localDeliveryNotes: string;
+  baseProductAmountHkd: number;
+  accessoriesAmountHkd: number;
+  unitProductAndAccessoriesHkd: number;
+  productAndAccessoriesTotalHkd: number;
   amount: number;
 };
 
@@ -92,6 +107,24 @@ export type PilotPreview = {
   deliveryChargeMode: '已包本地送貨';
   deliveryOfferReason: string;
   deliveryDisplayText: string;
+  quoteSourceChannel: string;
+  validUntil: string;
+  customerMatch: 'existing' | 'fallback' | 'supplied';
+  offerPresetLabel: string;
+  quotedProfitTotal: number;
+  quotedLocalDeliveryTotal: number;
+  estimatedDriverPayableHkd: number;
+  estimatedCompanyDeliveryRetentionHkd: number;
+  estimatedNetProfitHkd: number;
+  estimatedNetProfitFormula: string;
+  review: {
+    missingFields: string[];
+    duplicateDeductions: boolean;
+    localDeliveryDeductedAsOffer: boolean;
+    obviousUnderquoteRisk: boolean;
+    warnings: string[];
+    summary: string;
+  };
   finalTotal: number;
 };
 
@@ -112,6 +145,8 @@ const positiveInteger = (value: unknown, label: string): number => {
   if (!Number.isInteger(number)) throw new Error(`${label} must be a whole number.`);
   return number;
 };
+
+const money = (value: number): number => Math.round(value * 100) / 100;
 
 const calcDisplayBoxRmb = (l: number, d: number, h: number): number => {
   const fiveSideArea = (l * d) + ((l * h + d * h) * 2);
@@ -218,7 +253,10 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   hkdAddons += (accessories['前板彩色刻字'] || 0) * 90;
   if (lightBoardCount > 0 || backLightCount > 0) accessoryRmb += 30;
 
+  const baseProductAmountHkd = money(sizeRmb / RMB_DIVISOR);
+  const accessoriesAmountHkd = money((accessoryRmb / RMB_DIVISOR) + hkdAddons);
   const unitProductAmount = ((sizeRmb + accessoryRmb) / RMB_DIVISOR) + hkdAddons;
+  const productAndAccessoriesTotalHkd = money(unitProductAmount * quantity);
   const amount = (unitProductAmount * quantity) + chinaFreight + hongKongDelivery + profit;
   const lightBoardPieces = lightBoardCount + backLightCount;
   const packageUnits = ((isDisplayCase ? levels : 1) + (lightBoardPieces * 0.5)) * quantity;
@@ -249,7 +287,11 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     estimatedPackageUnits: packageUnits,
     localDeliveryOverride: true,
     localDeliveryNotes: '香港運費由報價時人手輸入估算總數；客人版只顯示預計範圍',
-    amount: Math.round(amount * 100) / 100,
+    baseProductAmountHkd,
+    accessoriesAmountHkd,
+    unitProductAndAccessoriesHkd: money(unitProductAmount),
+    productAndAccessoriesTotalHkd,
+    amount: money(amount),
   };
 };
 
@@ -261,7 +303,7 @@ export const buildPilotPreview = (input: PilotQuoteInput): PilotPreview => {
   if (!Array.isArray(input.items) || input.items.length === 0) throw new Error('At least one item is required.');
   if (input.items.length > 10) throw new Error('A maximum of 10 items is allowed.');
   const items = input.items.map(calculatePilotItem);
-  const subtotal = Math.round(items.reduce((sum, item) => sum + item.amount, 0) * 100) / 100;
+  const subtotal = money(items.reduce((sum, item) => sum + item.amount, 0));
   const offer = input.offer || { kind: 'none' as const };
   let promotionType = '';
   let discountType = '無折扣';
@@ -302,13 +344,30 @@ export const buildPilotPreview = (input: PilotQuoteInput): PilotPreview => {
   } else if (discountType === '指定金額扣減') {
     discountValueHkd = Math.max(0, Math.min(discountAmountHkd, subtotal));
   }
-  discountValueHkd = Math.round(discountValueHkd * 100) / 100;
+  discountValueHkd = money(discountValueHkd);
   const finalTotal = Math.max(0, Math.ceil(subtotal - discountValueHkd));
   const discountDisplayText = discountValueHkd <= 0 ? '' :
     discountType === '百分比折扣' && discountMultiplier !== null
       ? `${discountReason}：${Math.round(discountMultiplier * 100) / 10}折優惠`
       : `${discountReason}：全單減 HKD $${Math.ceil(discountAmountHkd)}`;
   const deliveryDisplayText = deliveryOfferReason ? `已包本地送貨｜${deliveryOfferReason}` : '已包本地送貨';
+  const quotedProfitTotal = money(items.reduce((sum, item) => sum + item.profit, 0));
+  const quotedLocalDeliveryTotal = money(items.reduce((sum, item) => sum + item.hongKongDelivery, 0));
+  const estimatedDriverPayableHkd = money(quotedLocalDeliveryTotal * DRIVER_SHARE_RATE);
+  const estimatedCompanyDeliveryRetentionHkd = money(quotedLocalDeliveryTotal - estimatedDriverPayableHkd);
+  const estimatedNetProfitHkd = money(
+    quotedProfitTotal - discountValueHkd + estimatedCompanyDeliveryRetentionHkd,
+  );
+  const localDeliveryDeductedAsOffer = deliveryOfferReason.length > 0
+    && discountValueHkd >= quotedLocalDeliveryTotal
+    && quotedLocalDeliveryTotal > 0;
+  const warnings: string[] = [];
+  if (estimatedNetProfitHkd < 0) {
+    warnings.push('優惠後 Estimated Net Profit 低於 HKD $0；最低利潤門檻仍為 Deferred，請由 Chrissie 決定。');
+  }
+  if (localDeliveryDeductedAsOffer) {
+    warnings.push('優惠可能同時包含送貨扣減；請確認沒有把香港運費重複扣除。');
+  }
   return {
     customer,
     phone,
@@ -324,6 +383,29 @@ export const buildPilotPreview = (input: PilotQuoteInput): PilotPreview => {
     deliveryChargeMode: '已包本地送貨',
     deliveryOfferReason,
     deliveryDisplayText,
+    quoteSourceChannel: String(input.quoteSourceChannel || ''),
+    validUntil: String(input.validUntil || ''),
+    customerMatch: input.customerMatch || 'supplied',
+    offerPresetLabel: String(input.offerPresetLabel || ''),
+    quotedProfitTotal,
+    quotedLocalDeliveryTotal,
+    estimatedDriverPayableHkd,
+    estimatedCompanyDeliveryRetentionHkd,
+    estimatedNetProfitHkd,
+    estimatedNetProfitFormula:
+      `Quoted Profit HKD $${quotedProfitTotal} - Discount deduction HKD $${discountValueHkd}`
+      + ` + 香港送貨公司保留10% HKD $${estimatedCompanyDeliveryRetentionHkd}`
+      + ` = HKD $${estimatedNetProfitHkd}`,
+    review: {
+      missingFields: [],
+      duplicateDeductions: localDeliveryDeductedAsOffer,
+      localDeliveryDeductedAsOffer,
+      obviousUnderquoteRisk: estimatedNetProfitHkd < 0,
+      warnings,
+      summary: warnings.length
+        ? '需要 Chrissie 核對上述風險；未有套用任何最低利潤門檻。'
+        : '未發現漏計、重複扣減或明顯報少；最低利潤門檻仍為 Deferred。',
+    },
     finalTotal,
   };
 };
@@ -383,6 +465,8 @@ export const toCreateQuoteBody = (input: PilotQuoteInput, preview: PilotPreview)
   phone: preview.phone,
   contactMethod: input.contactMethod || 'WhatsApp',
   contactHandle: '',
+  quoteSourceChannel: input.quoteSourceChannel || '',
+  validUntil: input.validUntil || '',
   items: preview.items,
   subtotal: preview.subtotal,
   promotionType: preview.promotionType,

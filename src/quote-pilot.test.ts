@@ -69,3 +69,45 @@ test('Display Case keeps the v4.6 manual outer-dimension rule', () => {
     }],
   }), /requires outerDimensions/);
 });
+
+test('Phase 2C.2B preview exposes pricing components and estimated net profit without double-deducting delivery', () => {
+  const preview = buildPilotPreview({
+    customer: 'Mr/Miss',
+    phone: '92503576',
+    customerMatch: 'fallback',
+    quoteSourceChannel: 'Facebook Organic',
+    validUntil: '2026-08-06',
+    offerPresetLabel: '盒-300',
+    entryMode: 'short',
+    items: [{
+      itemType: 'Display box 展示盒',
+      innerDimensions: { length: 76, depth: 23, height: 40 },
+      quantity: 1,
+      accessories: {
+        '趟門': 1,
+        '獨立燈板 - 上燈': 1,
+        '背板圖片': 1,
+      },
+      chinaFreight: 150,
+      hongKongDelivery: 260,
+      profit: 800,
+    }],
+    offer: { kind: 'fixed', amountHkd: 300, reason: '新客戶優惠' },
+  });
+  assert.deepEqual(
+    { l: preview.items[0].outerL, d: preview.items[0].outerD, h: preview.items[0].outerH },
+    { l: '78.0', d: '25.0', h: '43.5' },
+  );
+  assert.equal(preview.items[0].baseProductAmountHkd, 361.35);
+  assert.equal(preview.items[0].accessoriesAmountHkd, 446.49);
+  assert.equal(preview.items[0].productAndAccessoriesTotalHkd, 807.84);
+  assert.equal(preview.subtotal, 2017.84);
+  assert.equal(preview.discountValueHkd, 300);
+  assert.equal(preview.finalTotal, 1718);
+  assert.equal(preview.quotedProfitTotal, 800);
+  assert.equal(preview.estimatedDriverPayableHkd, 234);
+  assert.equal(preview.estimatedCompanyDeliveryRetentionHkd, 26);
+  assert.equal(preview.estimatedNetProfitHkd, 526);
+  assert.equal(preview.review.duplicateDeductions, false);
+  assert.equal(preview.review.localDeliveryDeductedAsOffer, false);
+});
