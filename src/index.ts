@@ -12,6 +12,11 @@ import {
   type PilotQuoteInput,
   type PilotOffer,
 } from './quote-pilot';
+import {
+  lookupQuoteRecords,
+  validateQuoteLookupQuery,
+  type StoredQuoteRecord,
+} from './quote-lookup';
 
 dotenv.config();
 
@@ -1703,6 +1708,37 @@ app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, r
     const message = error?.message || 'Unable to create quote.';
     const status = /expired|confirmation|Invalid/i.test(message) ? 409 : 500;
     return res.status(status).json({ error: message });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// API: Existing Quote Lookup (Phase 2C.1)
+// Read only by construction: this route selects a minimal field set from Quotes
+// and never calls Airtable create, update, replace, or destroy methods.
+// ═══════════════════════════════════════════════════════════════════════════
+app.post('/api/quote-pilot/lookup', requireQuotePilotApi, async (req: Request, res: Response) => {
+  try {
+    const query = validateQuoteLookupQuery(req.body);
+    const records = await tableQuotes.select({
+      fields: [
+        'Quote Number',
+        'Quote Date',
+        'Status',
+        'Customer Name',
+        'Contact Name',
+        'Customer Phone',
+        'Phone',
+        'Converted Order No',
+        'Quote Items JSON',
+        'Total',
+      ],
+    }).all();
+    return res.json(lookupQuoteRecords(
+      records.map(record => ({ id: record.id, fields: record.fields })) as StoredQuoteRecord[],
+      query,
+    ));
+  } catch (error: any) {
+    return res.status(400).json({ error: error?.message || 'Unable to look up Quote.' });
   }
 });
 
