@@ -1439,10 +1439,22 @@ const buildOrderItemMutation = async (
   if (!orderItemsMeta) throw new Error('Order Items metadata is missing.');
   const records = await getOrderItemsForMutation(target.record.id);
   const itemNo = String(changes.itemNo || '').trim().toLocaleUpperCase();
+  const itemLetterMatch = itemNo.match(/^ITEM\s*([A-Z])$/);
+  const itemLetterIndex = itemLetterMatch
+    ? itemLetterMatch[1].charCodeAt(0) - 'A'.charCodeAt(0)
+    : -1;
   const selected = itemNo
-    ? records.find(record => String(record.fields['Item No'] || '').trim().toLocaleUpperCase() === itemNo)
+    ? (
+      records.find(record => String(record.fields['Item No'] || '').trim().toLocaleUpperCase() === itemNo)
+      || (itemLetterIndex >= 0 ? records[itemLetterIndex] : undefined)
+    )
     : records[Number(changes.itemIndex || 1) - 1];
-  if (!selected) throw new Error('Exact Order Item was not found; provide itemNo or itemIndex.');
+  if (!selected) {
+    const candidates = records.slice(0, 20).map((record, index) =>
+      `${String.fromCharCode('A'.charCodeAt(0) + index)}=${String(record.fields['Item No'] || record.id)}`
+    );
+    throw new Error(`Exact Order Item was not found. Available items: ${candidates.join(', ') || 'none'}.`);
+  }
   const calculated = calculatedItemFromStored(selected.fields as Record<string, unknown>, changes);
   const after: Record<string, unknown> = {
     'Inter L': calculated.interL,
