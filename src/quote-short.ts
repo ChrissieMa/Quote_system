@@ -62,8 +62,9 @@ const ACCESSORY_ALIASES: Array<[RegExp, string]> = [
   [/右圖|右板圖片/, '右板圖片'],
   [/底圖|底板圖片/, '底板圖片'],
   [/頂圖|頂板圖片/, '頂板圖片'],
+  [/背鏡|背板鏡面/, '背板鏡面'],
   [/背燈/, '背燈'],
-  [/前板白色刻字|白字/, '前板白色刻字'],
+  [/前板白色刻字|白色刻字|白字/, '前板白色刻字'],
   [/前板彩色刻字|彩字/, '前板彩色刻字'],
 ];
 
@@ -77,17 +78,20 @@ const numberAfter = (text: string, pattern: RegExp): number | null => {
 export const parseShortQuoteText = (raw: string): ShortQuoteParseResult => {
   const text = String(raw || '')
     .trim()
-    .replace(/^Blue\s*[,，:：]?\s*/i, '')
+    .replace(/^Blue\s*[,，:：]?\s*(?:幫我預覽報價\s*[:：]?\s*)?/i, '')
+    .replace(/[：:]/g, ' ')
+    .replace(/[，,]/g, ' ')
     .replace(/\s+/g, ' ');
   if (!text) return { kind: 'clarification', code: 'empty', message: '請提供報價資料。' };
 
   const phoneMatch = text.match(/(?:^|\s)(\d{8})(?:\s|$)/);
   const dimensionsMatch = text.match(/(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)\s*[xX×*]\s*(\d+(?:\.\d+)?)/);
-  const quantityMatch = text.match(/(?:^|\s)(\d+)\s*(?:個|件|pcs?)(?:\s|$)/i);
+  const quantityMatch = text.match(/(?:數量|Quantity)\s*(\d+)(?:\s*(?:個|件|pcs?))?(?:\s|$)/i)
+    || text.match(/(?:^|\s)(\d+)\s*(?:個|件|pcs?)(?:\s|$)/i);
   const chinaFreight = numberAfter(text, /內(?:地)?運(?:費)?\s*\$?\s*(\d+(?:\.\d+)?)/);
   const hongKongDelivery = numberAfter(text, /(?:港運(?:費)?|香港運(?:費)?)\s*\$?\s*(\d+(?:\.\d+)?)/);
   const profit = numberAfter(text, /(?:^|\s)利(?:潤)?\s*\$?\s*(\d+(?:\.\d+)?)(?:\s|$)/);
-  const validDays = numberAfter(text, /有效(?:期)?\s*(\d+)\s*日/);
+  const validDays = numberAfter(text, /(?:有效(?:期)?|Valid\s*Until)\s*(?:默認|默认)?\s*(\d+)\s*(?:日|天)?/i);
 
   let itemType: PilotItemInput['itemType'] | null = null;
   if (/(?:^|\s)(?:盒|展示盒)(?:\s|$)/.test(text)) itemType = 'Display box 展示盒';
@@ -115,6 +119,14 @@ export const parseShortQuoteText = (raw: string): ShortQuoteParseResult => {
   }
 
   const offerMatches = OFFER_PATTERNS.filter(([pattern]) => pattern.test(text)).map(([, code]) => code);
+  const statedFixedDiscount = numberAfter(
+    text,
+    /(?:Discount\s*Type\s*)?指定金額扣減\s*-?\s*\$?\s*(\d+(?:\.\d+)?)/i,
+  );
+  if (/首次落單優惠/.test(text)) {
+    if (itemType === 'Display box 展示盒' && statedFixedDiscount === 300) offerMatches.push('box-300');
+    if (itemType === 'Display Case 疊高展示櫃' && statedFixedDiscount === 500) offerMatches.push('case-500');
+  }
   const uniqueOffers = Array.from(new Set(offerMatches));
   if (uniqueOffers.length > 1) {
     return {

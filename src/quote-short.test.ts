@@ -38,6 +38,48 @@ test('parses the Phase 2C.2B one-line Display Box example with defaults and alia
   });
 });
 
+test('parses the labelled multiline WhatsApp format without re-asking supplied fields', () => {
+  const parsed = parseShortQuoteText(`Blue，幫我預覽報價：
+
+顯示語言：中
+查詢來源：website - 3D
+客戶名稱：Mr/Miss
+客戶電話：64611812
+產品：展示盒
+內尺寸：67*24*45
+外尺寸：
+數量：1
+配件：上燈 背鏡 白色刻字
+內地運費：150
+香港運費：240
+利潤：800
+優惠：首次落單優惠
+Discount Type：指定金額扣減 -$300
+Discount Reason：
+Valid Until：默認7天`);
+
+  assert.equal(parsed.kind, 'ready');
+  if (parsed.kind !== 'ready') return;
+  assert.equal(parsed.phone, '64611812');
+  assert.equal(parsed.itemType, 'Display box 展示盒');
+  assert.deepEqual(parsed.innerDimensions, { length: 67, depth: 24, height: 45 });
+  assert.equal(parsed.quantity, 1);
+  assert.deepEqual(parsed.accessories, {
+    '獨立燈板 - 上燈': 1,
+    '背板鏡面': 1,
+    '前板白色刻字': 1,
+  });
+  assert.equal(parsed.chinaFreight, 150);
+  assert.equal(parsed.hongKongDelivery, 240);
+  assert.equal(parsed.profit, 800);
+  assert.equal(parsed.validUntilDays, 7);
+  assert.equal(resolveSourceAlias(parsed.sourceAlias, productionSources).value, 'Website');
+  assert.deepEqual(resolveOfferPreset(parsed, productionDiscountReasons), {
+    offer: { kind: 'fixed', amountHkd: 300, reason: '新客戶優惠' },
+    label: '盒-300',
+  });
+});
+
 test('quantity defaults to one and Google asks one bounded clarification', () => {
   const parsed = parseShortQuoteText(
     '92503576 盒 76x23x40 趟門 內運150 港運260 利800 Google 無優惠',
