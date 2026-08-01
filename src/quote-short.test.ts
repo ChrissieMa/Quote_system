@@ -119,3 +119,23 @@ test('legacy and incomplete custom offers ask one bounded clarification', () => 
     assert.equal(resolveOfferPreset(custom, productionDiscountReasons).clarification?.code, 'custom-offer-details-required');
   }
 });
+
+test('source aliases fail closed when their mapped production option is unavailable', () => {
+  const parsed = parseShortQuoteText(
+    '92503576 盒 76x23x40 內運150 港運260 利800 FB 無優惠',
+  );
+  assert.equal(parsed.kind, 'ready');
+  if (parsed.kind !== 'ready') return;
+
+  assert.deepEqual(
+    resolveSourceAlias(parsed.sourceAlias, productionSources.filter(source => source !== 'Facebook Organic')),
+    {
+      clarification: {
+        kind: 'clarification',
+        code: 'source-unmapped',
+        message: '「FB」未能映射至 production 現有正式選項，請重新選擇。',
+        options: productionSources.filter(source => source !== 'Facebook Organic'),
+      },
+    },
+  );
+});
