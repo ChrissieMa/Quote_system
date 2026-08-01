@@ -9,11 +9,11 @@ import {
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
   PILOT_CONFIRMATION_TEXTS,
+  resolveAuthoritativeOffer,
   SHORT_QUOTE_CONFIRMATION_TEXT,
   toCreateQuoteBody,
   verifyConfirmationId,
   type PilotQuoteInput,
-  type PilotOffer,
 } from './quote-pilot';
 import {
   lookupQuoteRecords,
@@ -44,6 +44,7 @@ import {
   type ProductionMutationPlan,
   type ProductionMutationRecord,
 } from './production-mutation';
+import { installAirtableReadRetry, withAirtableReadRetry } from './airtable-retry';
 
 dotenv.config();
 
@@ -196,7 +197,18 @@ for (const envVar of requiredEnvVars) {
 }
 
 // Airtable Setup
-const base = new Airtable({ apiKey: process.env.AIRTABLE_API_KEY }).base(process.env.AIRTABLE_BASE_ID!);
+const base = new Airtable({
+  apiKey: process.env.AIRTABLE_API_KEY,
+  requestTimeout: 15_000,
+}).base(process.env.AIRTABLE_BASE_ID!);
+installAirtableReadRetry(base, {
+  maxAttempts: 3,
+  delaysMs: [300, 900],
+  onRetry: ({ attempt, delayMs, error }) => {
+    const detail = String((error as any)?.code || (error as any)?.message || error);
+    console.warn(`Transient Airtable read failure; retry ${attempt + 1}/3 in ${delayMs}ms: ${detail}`);
+  },
+});
 const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS!);
 const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
 const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
@@ -241,23 +253,7 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
 const buildAuthoritativeQuoteBody = (rawBody: any): any => {
   const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
   const promotionType = String(rawBody?.promotionType || '').trim();
-  const supportedPromotions = new Set(['ToyTV 專屬優惠', '首次落單優惠', '新客戶免運費', '現貨優惠']);
-  let offer: PilotOffer = { kind: 'none' };
-  if (supportedPromotions.has(promotionType)) {
-    offer = { kind: 'promotion', promotionType: promotionType as Extract<PilotOffer, { kind: 'promotion' }>['promotionType'] };
-  } else if (String(rawBody?.discountType || '') === '百分比折扣') {
-    offer = {
-      kind: 'percentage',
-      multiplier: Number(rawBody?.discountMultiplier),
-      reason: String(rawBody?.discountReason || '').trim(),
-    };
-  } else if (String(rawBody?.discountType || '') === '指定金額扣減') {
-    offer = {
-      kind: 'fixed',
-      amountHkd: Number(rawBody?.discountAmountHkd || 0),
-      reason: String(rawBody?.discountReason || '').trim(),
-    };
-  }
+  const offer = resolveAuthoritativeOffer(rawBody);
   const input: PilotQuoteInput = {
     customer: String(rawBody?.contactName || 'Create Quote'),
     phone: String(rawBody?.phone || 'not-provided'),
@@ -307,7 +303,7 @@ const buildAuthoritativeQuoteBody = (rawBody: any): any => {
     items: preview.items,
     subtotal: preview.subtotal,
     total: preview.finalTotal,
-    promotionType: preview.promotionType,
+    promotionType: promotionType || preview.promotionType,
     discountType: preview.discountType,
     discountMultiplier: preview.discountMultiplier ?? '',
     discountAmountHkd: preview.discountAmountHkd,
@@ -367,8 +363,26 @@ const getAirtableMetadataTables = async (): Promise<AirtableMetadataTable[]> => 
   const baseId = String(process.env.AIRTABLE_BASE_ID || '').trim();
   if (!apiKey || !baseId) throw new Error('Airtable metadata credentials are missing');
 
-  const response = await fetch(`https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`, {
-    headers: { Authorization: `Bearer ${apiKey}` },
+  const response = await withAirtableReadRetry(async () => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15_000);
+    try {
+      const result = await fetch(`https://api.airtable.com/v0/meta/bases/${encodeURIComponent(baseId)}/tables`, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+        signal: controller.signal,
+      });
+      if (result.status === 408 || result.status === 425 || result.status === 429 || result.status >= 500) {
+        throw Object.assign(new Error(`Airtable metadata request failed (${result.status})`), { statusCode: result.status });
+      }
+      return result;
+    } finally {
+      clearTimeout(timeout);
+    }
+  }, {
+    onRetry: ({ attempt, delayMs, error }) => {
+      const detail = String((error as any)?.code || (error as any)?.message || error);
+      console.warn(`Transient Airtable metadata failure; retry ${attempt + 1}/3 in ${delayMs}ms: ${detail}`);
+    },
   });
   if (!response.ok) {
     throw new Error(`Airtable metadata request failed (${response.status})`);
@@ -2765,6 +2779,30 @@ const getTableSelectOptions = async (tableName: string, fieldName: string, fallb
   }
 };
 
+const rememberManualCampaignOption = async (
+  campaignName: string,
+  channel: string,
+  quoteNumber: string,
+): Promise<void> => {
+  const normalizedName = campaignName.trim();
+  if (!normalizedName) return;
+  const existing = await tableCampaigns.select({
+    fields: ['Campaign Name'],
+    maxRecords: 200,
+  }).all();
+  if (existing.some(record => String(record.fields['Campaign Name'] || '').trim().toLowerCase() === normalizedName.toLowerCase())) {
+    return;
+  }
+  await tableCampaigns.create([{
+    fields: {
+      'Campaign Name': normalizedName,
+      'Channel': channel,
+      'Status': 'Active',
+      'Notes': `Auto-saved from Create Quote ${quoteNumber}`,
+    },
+  }]);
+};
+
 const mapQuoteChannelToInquiryChannel = (channel: string): string =>
   channel === 'KOL' ? 'KOL / ToyTV' : channel;
 
@@ -4276,6 +4314,13 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       if (mode !== '已包本地送貨') setElValue('deliveryOfferReason', '');
     }
 
+    function getFirstOrderDiscountAmount() {
+      var hasDisplayCase = Array.from(document.querySelectorAll('#itemsBody .f-type')).some(function(select) {
+        return String(select.value || '').indexOf('Display Case') >= 0;
+      });
+      return hasDisplayCase ? 500 : 300;
+    }
+
     function applyPromotionPreset() {
       var promotion = getElValue('promotionType');
       if (promotion === 'ToyTV 專屬優惠') {
@@ -4285,7 +4330,14 @@ app.get('/quote/create', async (req: Request, res: Response) => {
         setElValue('discountReason', 'ToyTV 專屬優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
         setElValue('deliveryOfferReason', 'ToyTV 專屬優惠免運費');
-      } else if (promotion === '首次落單優惠' || promotion === '新客戶免運費') {
+      } else if (promotion === '首次落單優惠') {
+        setElValue('discountType', '指定金額扣減');
+        setElValue('discountAmountHkd', String(getFirstOrderDiscountAmount()));
+        setElValue('discountMultiplier', '');
+        setElValue('discountReason', '新客戶優惠');
+        setElValue('deliveryChargeMode', '已包本地送貨');
+        setElValue('deliveryOfferReason', '首次落單優惠');
+      } else if (promotion === '新客戶免運費') {
         setElValue('discountType', '無折扣');
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
@@ -4474,6 +4526,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
           quoteLanguage: getElValue('quoteLanguage') || '中文',
           quoteSourceChannel: getElValue('quoteSourceChannel'),
           campaignSourceDetail: getCampaignDetailValue(),
+          campaignSourceDetailWasManual: getElValue('campaignSourceDetail') === '__manual__',
           inquiryRecordId: getElValue('inquiryRecordId'),
           performanceMonthRecordId: getElValue('performanceMonthRecordId'),
           promotionType: getElValue('promotionType'),
@@ -4588,6 +4641,7 @@ app.post('/quote/create', async (req: Request, res: Response) => {
     const deliveryOfferReason = String(b.deliveryOfferReason || '');
     const quoteSourceChannel = String(b.quoteSourceChannel || '').trim();
     const campaignSourceDetail = String(b.campaignSourceDetail || '').trim();
+    const campaignSourceDetailWasManual = b.campaignSourceDetailWasManual === true || String(b.campaignSourceDetailWasManual) === 'true';
     const inquiryRecordId = String(b.inquiryRecordId || '').trim();
     const performanceMonthRecordId = String(b.performanceMonthRecordId || '').trim();
 
@@ -4695,6 +4749,16 @@ app.post('/quote/create', async (req: Request, res: Response) => {
 
     const createdQuoteRecords = await tableQuotes.create([{ fields: quoteFields }]);
     const createdQuoteRecordId = createdQuoteRecords[0].id;
+
+    if (campaignSourceDetailWasManual && campaignSourceDetail) {
+      try {
+        await rememberManualCampaignOption(campaignSourceDetail, quoteSourceChannel, quoteNumber);
+      } catch (campaignError) {
+        // The Quote is already safely created. A Campaign dropdown helper must
+        // never block or duplicate the Quote creation transaction.
+        console.error('Unable to remember manual Campaign / Source Detail:', campaignError);
+      }
+    }
 
     // V13: Auto-create / update Inquiry from Create Quote so daily workflow does not require double entry.
     // If an Inquiry is manually selected, link this Quote back to it and mark it as Quoted.

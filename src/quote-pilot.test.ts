@@ -5,6 +5,7 @@ import {
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
+  resolveAuthoritativeOffer,
   verifyConfirmationId,
 } from './quote-pilot';
 
@@ -68,6 +69,43 @@ test('Display Case keeps the v4.6 manual outer-dimension rule', () => {
       levels: 3,
     }],
   }), /requires outerDimensions/);
+});
+
+test('Create Quote preserves an explicit discount even when a Promotion is also selected', () => {
+  assert.deepEqual(resolveAuthoritativeOffer({
+    promotionType: '首次落單優惠',
+    discountType: '指定金額扣減',
+    discountAmountHkd: 500,
+    discountReason: '新客戶優惠',
+  }), {
+    kind: 'fixed',
+    amountHkd: 500,
+    reason: '新客戶優惠',
+  });
+});
+
+test('first-order preset defaults to $300 for boxes and $500 when the quote contains a Display Case', () => {
+  const box = buildPilotPreview({
+    ...baselineInput,
+    offer: { kind: 'promotion', promotionType: '首次落單優惠' },
+  });
+  assert.equal(box.discountAmountHkd, 300);
+  assert.equal(box.discountValueHkd, 300);
+  assert.equal(box.promotionType, '首次落單優惠');
+
+  const displayCase = buildPilotPreview({
+    ...baselineInput,
+    items: [{
+      ...baselineInput.items[0],
+      itemType: 'Display Case 疊高展示櫃',
+      levels: 3,
+      outerDimensions: { length: 32, depth: 22, height: 78 },
+    }],
+    offer: { kind: 'promotion', promotionType: '首次落單優惠' },
+  });
+  assert.equal(displayCase.discountAmountHkd, 500);
+  assert.equal(displayCase.discountValueHkd, 500);
+  assert.equal(displayCase.promotionType, '首次落單優惠');
 });
 
 test('Phase 2C.2B preview exposes pricing components and estimated net profit without double-deducting delivery', () => {

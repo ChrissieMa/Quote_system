@@ -49,6 +49,37 @@ export type PilotOffer =
   | { kind: 'percentage'; multiplier: number; reason: string }
   | { kind: 'fixed'; amountHkd: number; reason: string };
 
+export const resolveAuthoritativeOffer = (rawBody: any): PilotOffer => {
+  const discountType = String(rawBody?.discountType || '').trim();
+  // Promotion and Discount are separate Airtable concepts. If Create Quote
+  // supplies an explicit discount, keep it instead of replacing it with the
+  // promotion preset during the authoritative calculation pass.
+  if (discountType === '百分比折扣') {
+    return {
+      kind: 'percentage',
+      multiplier: Number(rawBody?.discountMultiplier),
+      reason: String(rawBody?.discountReason || '').trim(),
+    };
+  }
+  if (discountType === '指定金額扣減') {
+    return {
+      kind: 'fixed',
+      amountHkd: Number(rawBody?.discountAmountHkd || 0),
+      reason: String(rawBody?.discountReason || '').trim(),
+    };
+  }
+
+  const promotionType = String(rawBody?.promotionType || '').trim();
+  const supportedPromotions = new Set(['ToyTV 專屬優惠', '首次落單優惠', '新客戶免運費', '現貨優惠']);
+  if (supportedPromotions.has(promotionType)) {
+    return {
+      kind: 'promotion',
+      promotionType: promotionType as Extract<PilotOffer, { kind: 'promotion' }>['promotionType'],
+    };
+  }
+  return { kind: 'none' };
+};
+
 export type PilotQuoteInput = {
   customer: string;
   phone: string;
@@ -319,7 +350,13 @@ export const buildPilotPreview = (input: PilotQuoteInput): PilotPreview => {
       discountAmountHkd = 200;
       discountReason = 'ToyTV 專屬優惠';
       deliveryOfferReason = 'ToyTV 專屬優惠免運費';
-    } else if (offer.promotionType === '首次落單優惠' || offer.promotionType === '新客戶免運費') {
+    } else if (offer.promotionType === '首次落單優惠') {
+      discountType = '指定金額扣減';
+      discountAmountHkd = items.some(item => item.itemType.includes('Display Case')) ? 500 : 300;
+      discountReason = '新客戶優惠';
+      deliveryOfferReason = '首次落單優惠';
+    } else if (offer.promotionType === '新客戶免運費') {
+      // Historical option kept for old records: delivery offer only, no cash discount.
       discountReason = '新客戶優惠';
       deliveryOfferReason = '首次落單優惠';
     }
