@@ -180,6 +180,13 @@ const positiveInteger = (value: unknown, label: string): number => {
 
 const money = (value: number): number => Math.round(value * 100) / 100;
 
+export const formatDimensionValue = (value: unknown): string => {
+  const text = String(value ?? '').trim();
+  if (!text) return '';
+  const number = Number(text);
+  return Number.isFinite(number) ? String(number) : text;
+};
+
 export const resolveDisplayCaseLevelHeights = (
   rawLevelHeights: unknown,
   levels: number,
@@ -358,9 +365,9 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     interL: String(inner.length),
     interD: String(inner.depth),
     interH: String(inner.height),
-    outerL: outer.length.toFixed(1),
-    outerD: outer.depth.toFixed(1),
-    outerH: outer.height.toFixed(1),
+    outerL: formatDimensionValue(outer.length),
+    outerD: formatDimensionValue(outer.depth),
+    outerH: formatDimensionValue(outer.height),
     noOfLevels: isDisplayCase ? levels : null,
     levelHeights: isDisplayCase
       ? formatDisplayCaseLevelHeights(displayCaseLevelHeights)

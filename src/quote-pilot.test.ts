@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   buildPilotPreview,
   calculatePilotItem,
+  formatDimensionValue,
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
@@ -31,13 +32,21 @@ test('v4.6 pricing preview calculates outer dimensions, costs and final total', 
   const preview = buildPilotPreview(baselineInput);
   assert.deepEqual(
     { l: preview.items[0].outerL, d: preview.items[0].outerD, h: preview.items[0].outerH },
-    { l: '32.0', d: '22.0', h: '28.5' },
+    { l: '32', d: '22', h: '28.5' },
   );
   assert.equal(preview.items[0].qty, 2);
   assert.equal(preview.items[0].profit, 500);
   assert.equal(preview.subtotal, preview.items[0].amount);
   assert.equal(preview.discountValueHkd, 100);
   assert.equal(preview.finalTotal, Math.ceil(preview.subtotal - 100));
+});
+
+test('dimension display removes trailing zeroes but preserves real decimals', () => {
+  assert.equal(formatDimensionValue('35.0'), '35');
+  assert.equal(formatDimensionValue(35), '35');
+  assert.equal(formatDimensionValue('35.50'), '35.5');
+  assert.equal(formatDimensionValue('35.25'), '35.25');
+  assert.equal(formatDimensionValue('-'), '-');
 });
 
 test('a signed confirmation locks the exact preview and creates a stable idempotency token', () => {
@@ -239,7 +248,7 @@ test('Phase 2C.2B preview exposes pricing components and estimated net profit wi
   });
   assert.deepEqual(
     { l: preview.items[0].outerL, d: preview.items[0].outerD, h: preview.items[0].outerH },
-    { l: '78.0', d: '25.0', h: '43.5' },
+    { l: '78', d: '25', h: '43.5' },
   );
   assert.equal(preview.items[0].baseProductAmountHkd, 361.35);
   assert.equal(preview.items[0].accessoriesAmountHkd, 446.49);

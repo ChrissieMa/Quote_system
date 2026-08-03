@@ -5,6 +5,7 @@ import crypto from 'crypto';
 import {
   buildPilotPreview,
   calculatePilotItem,
+  formatDimensionValue,
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
@@ -528,9 +529,9 @@ const nl2br = (str: unknown): string =>
 
 const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
   const single = {
-    l: [String(item?.interL || '-')],
-    d: [String(item?.interD || '-')],
-    h: [String(item?.interH || '-')],
+    l: [formatDimensionValue(item?.interL) || '-'],
+    d: [formatDimensionValue(item?.interD) || '-'],
+    h: [formatDimensionValue(item?.interH) || '-'],
   };
   if (!String(item?.itemType || '').includes('Display Case')) return single;
 
@@ -538,9 +539,9 @@ const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: s
   try {
     const heights = resolveDisplayCaseLevelHeights(item?.levelHeights, levels, item?.interH);
     return {
-      l: heights.map(() => String(item?.interL || '-')),
-      d: heights.map(() => String(item?.interD || '-')),
-      h: heights.map(height => String(Number(height.toFixed(2)))),
+      l: heights.map(() => formatDimensionValue(item?.interL) || '-'),
+      d: heights.map(() => formatDimensionValue(item?.interD) || '-'),
+      h: heights.map(height => formatDimensionValue(height)),
     };
   } catch {
     return single;
@@ -4188,6 +4189,11 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       return isDisplayCase;
     }
 
+    function formatDimensionInputValue(value) {
+      var number = Number(value);
+      return Number.isFinite(number) ? String(number) : '';
+    }
+
     function updateOuterDimensions(row) {
       var isDisplayCase = updateOuterDimensionMode(row);
       if (isDisplayCase) {
@@ -4208,9 +4214,9 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       }
 
       var inc = getOuterDimensionIncrease(row);
-      if (outerLInput) outerLInput.value = (l + inc.outerLengthIncrease).toFixed(1);
-      if (outerDInput) outerDInput.value = (d + inc.outerDepthIncrease).toFixed(1);
-      if (outerHInput) outerHInput.value = (h + inc.outerHeightIncrease).toFixed(1);
+      if (outerLInput) outerLInput.value = formatDimensionInputValue(l + inc.outerLengthIncrease);
+      if (outerDInput) outerDInput.value = formatDimensionInputValue(d + inc.outerDepthIncrease);
+      if (outerHInput) outerHInput.value = formatDimensionInputValue(h + inc.outerHeightIncrease);
     }
 
     function getLightBoardPieceCount(row) {
@@ -5090,7 +5096,6 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
       outerD: isEnglish ? 'Outer D' : '外深',
       outerH: isEnglish ? 'Outer H' : '外高',
       levels: isEnglish ? 'Levels' : '層數',
-      levelHeights: isEnglish ? 'Level Heights' : '每層高度',
       accessories: isEnglish ? 'Accessories' : '配件',
       description: isEnglish ? 'Description' : '描述',
       qty: isEnglish ? 'QTY' : '數量',
@@ -5144,34 +5149,36 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     // Items table rows
     const descriptionSummary = (quote['Description Summary'] as string) || '';
+    const hasDisplayCase = items.some((item: any) => String(item?.itemType || '').includes('Display Case'));
+    const itemColumnCount = hasDisplayCase ? 10 : 9;
 
     const itemRows = items.length === 0
       ? (
           descriptionSummary
             ? `<tr>
                 <td>1</td>
-                <td colspan="10" style="white-space:pre-line;">${nl2br(descriptionSummary)}</td>
+                <td colspan="${itemColumnCount - 1}" style="white-space:pre-line;">${nl2br(descriptionSummary)}</td>
               </tr>`
-            : '<tr><td colspan="11" style="text-align:center;color:#9ca3af;">No items</td></tr>'
+            : `<tr><td colspan="${itemColumnCount}" style="text-align:center;color:#9ca3af;">No items</td></tr>`
         )
       : items.map((item: any, idx: number) => {
           const internalDimensions = itemInternalDimensionLines(item);
+          const isDisplayCase = String(item?.itemType || '').includes('Display Case');
           return `<tr class="item-main-row">
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
+            ${hasDisplayCase ? `<td style="text-align:center;">${isDisplayCase ? (item.noOfLevels || '-') : '-'}</td>` : ''}
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
-            <td style="text-align:center;">${item.outerL || '-'}</td>
-            <td style="text-align:center;">${item.outerD || '-'}</td>
-            <td style="text-align:center;">${item.outerH || '-'}</td>
-            <td style="text-align:center;">${item.noOfLevels || '-'}</td>
-            <td>${escapeHtml(item.levelHeights) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerL)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerD)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerH)) || '-'}</td>
           </tr>
           <tr class="item-sub-detail">
             <td></td>
-            <td colspan="5"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
+            <td colspan="${hasDisplayCase ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
@@ -5223,14 +5230,13 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
                     <th>#</th>
                     <th>${L.itemType}</th>
                     <th>${L.forWhat}</th>
+                    ${hasDisplayCase ? `<th>${L.levels}</th>` : ''}
                     <th>${L.interL}</th>
                     <th>${L.interD}</th>
                     <th>${L.interH}</th>
                     <th>${L.outerL}</th>
                     <th>${L.outerD}</th>
                     <th>${L.outerH}</th>
-                    <th>${L.levels}</th>
-                    <th>${L.levelHeights}</th>
                   </tr>
                 </thead>
                 <tbody>${itemRows}</tbody>
@@ -5744,7 +5750,6 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       outerD: isEnglish ? 'Outer D' : '外深',
       outerH: isEnglish ? 'Outer H' : '外高',
       levels: isEnglish ? 'Levels' : '層數',
-      levelHeights: isEnglish ? 'Level Heights' : '每層高度',
       accessories: isEnglish ? 'Accessories' : '配件',
       description: isEnglish ? 'Description' : '描述',
       qty: isEnglish ? 'QTY' : '數量',
@@ -5780,23 +5785,25 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       }
     }
     items = await getConfirmedOrderItems(order.id, items);
+    const hasDisplayCase = items.some((item: any) => String(item?.itemType || '').includes('Display Case'));
+    const invoiceItemColumnCount = hasDisplayCase ? 14 : 13;
 
     const itemRows = items.length === 0
-      ? `<tr><td colspan="15" style="text-align:center;color:#9ca3af;">${I.noItems}</td></tr>`
+      ? `<tr><td colspan="${invoiceItemColumnCount}" style="text-align:center;color:#9ca3af;">${I.noItems}</td></tr>`
       : items.map((item: any, idx: number) => {
           const internalDimensions = itemInternalDimensionLines(item);
+          const isDisplayCase = String(item?.itemType || '').includes('Display Case');
           return `<tr>
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
+            ${hasDisplayCase ? `<td style="text-align:center;">${isDisplayCase ? (item.noOfLevels || '-') : '-'}</td>` : ''}
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
-            <td style="text-align:center;">${item.outerL || '-'}</td>
-            <td style="text-align:center;">${item.outerD || '-'}</td>
-            <td style="text-align:center;">${item.outerH || '-'}</td>
-            <td style="text-align:center;">${item.noOfLevels || '-'}</td>
-            <td>${escapeHtml(item.levelHeights) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerL)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerD)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerH)) || '-'}</td>
             <td>${renderAccTags(item.accessories)}</td>
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
@@ -5858,14 +5865,13 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
                     <th>#</th>
                     <th>${I.itemType}</th>
                     <th>${I.forWhat}</th>
+                    ${hasDisplayCase ? `<th>${I.levels}</th>` : ''}
                     <th>${I.interL}</th>
                     <th>${I.interD}</th>
                     <th>${I.interH}</th>
                     <th>${I.outerL}</th>
                     <th>${I.outerD}</th>
                     <th>${I.outerH}</th>
-                    <th>${I.levels}</th>
-                    <th>${I.levelHeights}</th>
                     <th>${I.accessories}</th>
                     <th>${I.description}</th>
                     <th>${I.qty}</th>
