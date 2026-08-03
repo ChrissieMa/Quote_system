@@ -2,10 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   buildPilotPreview,
+  calculatePilotItem,
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
   resolveAuthoritativeOffer,
+  resolveDisplayCaseLevelHeights,
   verifyConfirmationId,
 } from './quote-pilot';
 
@@ -69,6 +71,84 @@ test('Display Case keeps the v4.6 manual outer-dimension rule', () => {
       levels: 3,
     }],
   }), /requires outerDimensions/);
+});
+
+test('Display Case prices non-uniform inner heights layer by layer while keeping one item', () => {
+  const calculated = calculatePilotItem({
+    itemType: 'Display Case 疊高展示櫃',
+    innerDimensions: { length: 55, depth: 30, height: 50 },
+    outerDimensions: { length: 57, depth: 32, height: 140 },
+    quantity: 1,
+    levels: 3,
+    levelHeights: '第1層：50 cm｜第2層：50 cm｜第3層：40 cm',
+    accessories: { '獨立燈板 - 上下燈': 1 },
+    chinaFreight: 120,
+    hongKongDelivery: 300,
+    profit: 1000,
+  });
+  const displayBoxRmb = (l: number, d: number, h: number) => {
+    const fiveSideArea = (l * d) + ((l * h + d * h) * 2);
+    return (fiveSideArea * 0.025) + (l * d * 0.013) + (l * d * 0.013) + 20;
+  };
+  const expectedBaseHkd = Math.round(
+    ((displayBoxRmb(55, 30, 50) * 2 + displayBoxRmb(55, 30, 40)) / 0.85) * 100,
+  ) / 100;
+
+  assert.equal(calculated.noOfLevels, 3);
+  assert.equal(calculated.levelHeights, '第1層：50 cm｜第2層：50 cm｜第3層：40 cm');
+  assert.equal(calculated.baseProductAmountHkd, expectedBaseHkd);
+  assert.equal(
+    Math.round((calculated.amount - calculated.unitProductAndAccessoriesHkd) * 100) / 100,
+    1420,
+  );
+});
+
+test('same-height Display Case remains equivalent to the existing Levels multiplication', () => {
+  const common = {
+    itemType: 'Display Case 疊高展示櫃' as const,
+    innerDimensions: { length: 55, depth: 30, height: 50 },
+    outerDimensions: { length: 57, depth: 32, height: 156 },
+    quantity: 1,
+    levels: 3,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  };
+  const fallback = calculatePilotItem({ ...common, levelHeights: '' });
+  const explicit = calculatePilotItem({ ...common, levelHeights: '50, 50, 50' });
+  assert.equal(explicit.baseProductAmountHkd, fallback.baseProductAmountHkd);
+  assert.equal(explicit.amount, fallback.amount);
+});
+
+test('Display Case accessories keep their entered quantities and are not multiplied by Levels', () => {
+  const accessories = { '獨立燈板 - 上燈': 1, '前板彩色刻字': 1 };
+  const box = calculatePilotItem({
+    itemType: 'Display box 展示盒',
+    innerDimensions: { length: 55, depth: 30, height: 50 },
+    quantity: 1,
+    accessories,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  const displayCase = calculatePilotItem({
+    itemType: 'Display Case 疊高展示櫃',
+    innerDimensions: { length: 55, depth: 30, height: 50 },
+    outerDimensions: { length: 57, depth: 32, height: 140 },
+    quantity: 1,
+    levels: 3,
+    levelHeights: '50, 50, 40',
+    accessories,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  assert.equal(displayCase.accessoriesAmountHkd, box.accessoriesAmountHkd);
+});
+
+test('Display Case rejects an incomplete per-level height list', () => {
+  assert.deepEqual(resolveDisplayCaseLevelHeights('', 3, 50), [50, 50, 50]);
+  assert.throws(() => resolveDisplayCaseLevelHeights('50, 40', 3, 50), /exactly 3 positive heights/);
 });
 
 test('Create Quote preserves an explicit discount even when a Promotion is also selected', () => {

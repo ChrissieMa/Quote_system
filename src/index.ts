@@ -3779,7 +3779,10 @@ app.get('/quote/create', async (req: Request, res: Response) => {
                     <td><input type="number" class="f-od" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
                     <td><input type="number" class="f-oh" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
                     <td><input type="number" class="f-lv" min="1" style="width:50px"></td>
-                    <td><input type="text" class="f-lh" placeholder="e.g. 20,30"></td>
+                    <td style="min-width:190px;">
+                      <input type="hidden" class="f-lh">
+                      <div class="f-level-heights-editor" style="font-size:12px;color:#6b7280;">選擇展示櫃及輸入 Levels 後設定</div>
+                    </td>
                     <td>
                       <div style="min-width:300px;max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;font-size:12px;background:#fff;">
                         <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">單次配件</div>
@@ -3962,6 +3965,117 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       return single;
     }
 
+    function levelHeightNumberText(value) {
+      var rounded = Math.round(Number(value) * 100) / 100;
+      return String(rounded);
+    }
+
+    function parseStoredLevelHeights(value) {
+      var text = String(value || '').trim();
+      if (!text) return [];
+      return text.split(/[|｜,，、;；/／\\n]+/).map(function(part) {
+        var matches = String(part || '').match(/-?\\d+(?:\\.\\d+)?/g) || [];
+        return parseNum(matches[matches.length - 1]);
+      }).filter(function(value) { return value > 0; });
+    }
+
+    function formatLevelHeights(values) {
+      return values.map(function(value, index) {
+        return '第' + (index + 1) + '層：' + levelHeightNumberText(value) + ' cm';
+      }).join('｜');
+    }
+
+    function syncLevelHeights(row) {
+      var hidden = row.querySelector('.f-lh');
+      var inputs = Array.from(row.querySelectorAll('.f-level-height-input'));
+      if (!hidden) return;
+      var values = inputs.map(function(input) { return parseNum(input.value); });
+      hidden.value = inputs.length > 0 && values.every(function(value) { return value > 0; })
+        ? formatLevelHeights(values)
+        : '';
+    }
+
+    function bindLevelHeightInputs(row) {
+      row.querySelectorAll('.f-level-height-input').forEach(function(input) {
+        if (input.getAttribute('data-bound') === 'true') return;
+        input.setAttribute('data-bound', 'true');
+        input.addEventListener('input', function() {
+          syncLevelHeights(row);
+          recalcSubtotal();
+        });
+      });
+    }
+
+    function updateLevelHeightEditor(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
+      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+      var editor = row.querySelector('.f-level-heights-editor');
+      var hidden = row.querySelector('.f-lh');
+      if (!editor || !hidden) return;
+
+      if (!isDisplayCase || levels < 2) {
+        editor.innerHTML = isDisplayCase ? '1層會直接使用 Inter H' : '只適用於疊高展示櫃';
+        hidden.value = '';
+        return;
+      }
+
+      var existingInputs = Array.from(editor.querySelectorAll('.f-level-height-input'));
+      var existingValues = existingInputs.map(function(input) { return parseNum(input.value); });
+      var storedValues = parseStoredLevelHeights(hidden.value);
+      var defaultHeight = parseNum((row.querySelector('.f-ih') || {}).value);
+
+      if (existingInputs.length !== levels) {
+        var values = [];
+        for (var i = 0; i < levels; i += 1) {
+          values.push(existingValues[i] || storedValues[i] || defaultHeight || 0);
+        }
+        var fields = values.map(function(value, index) {
+          return '<label style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">'
+            + '<span>第' + (index + 1) + '層</span>'
+            + '<input type="number" min="0.1" step="0.1" class="f-level-height-input" value="'
+            + (value > 0 ? levelHeightNumberText(value) : '')
+            + '" style="width:78px;" placeholder="內高 cm">'
+            + '</label>';
+        }).join('');
+        editor.innerHTML = fields
+          + '<button type="button" class="btn btn-outline btn-sm f-apply-level-height" style="width:100%;margin-top:3px;">用 Inter H 套用全部層</button>';
+        var applyButton = editor.querySelector('.f-apply-level-height');
+        if (applyButton) {
+          applyButton.addEventListener('click', function() {
+            var height = parseNum((row.querySelector('.f-ih') || {}).value);
+            if (!(height > 0)) {
+              alert('請先輸入 Inter H。');
+              return;
+            }
+            row.querySelectorAll('.f-level-height-input').forEach(function(input) {
+              input.value = levelHeightNumberText(height);
+            });
+            syncLevelHeights(row);
+            recalcSubtotal();
+          });
+        }
+      } else if (defaultHeight > 0) {
+        existingInputs.forEach(function(input) {
+          if (!(parseNum(input.value) > 0)) input.value = levelHeightNumberText(defaultHeight);
+        });
+      }
+
+      bindLevelHeightInputs(row);
+      syncLevelHeights(row);
+    }
+
+    function getLevelHeightsForCalculation(row, levels, fallbackHeight) {
+      var inputs = Array.from(row.querySelectorAll('.f-level-height-input'));
+      if (levels < 2) return [fallbackHeight];
+      if (inputs.length !== levels) {
+        updateLevelHeightEditor(row);
+        inputs = Array.from(row.querySelectorAll('.f-level-height-input'));
+      }
+      var values = inputs.map(function(input) { return parseNum(input.value); });
+      return values.length === levels && values.every(function(value) { return value > 0; }) ? values : null;
+    }
+
     function calcDisplayBoxRmb(l, d, h) {
       var fiveSideArea = (l * d) + ((l * h + d * h) * 2);
       return (fiveSideArea * 0.025) + (l * d * 0.013) + (l * d * 0.013) + 20;
@@ -4092,16 +4206,19 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       var hkDelivery = parseNum((row.querySelector('.f-hk-delivery') || {}).value);
       var profit = parseNum((row.querySelector('.f-profit') || {}).value);
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
       var qtyMap = getAccessoryQtyMap(row);
+      var levelHeights = isDisplayCase ? getLevelHeightsForCalculation(row, levels, h) : [h];
 
-      if (!(l > 0 && d > 0 && h > 0)) {
+      if (!(l > 0 && d > 0 && h > 0) || !levelHeights) {
         (row.querySelector('.f-amt') || {}).value = '';
         return 0;
       }
 
-      var baseRmb = calcDisplayBoxRmb(l, d, h);
-      var sizeRmb = itemType.indexOf('Display Case') !== -1 ? (baseRmb * levels) : baseRmb;
+      var sizeRmb = levelHeights.reduce(function(sum, levelHeight) {
+        return sum + calcDisplayBoxRmb(l, d, levelHeight);
+      }, 0);
       var accessoryRmb = 0;
       var hkdAddons = 0;
 
@@ -4163,9 +4280,12 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 
     function bindRowEvents(row) {
       row.querySelectorAll('input, select').forEach(function(el) {
-        if (el.classList.contains('f-amt')) return;
+        if (el.classList.contains('f-amt') || el.classList.contains('f-lh') || el.classList.contains('f-level-height-input')) return;
         var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
+          if (el.classList.contains('f-type') || el.classList.contains('f-lv') || el.classList.contains('f-ih')) {
+            updateLevelHeightEditor(row);
+          }
           updateOuterDimensions(row);
           recalcSubtotal();
         });
@@ -4195,6 +4315,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       });
       tbody.appendChild(clone);
       bindRowEvents(clone);
+      updateLevelHeightEditor(clone);
       updateOuterDimensionMode(clone);
       updateOuterDimensions(clone);
       recalcSubtotal();
@@ -4526,6 +4647,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     document.addEventListener('DOMContentLoaded', function() {
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
         bindRowEvents(row);
+        updateLevelHeightEditor(row);
         updateOuterDimensions(row);
       });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
@@ -4542,6 +4664,22 @@ app.get('/quote/create', async (req: Request, res: Response) => {
         if (promotion === '舊客戶優惠' && discountType === '指定金額扣減' && discountAmount <= 0) {
           alert('請輸入舊客戶優惠的扣減金額。');
           document.getElementById('discountAmountHkd').focus();
+          return;
+        }
+        var invalidLevelHeightInput = null;
+        document.querySelectorAll('#itemsBody tr').forEach(function(row) {
+          syncLevelHeights(row);
+          var itemType = ((row.querySelector('.f-type') || {}).value || '');
+          var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+          var innerHeight = parseNum((row.querySelector('.f-ih') || {}).value);
+          if (itemType.indexOf('Display Case') !== -1 && levels >= 2
+            && !getLevelHeightsForCalculation(row, levels, innerHeight) && !invalidLevelHeightInput) {
+            invalidLevelHeightInput = row.querySelector('.f-level-height-input');
+          }
+        });
+        if (invalidLevelHeightInput) {
+          alert('請完整輸入疊高展示櫃每一層的內高。');
+          invalidLevelHeightInput.focus();
           return;
         }
         var payload = {

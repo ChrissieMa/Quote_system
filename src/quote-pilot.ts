@@ -179,6 +179,39 @@ const positiveInteger = (value: unknown, label: string): number => {
 
 const money = (value: number): number => Math.round(value * 100) / 100;
 
+export const resolveDisplayCaseLevelHeights = (
+  rawLevelHeights: unknown,
+  levels: number,
+  fallbackHeight: number,
+): number[] => {
+  const levelCount = positiveInteger(levels, 'Levels');
+  const fallback = finitePositive(fallbackHeight, 'Inner height');
+  const text = String(rawLevelHeights || '').trim();
+  if (!text) return Array.from({ length: levelCount }, () => fallback);
+
+  const segments = text
+    .split(/[|｜,，、;；/／\n]+/)
+    .map(part => part.trim())
+    .filter(Boolean);
+  let values: number[] = [];
+  if (segments.length === levelCount) {
+    values = segments.map(segment => {
+      const matches = segment.match(/-?\d+(?:\.\d+)?/g) || [];
+      return Number(matches[matches.length - 1]);
+    });
+  } else if (segments.length === 1) {
+    values = (text.match(/-?\d+(?:\.\d+)?/g) || []).map(Number);
+  }
+
+  if (values.length !== levelCount || values.some(value => !Number.isFinite(value) || value <= 0)) {
+    throw new Error(`Level Heights must contain exactly ${levelCount} positive heights.`);
+  }
+  return values;
+};
+
+const formatDisplayCaseLevelHeights = (heights: number[]): string =>
+  heights.map((height, index) => `第${index + 1}層：${Number(height.toFixed(2))} cm`).join('｜');
+
 const calcDisplayBoxRmb = (l: number, d: number, h: number): number => {
   const fiveSideArea = (l * d) + ((l * h + d * h) * 2);
   return (fiveSideArea * 0.025) + (l * d * 0.013) + (l * d * 0.013) + 20;
@@ -250,8 +283,13 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   const hongKongDelivery = finiteNonNegative(input.hongKongDelivery, 'Hong Kong delivery');
   const profit = finiteNonNegative(input.profit, 'Profit');
 
-  const baseRmb = calcDisplayBoxRmb(inner.length, inner.depth, inner.height);
-  const sizeRmb = isDisplayCase ? baseRmb * levels : baseRmb;
+  const displayCaseLevelHeights = isDisplayCase
+    ? resolveDisplayCaseLevelHeights(input.levelHeights, levels, inner.height)
+    : [inner.height];
+  const sizeRmb = displayCaseLevelHeights.reduce(
+    (sum, levelHeight) => sum + calcDisplayBoxRmb(inner.length, inner.depth, levelHeight),
+    0,
+  );
   let accessoryRmb = 0;
   let hkdAddons = 0;
   const lightBoardCount =
@@ -306,7 +344,9 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     outerD: outer.depth.toFixed(1),
     outerH: outer.height.toFixed(1),
     noOfLevels: isDisplayCase ? levels : null,
-    levelHeights: String(input.levelHeights || ''),
+    levelHeights: isDisplayCase && levels > 1
+      ? formatDisplayCaseLevelHeights(displayCaseLevelHeights)
+      : String(input.levelHeights || ''),
     accessories: accessoriesList,
     accessoryQty: accessories,
     description: String(input.description || ''),
