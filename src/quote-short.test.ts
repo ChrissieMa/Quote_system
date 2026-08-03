@@ -10,7 +10,7 @@ const productionSources = [
   'Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic',
   'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other',
 ];
-const productionDiscountReasons = ['ToyTV 專屬優惠', '首次落單優惠', '回購優惠', '新客戶優惠'];
+const productionDiscountReasons = ['首次落單優惠', '舊客戶優惠'];
 
 test('parses the Phase 2C.2B one-line Display Box example with defaults and aliases', () => {
   const parsed = parseShortQuoteText(
@@ -33,7 +33,7 @@ test('parses the Phase 2C.2B one-line Display Box example with defaults and alia
   assert.equal(parsed.validUntilDays, 7);
   assert.equal(resolveSourceAlias(parsed.sourceAlias, productionSources).value, 'Facebook Organic');
   assert.deepEqual(resolveOfferPreset(parsed, productionDiscountReasons), {
-    offer: { kind: 'fixed', amountHkd: 300, reason: '新客戶優惠' },
+    offer: { kind: 'fixed', amountHkd: 300, reason: '首次落單優惠' },
     label: '盒-300',
   });
 });
@@ -75,7 +75,7 @@ Valid Until：默認7天`);
   assert.equal(parsed.validUntilDays, 7);
   assert.equal(resolveSourceAlias(parsed.sourceAlias, productionSources).value, 'Website');
   assert.deepEqual(resolveOfferPreset(parsed, productionDiscountReasons), {
-    offer: { kind: 'fixed', amountHkd: 300, reason: '新客戶優惠' },
+    offer: { kind: 'fixed', amountHkd: 300, reason: '首次落單優惠' },
     label: '盒-300',
   });
 });

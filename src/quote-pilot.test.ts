@@ -76,12 +76,18 @@ test('Create Quote preserves an explicit discount even when a Promotion is also 
     promotionType: '首次落單優惠',
     discountType: '指定金額扣減',
     discountAmountHkd: 500,
-    discountReason: '新客戶優惠',
+    discountReason: '首次落單優惠',
   }), {
     kind: 'fixed',
     amountHkd: 500,
-    reason: '新客戶優惠',
+    reason: '首次落單優惠',
   });
+});
+
+test('retired promotion choices no longer resolve as current presets', () => {
+  assert.deepEqual(resolveAuthoritativeOffer({ promotionType: 'ToyTV 專屬優惠' }), { kind: 'none' });
+  assert.deepEqual(resolveAuthoritativeOffer({ promotionType: '現貨優惠' }), { kind: 'none' });
+  assert.deepEqual(resolveAuthoritativeOffer({ promotionType: '新客戶免運費' }), { kind: 'none' });
 });
 
 test('first-order preset defaults to $300 for boxes and $500 when the quote contains a Display Case', () => {
@@ -130,7 +136,7 @@ test('Phase 2C.2B preview exposes pricing components and estimated net profit wi
       hongKongDelivery: 260,
       profit: 800,
     }],
-    offer: { kind: 'fixed', amountHkd: 300, reason: '新客戶優惠' },
+    offer: { kind: 'fixed', amountHkd: 300, reason: '首次落單優惠' },
   });
   assert.deepEqual(
     { l: preview.items[0].outerL, d: preview.items[0].outerD, h: preview.items[0].outerH },

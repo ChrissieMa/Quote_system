@@ -45,7 +45,7 @@ export type PilotItemInput = {
 
 export type PilotOffer =
   | { kind: 'none' }
-  | { kind: 'promotion'; promotionType: 'ToyTV 專屬優惠' | '首次落單優惠' | '新客戶免運費' | '現貨優惠' }
+  | { kind: 'promotion'; promotionType: '首次落單優惠' }
   | { kind: 'percentage'; multiplier: number; reason: string }
   | { kind: 'fixed'; amountHkd: number; reason: string };
 
@@ -70,7 +70,7 @@ export const resolveAuthoritativeOffer = (rawBody: any): PilotOffer => {
   }
 
   const promotionType = String(rawBody?.promotionType || '').trim();
-  const supportedPromotions = new Set(['ToyTV 專屬優惠', '首次落單優惠', '新客戶免運費', '現貨優惠']);
+  const supportedPromotions = new Set(['首次落單優惠']);
   if (supportedPromotions.has(promotionType)) {
     return {
       kind: 'promotion',
@@ -345,19 +345,10 @@ export const buildPilotPreview = (input: PilotQuoteInput): PilotPreview => {
 
   if (offer.kind === 'promotion') {
     promotionType = offer.promotionType;
-    if (offer.promotionType === 'ToyTV 專屬優惠') {
-      discountType = '指定金額扣減';
-      discountAmountHkd = 200;
-      discountReason = 'ToyTV 專屬優惠';
-      deliveryOfferReason = 'ToyTV 專屬優惠免運費';
-    } else if (offer.promotionType === '首次落單優惠') {
+    if (offer.promotionType === '首次落單優惠') {
       discountType = '指定金額扣減';
       discountAmountHkd = items.some(item => item.itemType.includes('Display Case')) ? 500 : 300;
-      discountReason = '新客戶優惠';
-      deliveryOfferReason = '首次落單優惠';
-    } else if (offer.promotionType === '新客戶免運費') {
-      // Historical option kept for old records: delivery offer only, no cash discount.
-      discountReason = '新客戶優惠';
+      discountReason = '首次落單優惠';
       deliveryOfferReason = '首次落單優惠';
     }
   } else if (offer.kind === 'percentage') {

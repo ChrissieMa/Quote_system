@@ -162,7 +162,7 @@ export const parseShortQuoteText = (raw: string): ShortQuoteParseResult => {
   const customAmount = uniqueOffers[0] === 'custom'
     ? numberAfter(text, /自訂(?:-\s*)?(\d+(?:\.\d+)?)/)
     : null;
-  const customReasonMatch = text.match(/自訂(?:-\s*)?\d+(?:\.\d+)?\s+(首次落單優惠|回購優惠|新客戶優惠|ToyTV 專屬優惠)/);
+  const customReasonMatch = text.match(/自訂(?:-\s*)?\d+(?:\.\d+)?\s+(首次落單優惠|舊客戶優惠)/);
 
   return {
     kind: 'ready',
@@ -264,7 +264,7 @@ export const resolveOfferPreset = (
   }
 
   let amount = parsed.offerCode === 'box-300' ? 300 : parsed.offerCode === 'case-500' ? 500 : parsed.customDiscountAmount;
-  let reason = parsed.offerCode === 'custom' ? parsed.customDiscountReason : '新客戶優惠';
+  let reason = parsed.offerCode === 'custom' ? parsed.customDiscountReason : '首次落單優惠';
   if (parsed.offerCode === 'custom' && (!Number.isFinite(amount) || amount! < 0 || !reason)) {
     return {
       clarification: {

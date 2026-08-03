@@ -253,12 +253,34 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
 const buildAuthoritativeQuoteBody = (rawBody: any): any => {
   const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
   const promotionType = String(rawBody?.promotionType || '').trim();
-  const offer = resolveAuthoritativeOffer(rawBody);
+  const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠']);
+  if (!allowedPromotions.has(promotionType)) {
+    throw new Error('無效的使用優惠選項。');
+  }
+  const deliveryOfferReason = String(rawBody?.deliveryOfferReason || '').trim();
+  const allowedDeliveryOfferReasons = new Set(['', '首次落單優惠', '加碼優惠']);
+  if (!allowedDeliveryOfferReasons.has(deliveryOfferReason)) {
+    throw new Error('無效的免運費原因。');
+  }
+  const discountType = String(rawBody?.discountType || '無折扣').trim();
+  const discountAmountHkd = Number(rawBody?.discountAmountHkd || 0);
+  if (discountType !== '無折扣' && !promotionType) {
+    throw new Error('使用折扣前，請先選擇首次落單優惠或舊客戶優惠。');
+  }
+  if (promotionType === '舊客戶優惠' && discountType === '指定金額扣減' && discountAmountHkd <= 0) {
+    throw new Error('請輸入舊客戶優惠的扣減金額。');
+  }
+  const normalizedBody = {
+    ...rawBody,
+    discountReason: promotionType || '',
+    deliveryOfferReason,
+  };
+  const offer = resolveAuthoritativeOffer(normalizedBody);
   const input: PilotQuoteInput = {
     customer: String(rawBody?.contactName || 'Create Quote'),
     phone: String(rawBody?.phone || 'not-provided'),
     contactMethod: rawBody?.contactMethod,
-    deliveryOfferReason: String(rawBody?.deliveryOfferReason || '').trim(),
+    deliveryOfferReason,
     offer,
     items: rawItems.map((item: any) => {
       const accessoryQty: Record<string, number> = {};
@@ -299,7 +321,7 @@ const buildAuthoritativeQuoteBody = (rawBody: any): any => {
   };
   const preview = buildPilotPreview(input);
   return {
-    ...rawBody,
+    ...normalizedBody,
     items: preview.items,
     subtotal: preview.subtotal,
     total: preview.finalTotal,
@@ -422,15 +444,20 @@ const keepExistingAirtableFields = async (
   }
 };
 
-const getSharedSelectOptions = async (fieldName: string, fallback: string[]): Promise<string[]> => {
+const getSharedSelectOptions = async (
+  fieldName: string,
+  fallback: string[],
+  allowed: string[] = fallback,
+): Promise<string[]> => {
   try {
     const tables = await getAirtableMetadataTables();
     const quotesTable = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
     const ordersTable = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
     const quoteChoices = quotesTable?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
     const orderChoices = ordersTable?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
-    const shared = quoteChoices.filter(choice => orderChoices.includes(choice));
-    return shared.length ? shared : fallback;
+    const allowedSet = new Set(allowed);
+    const shared = quoteChoices.filter(choice => orderChoices.includes(choice) && allowedSet.has(choice));
+    return shared.length ? shared : fallback.filter(choice => allowedSet.has(choice));
   } catch (error) {
     console.warn(`Unable to load dynamic Airtable options for ${fieldName}:`, error);
     return fallback;
@@ -447,6 +474,8 @@ const isEnglishLanguage = (value: unknown): boolean => normalizeQuoteLanguage(va
 
 const mapDiscountReasonEn = (reason: string): string => {
   const map: Record<string, string> = {
+    '首次落單優惠': 'First order offer',
+    '舊客戶優惠': 'Returning customer offer',
     'ToyTV 專屬優惠': 'ToyTV exclusive offer',
     '新客戶優惠': 'New customer offer',
     '回購優惠': 'Returning customer offer'
@@ -520,6 +549,7 @@ const formatDeliveryOfferReasonEn = (reason: string): string => {
   const reasonMap: Record<string, string> = {
     '新客戶免運費': 'First order offer',
     '首次落單優惠': 'First order offer',
+    '加碼優惠': 'Bonus offer',
     'ToyTV 專屬優惠免運費': 'ToyTV exclusive free delivery offer'
   };
   return reasonMap[reason] || reason || '';
@@ -3537,14 +3567,20 @@ app.get('/quote/create', async (req: Request, res: Response) => {
   let campaignOptions = '<option value="">請選擇 Campaign / Ads</option>';
   const selectedInquiryRecordId = String(req.query.inquiry || '').trim();
 
-  const [promotionTypeOptions, discountReasonOptions, deliveryOfferReasonOptions] = await Promise.all([
-    getSharedSelectOptions('Promotion / Offer Type', ['首次落單優惠', 'ToyTV 專屬優惠', '現貨優惠']),
-    getSharedSelectOptions('Discount Reason', ['ToyTV 專屬優惠', '新客戶優惠', '回購優惠']),
-    getSharedSelectOptions('Delivery Offer Reason', ['首次落單優惠', 'ToyTV 專屬優惠免運費']),
+  const [promotionTypeOptions, deliveryOfferReasonOptions] = await Promise.all([
+    getSharedSelectOptions(
+      'Promotion / Offer Type',
+      ['首次落單優惠', '舊客戶優惠'],
+      ['首次落單優惠', '舊客戶優惠'],
+    ),
+    getSharedSelectOptions(
+      'Delivery Offer Reason',
+      ['首次落單優惠', '加碼優惠'],
+      ['首次落單優惠', '加碼優惠'],
+    ),
   ]);
 
   const promotionTypeOptionTags = renderSelectOptionTags(promotionTypeOptions);
-  const discountReasonOptionTags = renderSelectOptionTags(discountReasonOptions);
   const deliveryOfferReasonOptionTags = renderSelectOptionTags(deliveryOfferReasonOptions);
   try {
     const inquiryRecords = await tableInquiries.select({ maxRecords: 100 }).all();
@@ -3831,14 +3867,8 @@ app.get('/quote/create', async (req: Request, res: Response) => {
               </div>
             </div>
 
-            <div class="form-row form-row-3">
-              <div class="form-group">
-                <label>折扣原因</label>
-                <select name="discountReason" id="discountReason" onchange="recalcTotal()">
-                  <option value="">不適用</option>
-                  ${discountReasonOptionTags}
-                </select>
-              </div>
+            <input type="hidden" name="discountReason" id="discountReason" value="">
+            <div class="form-row form-row-2">
               <div class="form-group">
                 <label>送貨收費方式</label>
                 <select name="deliveryChargeMode" id="deliveryChargeMode" onchange="toggleDeliveryInputs(); recalcTotal();">
@@ -4298,13 +4328,14 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 
     function toggleDiscountInputs() {
       var discountType = getElValue('discountType');
+      var promotion = getElValue('promotionType');
       var multiplierGroup = document.getElementById('discountMultiplierGroup');
       var amountGroup = document.getElementById('discountAmountGroup');
       if (multiplierGroup) multiplierGroup.style.display = discountType === '百分比折扣' ? 'block' : 'none';
       if (amountGroup) amountGroup.style.display = discountType === '指定金額扣減' ? 'block' : 'none';
       if (discountType !== '百分比折扣') setElValue('discountMultiplier', '');
       if (discountType !== '指定金額扣減') setElValue('discountAmountHkd', '');
-      if (discountType === '無折扣') setElValue('discountReason', '');
+      setElValue('discountReason', promotion === '首次落單優惠' || promotion === '舊客戶優惠' ? promotion : '');
     }
 
     function toggleDeliveryInputs() {
@@ -4323,32 +4354,18 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 
     function applyPromotionPreset() {
       var promotion = getElValue('promotionType');
-      if (promotion === 'ToyTV 專屬優惠') {
-        setElValue('discountType', '指定金額扣減');
-        setElValue('discountAmountHkd', '200');
-        setElValue('discountMultiplier', '');
-        setElValue('discountReason', 'ToyTV 專屬優惠');
-        setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', 'ToyTV 專屬優惠免運費');
-      } else if (promotion === '首次落單優惠') {
+      if (promotion === '首次落單優惠') {
         setElValue('discountType', '指定金額扣減');
         setElValue('discountAmountHkd', String(getFirstOrderDiscountAmount()));
         setElValue('discountMultiplier', '');
-        setElValue('discountReason', '新客戶優惠');
+        setElValue('discountReason', '首次落單優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
         setElValue('deliveryOfferReason', '首次落單優惠');
-      } else if (promotion === '新客戶免運費') {
-        setElValue('discountType', '無折扣');
+      } else if (promotion === '舊客戶優惠') {
+        setElValue('discountType', '指定金額扣減');
         setElValue('discountAmountHkd', '');
         setElValue('discountMultiplier', '');
-        setElValue('discountReason', '新客戶優惠');
-        setElValue('deliveryChargeMode', '已包本地送貨');
-        setElValue('deliveryOfferReason', '首次落單優惠');
-      } else if (promotion === '現貨優惠') {
-        setElValue('discountType', '無折扣');
-        setElValue('discountAmountHkd', '');
-        setElValue('discountMultiplier', '');
-        setElValue('discountReason', '');
+        setElValue('discountReason', '舊客戶優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
         setElValue('deliveryOfferReason', '');
       } else if (promotion === '') {
@@ -4514,6 +4531,19 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
         e.preventDefault();
         var form = e.target;
+        var promotion = getElValue('promotionType');
+        var discountType = getElValue('discountType');
+        var discountAmount = parseFloat(getElValue('discountAmountHkd')) || 0;
+        if (discountType !== '無折扣' && !promotion) {
+          alert('使用折扣前，請先選擇首次落單優惠或舊客戶優惠。');
+          document.getElementById('promotionType').focus();
+          return;
+        }
+        if (promotion === '舊客戶優惠' && discountType === '指定金額扣減' && discountAmount <= 0) {
+          alert('請輸入舊客戶優惠的扣減金額。');
+          document.getElementById('discountAmountHkd').focus();
+          return;
+        }
         var payload = {
           customerRecordId: (document.getElementById('customerRecordId') || {}).value || '',
           customerSource: (document.getElementById('customerSource') || {}).value || '',
@@ -4893,6 +4923,8 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     };
     const mapDiscountReasonEn = (reason: string): string => {
       const map: Record<string, string> = {
+        '首次落單優惠': 'First order offer',
+        '舊客戶優惠': 'Returning customer offer',
         'ToyTV 專屬優惠': 'ToyTV exclusive offer',
         '新客戶優惠': 'New customer offer',
         '回購優惠': 'Returning customer offer'
