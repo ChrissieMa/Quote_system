@@ -76,7 +76,7 @@ test('Display Case keeps the v4.6 manual outer-dimension rule', () => {
 test('Display Case prices non-uniform inner heights layer by layer while keeping one item', () => {
   const calculated = calculatePilotItem({
     itemType: 'Display Case 疊高展示櫃',
-    innerDimensions: { length: 55, depth: 30, height: 50 },
+    innerDimensions: { length: 55, depth: 30 },
     outerDimensions: { length: 57, depth: 32, height: 140 },
     quantity: 1,
     levels: 3,
@@ -95,6 +95,7 @@ test('Display Case prices non-uniform inner heights layer by layer while keeping
   ) / 100;
 
   assert.equal(calculated.noOfLevels, 3);
+  assert.equal(calculated.interH, '50');
   assert.equal(calculated.levelHeights, '第1層：50 cm｜第2層：50 cm｜第3層：40 cm');
   assert.equal(calculated.baseProductAmountHkd, expectedBaseHkd);
   assert.equal(
@@ -116,8 +117,14 @@ test('same-height Display Case remains equivalent to the existing Levels multipl
   };
   const fallback = calculatePilotItem({ ...common, levelHeights: '' });
   const explicit = calculatePilotItem({ ...common, levelHeights: '50, 50, 50' });
+  const levelHeightsOnly = calculatePilotItem({
+    ...common,
+    innerDimensions: { length: 55, depth: 30 },
+    levelHeights: '50, 50, 50',
+  });
   assert.equal(explicit.baseProductAmountHkd, fallback.baseProductAmountHkd);
   assert.equal(explicit.amount, fallback.amount);
+  assert.equal(levelHeightsOnly.amount, fallback.amount);
 });
 
 test('Display Case accessories keep their entered quantities and are not multiplied by Levels', () => {
@@ -148,7 +155,19 @@ test('Display Case accessories keep their entered quantities and are not multipl
 
 test('Display Case rejects an incomplete per-level height list', () => {
   assert.deepEqual(resolveDisplayCaseLevelHeights('', 3, 50), [50, 50, 50]);
+  assert.throws(() => resolveDisplayCaseLevelHeights('', 3), /exactly 3 positive heights/);
   assert.throws(() => resolveDisplayCaseLevelHeights('50, 40', 3, 50), /exactly 3 positive heights/);
+});
+
+test('Display box still requires Inter H', () => {
+  assert.throws(() => calculatePilotItem({
+    itemType: 'Display box 展示盒',
+    innerDimensions: { length: 55, depth: 30 },
+    quantity: 1,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  }), /Inner height/);
 });
 
 test('Create Quote preserves an explicit discount even when a Promotion is also selected', () => {

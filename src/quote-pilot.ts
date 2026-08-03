@@ -27,11 +27,12 @@ const ALLOWED_ACCESSORIES = new Set<string>(PILOT_ACCESSORIES);
 const RMB_DIVISOR = 0.85;
 
 export type PilotDimensions = { length: number; depth: number; height: number };
+export type PilotInnerDimensions = { length: number; depth: number; height?: number };
 
 export type PilotItemInput = {
   itemType: typeof PILOT_ITEM_TYPES[number];
   forWhat?: string;
-  innerDimensions: PilotDimensions;
+  innerDimensions: PilotInnerDimensions;
   outerDimensions?: PilotDimensions;
   quantity: number;
   levels?: number;
@@ -182,12 +183,17 @@ const money = (value: number): number => Math.round(value * 100) / 100;
 export const resolveDisplayCaseLevelHeights = (
   rawLevelHeights: unknown,
   levels: number,
-  fallbackHeight: number,
+  fallbackHeight?: unknown,
 ): number[] => {
   const levelCount = positiveInteger(levels, 'Levels');
-  const fallback = finitePositive(fallbackHeight, 'Inner height');
   const text = String(rawLevelHeights || '').trim();
-  if (!text) return Array.from({ length: levelCount }, () => fallback);
+  if (!text) {
+    const fallback = Number(fallbackHeight);
+    if (Number.isFinite(fallback) && fallback > 0) {
+      return Array.from({ length: levelCount }, () => fallback);
+    }
+    throw new Error(`Level Heights must contain exactly ${levelCount} positive heights.`);
+  }
 
   const segments = text
     .split(/[|｜,，、;；/／\n]+/)
@@ -269,24 +275,36 @@ const calculateOuterDimensions = (
 
 export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem => {
   if (!PILOT_ITEM_TYPES.includes(input.itemType)) throw new Error(`Unsupported item type: ${input.itemType}`);
+  const isDisplayCase = input.itemType.includes('Display Case');
+  const levels = isDisplayCase ? positiveInteger(input.levels, 'Levels') : Math.max(1, Number(input.levels) || 1);
+  const enteredInnerHeight = Number(input.innerDimensions?.height);
+  const displayCaseLevelHeights = isDisplayCase
+    ? resolveDisplayCaseLevelHeights(
+      input.levelHeights,
+      levels,
+      Number.isFinite(enteredInnerHeight) && enteredInnerHeight > 0 ? enteredInnerHeight : undefined,
+    )
+    : [];
   const inner = {
     length: finitePositive(input.innerDimensions?.length, 'Inner length'),
     depth: finitePositive(input.innerDimensions?.depth, 'Inner depth'),
-    height: finitePositive(input.innerDimensions?.height, 'Inner height'),
+    // For a Display Case, Level Heights are the source of truth.  The first
+    // level is retained as the compatibility height for existing Airtable
+    // fields and height-based accessory formulae; users no longer enter it
+    // separately in Create Quote.
+    height: isDisplayCase
+      ? displayCaseLevelHeights[0]
+      : finitePositive(input.innerDimensions?.height, 'Inner height'),
   };
   const quantity = positiveInteger(input.quantity, 'Quantity');
-  const isDisplayCase = input.itemType.includes('Display Case');
-  const levels = isDisplayCase ? positiveInteger(input.levels, 'Levels') : Math.max(1, Number(input.levels) || 1);
   const accessories = normalizeAccessories(input.accessories);
   const outer = calculateOuterDimensions(input.itemType, inner, input.outerDimensions, accessories);
   const chinaFreight = finiteNonNegative(input.chinaFreight, 'China freight');
   const hongKongDelivery = finiteNonNegative(input.hongKongDelivery, 'Hong Kong delivery');
   const profit = finiteNonNegative(input.profit, 'Profit');
 
-  const displayCaseLevelHeights = isDisplayCase
-    ? resolveDisplayCaseLevelHeights(input.levelHeights, levels, inner.height)
-    : [inner.height];
-  const sizeRmb = displayCaseLevelHeights.reduce(
+  const pricingHeights = isDisplayCase ? displayCaseLevelHeights : [inner.height];
+  const sizeRmb = pricingHeights.reduce(
     (sum, levelHeight) => sum + calcDisplayBoxRmb(inner.length, inner.depth, levelHeight),
     0,
   );
@@ -344,7 +362,7 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     outerD: outer.depth.toFixed(1),
     outerH: outer.height.toFixed(1),
     noOfLevels: isDisplayCase ? levels : null,
-    levelHeights: isDisplayCase && levels > 1
+    levelHeights: isDisplayCase
       ? formatDisplayCaseLevelHeights(displayCaseLevelHeights)
       : String(input.levelHeights || ''),
     accessories: accessoriesList,

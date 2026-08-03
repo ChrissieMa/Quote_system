@@ -10,6 +10,7 @@ import {
   PILOT_CONFIRMATION_TEXT,
   PILOT_CONFIRMATION_TEXTS,
   resolveAuthoritativeOffer,
+  resolveDisplayCaseLevelHeights,
   SHORT_QUOTE_CONFIRMATION_TEXT,
   toCreateQuoteBody,
   verifyConfirmationId,
@@ -524,6 +525,30 @@ const escapeHtml = (unsafe: unknown): string =>
 
 const nl2br = (str: unknown): string =>
   escapeHtml(str).replace(/\n/g, '<br>');
+
+const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
+  const single = {
+    l: [String(item?.interL || '-')],
+    d: [String(item?.interD || '-')],
+    h: [String(item?.interH || '-')],
+  };
+  if (!String(item?.itemType || '').includes('Display Case')) return single;
+
+  const levels = Math.max(1, Number(item?.noOfLevels) || 1);
+  try {
+    const heights = resolveDisplayCaseLevelHeights(item?.levelHeights, levels, item?.interH);
+    return {
+      l: heights.map(() => String(item?.interL || '-')),
+      d: heights.map(() => String(item?.interD || '-')),
+      h: heights.map(height => String(Number(height.toFixed(2)))),
+    };
+  } catch {
+    return single;
+  }
+};
+
+const renderDimensionLines = (values: string[]): string =>
+  values.map(value => escapeHtml(value) || '-').join('<br>');
 
 
 const sumQuoteLocalDelivery = (items: any[]): number =>
@@ -3774,7 +3799,10 @@ app.get('/quote/create', async (req: Request, res: Response) => {
                     <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
                     <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
-                    <td><input type="number" class="f-ih" step="0.1" style="width:60px"></td>
+                    <td style="min-width:92px;">
+                      <input type="number" class="f-ih" step="0.1" style="width:60px">
+                      <div class="f-ih-case-note" style="display:none;font-size:11px;color:#6b7280;line-height:1.35;">由每層內高計算</div>
+                    </td>
                     <td><input type="number" class="f-ol" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
                     <td><input type="number" class="f-od" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
                     <td><input type="number" class="f-oh" step="0.1" style="width:60px;background:#f9fafb;" readonly></td>
@@ -3993,6 +4021,15 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       hidden.value = inputs.length > 0 && values.every(function(value) { return value > 0; })
         ? formatLevelHeights(values)
         : '';
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var interHInput = row.querySelector('.f-ih');
+      if (itemType.indexOf('Display Case') !== -1 && interHInput) {
+        // Keep the first layer as a compatibility value for existing records,
+        // but never require the user to enter Inter H for a Display Case.
+        interHInput.value = values.length > 0 && values[0] > 0
+          ? levelHeightNumberText(values[0])
+          : '';
+      }
     }
 
     function bindLevelHeightInputs(row) {
@@ -4012,10 +4049,18 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
       var editor = row.querySelector('.f-level-heights-editor');
       var hidden = row.querySelector('.f-lh');
+      var interHInput = row.querySelector('.f-ih');
+      var interHNote = row.querySelector('.f-ih-case-note');
       if (!editor || !hidden) return;
 
-      if (!isDisplayCase || levels < 2) {
-        editor.innerHTML = isDisplayCase ? '1層會直接使用 Inter H' : '只適用於疊高展示櫃';
+      if (interHInput) {
+        interHInput.style.display = isDisplayCase ? 'none' : '';
+        interHInput.disabled = isDisplayCase;
+      }
+      if (interHNote) interHNote.style.display = isDisplayCase ? 'block' : 'none';
+
+      if (!isDisplayCase) {
+        editor.innerHTML = '只適用於疊高展示櫃';
         hidden.value = '';
         return;
       }
@@ -4023,12 +4068,11 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       var existingInputs = Array.from(editor.querySelectorAll('.f-level-height-input'));
       var existingValues = existingInputs.map(function(input) { return parseNum(input.value); });
       var storedValues = parseStoredLevelHeights(hidden.value);
-      var defaultHeight = parseNum((row.querySelector('.f-ih') || {}).value);
 
       if (existingInputs.length !== levels) {
         var values = [];
         for (var i = 0; i < levels; i += 1) {
-          values.push(existingValues[i] || storedValues[i] || defaultHeight || 0);
+          values.push(existingValues[i] || storedValues[i] || existingValues[0] || storedValues[0] || 0);
         }
         var fields = values.map(function(value, index) {
           return '<label style="display:flex;align-items:center;justify-content:space-between;gap:6px;margin-bottom:4px;">'
@@ -4039,13 +4083,16 @@ app.get('/quote/create', async (req: Request, res: Response) => {
             + '</label>';
         }).join('');
         editor.innerHTML = fields
-          + '<button type="button" class="btn btn-outline btn-sm f-apply-level-height" style="width:100%;margin-top:3px;">用 Inter H 套用全部層</button>';
+          + (levels > 1
+            ? '<button type="button" class="btn btn-outline btn-sm f-apply-level-height" style="width:100%;margin-top:3px;">用第1層高度套用全部層</button>'
+            : '');
         var applyButton = editor.querySelector('.f-apply-level-height');
         if (applyButton) {
           applyButton.addEventListener('click', function() {
-            var height = parseNum((row.querySelector('.f-ih') || {}).value);
+            var firstInput = row.querySelector('.f-level-height-input');
+            var height = parseNum(firstInput && firstInput.value);
             if (!(height > 0)) {
-              alert('請先輸入 Inter H。');
+              alert('請先輸入第1層內高。');
               return;
             }
             row.querySelectorAll('.f-level-height-input').forEach(function(input) {
@@ -4055,19 +4102,14 @@ app.get('/quote/create', async (req: Request, res: Response) => {
             recalcSubtotal();
           });
         }
-      } else if (defaultHeight > 0) {
-        existingInputs.forEach(function(input) {
-          if (!(parseNum(input.value) > 0)) input.value = levelHeightNumberText(defaultHeight);
-        });
       }
 
       bindLevelHeightInputs(row);
       syncLevelHeights(row);
     }
 
-    function getLevelHeightsForCalculation(row, levels, fallbackHeight) {
+    function getLevelHeightsForCalculation(row, levels) {
       var inputs = Array.from(row.querySelectorAll('.f-level-height-input'));
-      if (levels < 2) return [fallbackHeight];
       if (inputs.length !== levels) {
         updateLevelHeightEditor(row);
         inputs = Array.from(row.querySelectorAll('.f-level-height-input'));
@@ -4209,12 +4251,13 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
       var qtyMap = getAccessoryQtyMap(row);
-      var levelHeights = isDisplayCase ? getLevelHeightsForCalculation(row, levels, h) : [h];
+      var levelHeights = isDisplayCase ? getLevelHeightsForCalculation(row, levels) : [h];
 
-      if (!(l > 0 && d > 0 && h > 0) || !levelHeights) {
+      if (!(l > 0 && d > 0) || (!isDisplayCase && !(h > 0)) || !levelHeights) {
         (row.querySelector('.f-amt') || {}).value = '';
         return 0;
       }
+      var accessoryHeight = isDisplayCase ? levelHeights[0] : h;
 
       var sizeRmb = levelHeights.reduce(function(sum, levelHeight) {
         return sum + calcDisplayBoxRmb(l, d, levelHeight);
@@ -4233,12 +4276,12 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 
       var backLightCount = qtyMap['背燈'] || 0;
       if (backLightCount > 0) {
-        accessoryRmb += calcBackLightRmb(l, h) * backLightCount;
+        accessoryRmb += calcBackLightRmb(l, accessoryHeight) * backLightCount;
       }
 
       var backImageCount = qtyMap['背板圖片'] || 0;
       if (backImageCount > 0) {
-        accessoryRmb += calcBackPanelRmb(l, h) * backImageCount;
+        accessoryRmb += calcBackPanelRmb(l, accessoryHeight) * backImageCount;
         hkdAddons += 100 * backImageCount;
       }
 
@@ -4259,7 +4302,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 
       var backMirrorCount = qtyMap['背板鏡面'] || 0;
       if (backMirrorCount > 0) {
-        accessoryRmb += calcBackPanelRmb(l, h) * backMirrorCount;
+        accessoryRmb += calcBackPanelRmb(l, accessoryHeight) * backMirrorCount;
       }
 
       hkdAddons += (qtyMap['前板白色刻字'] || 0) * 70;
@@ -4283,7 +4326,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
         if (el.classList.contains('f-amt') || el.classList.contains('f-lh') || el.classList.contains('f-level-height-input')) return;
         var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
-          if (el.classList.contains('f-type') || el.classList.contains('f-lv') || el.classList.contains('f-ih')) {
+          if (el.classList.contains('f-type') || el.classList.contains('f-lv')) {
             updateLevelHeightEditor(row);
           }
           updateOuterDimensions(row);
@@ -5112,13 +5155,14 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             : '<tr><td colspan="11" style="text-align:center;color:#9ca3af;">No items</td></tr>'
         )
       : items.map((item: any, idx: number) => {
+          const internalDimensions = itemInternalDimensionLines(item);
           return `<tr class="item-main-row">
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
-            <td style="text-align:center;">${item.interL || '-'}</td>
-            <td style="text-align:center;">${item.interD || '-'}</td>
-            <td style="text-align:center;">${item.interH || '-'}</td>
+            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
+            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
+            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
             <td style="text-align:center;">${item.outerL || '-'}</td>
             <td style="text-align:center;">${item.outerD || '-'}</td>
             <td style="text-align:center;">${item.outerH || '-'}</td>
@@ -5740,13 +5784,14 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
     const itemRows = items.length === 0
       ? `<tr><td colspan="15" style="text-align:center;color:#9ca3af;">${I.noItems}</td></tr>`
       : items.map((item: any, idx: number) => {
+          const internalDimensions = itemInternalDimensionLines(item);
           return `<tr>
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
-            <td style="text-align:center;">${item.interL || '-'}</td>
-            <td style="text-align:center;">${item.interD || '-'}</td>
-            <td style="text-align:center;">${item.interH || '-'}</td>
+            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
+            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
+            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
             <td style="text-align:center;">${item.outerL || '-'}</td>
             <td style="text-align:center;">${item.outerD || '-'}</td>
             <td style="text-align:center;">${item.outerH || '-'}</td>
