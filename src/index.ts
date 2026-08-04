@@ -2935,7 +2935,7 @@ const renderQuickInquiryForm = (
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /api/customers/search  — Search existing customers for Create Quote
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/api/customers/search', async (req: Request, res: Response) => {
+app.get('/api/customers/search', requireAdmin, async (req: Request, res: Response) => {
   try {
     const q = (req.query.q as string) || '';
     const customers = await searchCustomers(q);
@@ -3294,7 +3294,7 @@ app.post('/api/production-maintenance/cancel-confirm', requireQuotePilotApi, asy
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: Quick Inquiry — mobile-friendly capture before a Quote exists
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/api/inquiries/check-phone', async (req: Request, res: Response) => {
+app.get('/api/inquiries/check-phone', requireAdmin, async (req: Request, res: Response) => {
   try {
     const phone = String(req.query.phone || '').trim();
     const normalized = normalizePhone(phone);
@@ -3307,7 +3307,7 @@ app.get('/api/inquiries/check-phone', async (req: Request, res: Response) => {
   }
 });
 
-app.get('/inquiry/create', async (_req: Request, res: Response) => {
+app.get('/inquiry/create', requireAdmin, async (_req: Request, res: Response) => {
   const [channels, products] = await Promise.all([
     getTableSelectOptions('Inquiries', 'Channel', ['Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic', 'Carousell', 'KOL / ToyTV', 'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other']),
     getTableSelectOptions('Inquiries', 'Product Interest', ['Display Box', 'Display Case', 'Ready Stock', 'Reissue', 'Other']),
@@ -3349,7 +3349,7 @@ app.get('/inquiry/create', async (_req: Request, res: Response) => {
   res.send(renderPage('Quick Inquiry', renderQuickInquiryForm({}, [], '', channels, products), extraHead));
 });
 
-app.post('/inquiry/create', async (req: Request, res: Response) => {
+app.post('/inquiry/create', requireAdmin, async (req: Request, res: Response) => {
   const values: Record<string, string> = {
     phone: String(req.body.phone || '').trim(),
     customerName: String(req.body.customerName || '').trim(),
@@ -3423,7 +3423,7 @@ app.post('/inquiry/create', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quotes  — Dashboard
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/quotes', async (req: Request, res: Response) => {
+app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
   try {
     const filterStatus = (req.query.status as string) || 'all';
     const search = ((req.query.search as string) || '').toLowerCase().trim();
@@ -3608,7 +3608,7 @@ app.get('/quotes', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quote/create
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/quote/create', async (req: Request, res: Response) => {
+app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
   let inquiryOptions = '<option value="">不連結查詢</option>';
   let performanceMonthOptions = '<option value="">不連結月份</option>';
   let campaignOptions = '<option value="">請選擇 Campaign / Ads</option>';
@@ -4864,7 +4864,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /quote/create
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/quote/create', async (req: Request, res: Response) => {
+app.post('/quote/create', requireAdmin, async (req: Request, res: Response) => {
   try {
     // Both the existing Create Quote UI and the Natural-language Pilot pass
     // through this single authoritative v4.6 calculator before any write.
@@ -5612,7 +5612,7 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /admin/quote/:token/convert
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/admin/quote/:token/convert', async (req: Request, res: Response) => {
+app.post('/admin/quote/:token/convert', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
@@ -6007,7 +6007,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /admin/invoice/:token/mark-paid
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/admin/invoice/:token/mark-paid', async (req: Request, res: Response) => {
+app.post('/admin/invoice/:token/mark-paid', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();

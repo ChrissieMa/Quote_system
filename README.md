@@ -64,7 +64,8 @@ This project is ready to be deployed on Railway.
 4. Update `PUBLIC_BASE_URL` in the Railway variables to match your Railway deployment URL (e.g., `https://your-app-name.up.railway.app`).
 
 ## Features
-- **Quote Creation**: Internal users can generate quotes with items, discounts, and terms.
+- **Owner Login**: `/quotes`, quote creation, inquiry creation, customer search, invoice conversion, and payment actions require `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+- **Quote Creation**: Signed-in internal users can generate quotes with items, discounts, and terms.
 - **Public Quote Page**: Customers can view quotes and submit their details to confirm the order.
 - **Invoice Generation**: Convert confirmed quotes into official orders (invoices) in Airtable.
 - **Public Invoice Page**: Customers can view their invoices.
