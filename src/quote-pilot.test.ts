@@ -4,6 +4,7 @@ import {
   buildPilotPreview,
   calculatePilotItem,
   formatDimensionValue,
+  formatDimensionWithUnit,
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
@@ -47,6 +48,14 @@ test('dimension display removes trailing zeroes but preserves real decimals', ()
   assert.equal(formatDimensionValue('35.50'), '35.5');
   assert.equal(formatDimensionValue('35.25'), '35.25');
   assert.equal(formatDimensionValue('-'), '-');
+});
+
+test('dimension display adds cm after actual values only', () => {
+  assert.equal(formatDimensionWithUnit('35.0'), '35 cm');
+  assert.equal(formatDimensionWithUnit('35.50'), '35.5 cm');
+  assert.equal(formatDimensionWithUnit('35 cm'), '35 cm');
+  assert.equal(formatDimensionWithUnit('-'), '-');
+  assert.equal(formatDimensionWithUnit(''), '');
 });
 
 test('a signed confirmation locks the exact preview and creates a stable idempotency token', () => {

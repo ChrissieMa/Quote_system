@@ -187,6 +187,12 @@ export const formatDimensionValue = (value: unknown): string => {
   return Number.isFinite(number) ? String(number) : text;
 };
 
+export const formatDimensionWithUnit = (value: unknown): string => {
+  const text = String(value ?? '').trim();
+  const formatted = formatDimensionValue(text.replace(/\s*cm$/i, ''));
+  return formatted && formatted !== '-' ? `${formatted} cm` : formatted;
+};
+
 export const resolveDisplayCaseLevelHeights = (
   rawLevelHeights: unknown,
   levels: number,

@@ -6,6 +6,7 @@ import {
   buildPilotPreview,
   calculatePilotItem,
   formatDimensionValue,
+  formatDimensionWithUnit,
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
@@ -529,9 +530,9 @@ const nl2br = (str: unknown): string =>
 
 const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
   const single = {
-    l: [formatDimensionValue(item?.interL) || '-'],
-    d: [formatDimensionValue(item?.interD) || '-'],
-    h: [formatDimensionValue(item?.interH) || '-'],
+    l: [formatDimensionWithUnit(item?.interL) || '-'],
+    d: [formatDimensionWithUnit(item?.interD) || '-'],
+    h: [formatDimensionWithUnit(item?.interH) || '-'],
   };
   if (!String(item?.itemType || '').includes('Display Case')) return single;
 
@@ -539,9 +540,9 @@ const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: s
   try {
     const heights = resolveDisplayCaseLevelHeights(item?.levelHeights, levels, item?.interH);
     return {
-      l: heights.map(() => formatDimensionValue(item?.interL) || '-'),
-      d: heights.map(() => formatDimensionValue(item?.interD) || '-'),
-      h: heights.map(height => formatDimensionValue(height)),
+      l: heights.map(() => formatDimensionWithUnit(item?.interL) || '-'),
+      d: heights.map(() => formatDimensionWithUnit(item?.interD) || '-'),
+      h: heights.map(height => formatDimensionWithUnit(height)),
     };
   } catch {
     return single;
@@ -2475,6 +2476,16 @@ const SHARED_CSS = `
 
   /* ── Items Table ── */
   .items-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .quote-items-table { table-layout: fixed; }
+  .invoice-items-table { table-layout: fixed; min-width: 1280px; }
+  .items-table .col-index { width: 34px; }
+  .items-table .col-item-type { width: 140px; }
+  .items-table .col-levels { width: 54px; }
+  .items-table .col-dimension { width: 72px; }
+  .invoice-items-table .col-accessories { width: 150px; }
+  .invoice-items-table .col-description { width: 180px; }
+  .invoice-items-table .col-qty { width: 50px; }
+  .invoice-items-table .col-amount { width: 90px; }
   .items-table th {
     background: #d8833b;
     color: #fff;
@@ -5172,9 +5183,9 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerL)) || '-'}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerD)) || '-'}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerH)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerL)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerD)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerH)) || '-'}</td>
           </tr>
           <tr class="item-sub-detail">
             <td></td>
@@ -5224,7 +5235,15 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           <div class="section">
             <div class="section-title">${L.items}</div>
             <div style="overflow-x:auto;">
-              <div class="material-banner">${escapeHtml(isEnglish ? MATERIAL_NOTE_EN : MATERIAL_NOTE)}</div><table class="items-table">
+              <div class="material-banner">${escapeHtml(isEnglish ? MATERIAL_NOTE_EN : MATERIAL_NOTE)}</div><table class="items-table quote-items-table">
+                <colgroup>
+                  <col class="col-index">
+                  <col class="col-item-type">
+                  <col class="col-for-what">
+                  ${hasDisplayCase ? '<col class="col-levels">' : ''}
+                  <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
+                  <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
+                </colgroup>
                 <thead>
                   <tr>
                     <th>#</th>
@@ -5801,9 +5820,9 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerL)) || '-'}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerD)) || '-'}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionValue(item.outerH)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerL)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerD)) || '-'}</td>
+            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerH)) || '-'}</td>
             <td>${renderAccTags(item.accessories)}</td>
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
@@ -5859,7 +5878,16 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
           <div class="section">
             <div class="section-title">${I.items}</div>
             <div style="overflow-x:auto;">
-              <table class="items-table">
+              <table class="items-table invoice-items-table">
+                <colgroup>
+                  <col class="col-index">
+                  <col class="col-item-type">
+                  <col class="col-for-what">
+                  ${hasDisplayCase ? '<col class="col-levels">' : ''}
+                  <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
+                  <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
+                  <col class="col-accessories"><col class="col-description"><col class="col-qty"><col class="col-amount">
+                </colgroup>
                 <thead>
                   <tr>
                     <th>#</th>
