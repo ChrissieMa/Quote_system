@@ -51,7 +51,6 @@ const OFFER_PATTERNS: Array<[RegExp, ShortQuoteReady['offerCode']]> = [
 const ACCESSORY_ALIASES: Array<[RegExp, string]> = [
   [/趟門/, '趟門'],
   [/磁石門/, '磁石門'],
-  [/樓梯/, '樓梯'],
   [/黑底板/, '黑底板'],
   [/透明底板/, '透明底板'],
   [/(?:獨立燈板\s*-\s*)?上燈/, '獨立燈板 - 上燈'],
@@ -106,6 +105,17 @@ export const parseShortQuoteText = (raw: string): ShortQuoteParseResult => {
     }
     itemType = 'Display Case 疊高展示櫃';
   }
+  if (/(?:^|\s)(?:階梯|樓梯)(?:\s|$)/.test(text)) {
+    if (itemType) {
+      return {
+        kind: 'clarification',
+        code: 'product-conflict',
+        message: '產品類型同時出現多於一項，請只選展示盒、疊高展示櫃或階梯其中一項。',
+        options: ['展示盒', '疊高展示櫃', '階梯', '取消'],
+      };
+    }
+    itemType = '階梯';
+  }
 
   const sourceMatches = SOURCE_ALIASES.filter(([pattern]) => pattern.test(text)).map(([, alias]) => alias);
   const uniqueSources = Array.from(new Set(sourceMatches));
@@ -140,7 +150,7 @@ export const parseShortQuoteText = (raw: string): ShortQuoteParseResult => {
   const missing: string[] = [];
   if (!phoneMatch) missing.push('客戶電話');
   if (!itemType) missing.push('產品類型');
-  if (!dimensionsMatch) missing.push('內尺寸');
+  if (!dimensionsMatch) missing.push(itemType === '階梯' ? '外尺寸' : '內尺寸');
   if (chinaFreight === null) missing.push('內地運費');
   if (hongKongDelivery === null) missing.push('香港運費');
   if (profit === null) missing.push('Quoted Profit');

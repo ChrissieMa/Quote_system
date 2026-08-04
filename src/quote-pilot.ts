@@ -12,22 +12,23 @@ export const DRIVER_SHARE_RATE = 0.90;
 export const PILOT_ITEM_TYPES = [
   'Display box 展示盒',
   'Display Case 疊高展示櫃',
+  '階梯',
 ] as const;
 
 export const PILOT_ACCESSORIES = [
-  '樓梯', '趟門', '磁石門', '黑底板', '透明底板',
+  '趟門', '磁石門', '黑底板', '透明底板',
   '獨立燈板 - 上燈', '獨立燈板 - 下燈', '獨立燈板 - 上下燈', '上下燈', '背燈',
   '前板白色刻字', '前板彩色刻字',
   '左板圖片', '右板圖片', '底板圖片', '頂板圖片', '背板圖片',
   '左板鏡面', '右板鏡面', '底板鏡面', '頂板鏡面', '背板鏡面',
 ] as const;
 
-const SINGLE_ACCESSORIES = new Set(['樓梯', '趟門', '磁石門', '黑底板', '透明底板']);
+const SINGLE_ACCESSORIES = new Set(['趟門', '磁石門', '黑底板', '透明底板']);
 const ALLOWED_ACCESSORIES = new Set<string>(PILOT_ACCESSORIES);
 const RMB_DIVISOR = 0.85;
 
 export type PilotDimensions = { length: number; depth: number; height: number };
-export type PilotInnerDimensions = { length: number; depth: number; height?: number };
+export type PilotInnerDimensions = { length?: number; depth?: number; height?: number };
 
 export type PilotItemInput = {
   itemType: typeof PILOT_ITEM_TYPES[number];
@@ -236,6 +237,11 @@ const calcDisplayBoxRmb = (l: number, d: number, h: number): number => {
   return (fiveSideArea * 0.025) + (l * d * 0.013) + (l * d * 0.013) + 20;
 };
 
+const calcStairRmb = (l: number, d: number, h: number): number => {
+  const fiveSideArea = (l * d) + ((l * h + d * h) * 2);
+  return (fiveSideArea * 0.025) + (l * d * 0.01) + (l * d * 0.01);
+};
+
 const calcLightBoardRmb = (l: number, d: number): number =>
   ((l * d + d * 2 + l * 2) * 2 * 0.023) + l + d;
 
@@ -264,8 +270,8 @@ const calculateOuterDimensions = (
   supplied: PilotDimensions | undefined,
   accessories: Record<string, number>,
 ): PilotDimensions => {
-  if (itemType.includes('Display Case')) {
-    if (!supplied) throw new Error('Display Case requires outerDimensions because v4.6 keeps those dimensions manual.');
+  if (itemType.includes('Display Case') || itemType === '階梯') {
+    if (!supplied) throw new Error(`${itemType} requires outerDimensions because those dimensions are entered manually.`);
     return {
       length: finitePositive(supplied.length, 'Outer length'),
       depth: finitePositive(supplied.depth, 'Outer depth'),
@@ -289,7 +295,10 @@ const calculateOuterDimensions = (
 export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem => {
   if (!PILOT_ITEM_TYPES.includes(input.itemType)) throw new Error(`Unsupported item type: ${input.itemType}`);
   const isDisplayCase = input.itemType.includes('Display Case');
-  const levels = isDisplayCase ? positiveInteger(input.levels, 'Levels') : Math.max(1, Number(input.levels) || 1);
+  const isStair = input.itemType === '階梯';
+  const levels = isDisplayCase || isStair
+    ? positiveInteger(input.levels, 'Levels')
+    : Math.max(1, Number(input.levels) || 1);
   const enteredInnerHeight = Number(input.innerDimensions?.height);
   const displayCaseLevelHeights = isDisplayCase
     ? resolveDisplayCaseLevelHeights(
@@ -299,28 +308,39 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     )
     : [];
   const inner = {
-    length: finitePositive(input.innerDimensions?.length, 'Inner length'),
-    depth: finitePositive(input.innerDimensions?.depth, 'Inner depth'),
+    length: isStair
+      ? (Number(input.innerDimensions?.length) > 0 ? Number(input.innerDimensions?.length) : 0)
+      : finitePositive(input.innerDimensions?.length, 'Inner length'),
+    depth: isStair
+      ? (Number(input.innerDimensions?.depth) > 0 ? Number(input.innerDimensions?.depth) : 0)
+      : finitePositive(input.innerDimensions?.depth, 'Inner depth'),
     // For a Display Case, Level Heights are the source of truth.  The first
     // level is retained as the compatibility height for existing Airtable
     // fields and height-based accessory formulae; users no longer enter it
     // separately in Create Quote.
     height: isDisplayCase
       ? displayCaseLevelHeights[0]
-      : finitePositive(input.innerDimensions?.height, 'Inner height'),
+      : isStair
+        ? (enteredInnerHeight > 0 ? enteredInnerHeight : 0)
+        : finitePositive(input.innerDimensions?.height, 'Inner height'),
   };
   const quantity = positiveInteger(input.quantity, 'Quantity');
-  const accessories = normalizeAccessories(input.accessories);
+  if (isStair && Object.keys(input.accessories || {}).length > 0) {
+    throw new Error('階梯不使用 Accessories。');
+  }
+  const accessories = isStair ? {} : normalizeAccessories(input.accessories);
   const outer = calculateOuterDimensions(input.itemType, inner, input.outerDimensions, accessories);
   const chinaFreight = finiteNonNegative(input.chinaFreight, 'China freight');
   const hongKongDelivery = finiteNonNegative(input.hongKongDelivery, 'Hong Kong delivery');
   const profit = finiteNonNegative(input.profit, 'Profit');
 
   const pricingHeights = isDisplayCase ? displayCaseLevelHeights : [inner.height];
-  const sizeRmb = pricingHeights.reduce(
-    (sum, levelHeight) => sum + calcDisplayBoxRmb(inner.length, inner.depth, levelHeight),
-    0,
-  );
+  const sizeRmb = isStair
+    ? calcStairRmb(outer.length, outer.depth, outer.height)
+    : pricingHeights.reduce(
+      (sum, levelHeight) => sum + calcDisplayBoxRmb(inner.length, inner.depth, levelHeight),
+      0,
+    );
   let accessoryRmb = 0;
   let hkdAddons = 0;
   const lightBoardCount =
@@ -368,16 +388,16 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   return {
     itemType: input.itemType,
     forWhat: String(input.forWhat || ''),
-    interL: String(inner.length),
-    interD: String(inner.depth),
-    interH: String(inner.height),
+    interL: inner.length > 0 ? formatDimensionValue(inner.length) : '',
+    interD: inner.depth > 0 ? formatDimensionValue(inner.depth) : '',
+    interH: inner.height > 0 ? formatDimensionValue(inner.height) : '',
     outerL: formatDimensionValue(outer.length),
     outerD: formatDimensionValue(outer.depth),
     outerH: formatDimensionValue(outer.height),
-    noOfLevels: isDisplayCase ? levels : null,
+    noOfLevels: isDisplayCase || isStair ? levels : null,
     levelHeights: isDisplayCase
       ? formatDisplayCaseLevelHeights(displayCaseLevelHeights)
-      : String(input.levelHeights || ''),
+      : '',
     accessories: accessoriesList,
     accessoryQty: accessories,
     description: String(input.description || ''),

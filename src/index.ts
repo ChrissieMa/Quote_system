@@ -297,7 +297,7 @@ const buildAuthoritativeQuoteBody = (rawBody: any): any => {
         else if (text) accessoryQty[text] = 1;
       }
       const itemType = String(item?.itemType || '') as PilotQuoteInput['items'][number]['itemType'];
-      const outerDimensions = itemType.includes('Display Case') ? {
+      const outerDimensions = itemType.includes('Display Case') || itemType === '階梯' ? {
         length: Number(item?.outerL),
         depth: Number(item?.outerD),
         height: Number(item?.outerH),
@@ -1878,6 +1878,16 @@ const resolveShortQuoteRequest = async (
         code: 'display-case-details-required',
         message: 'Quote v4.6 的展示櫃外尺寸及層數維持人手輸入；請補充外尺寸及層數後再預覽。',
         options: ['補充外尺寸及層數', '改為展示盒', '取消'],
+      },
+    };
+  }
+  if (parsed.itemType === '階梯') {
+    return {
+      clarification: {
+        kind: 'clarification',
+        code: 'stair-details-required',
+        message: '階梯使用外尺寸計價，並需要記錄層數；請改用 Create Quote 輸入 Outer L／D／H 及 Levels。',
+        options: ['使用 Create Quote', '改為展示盒', '取消'],
       },
     };
   }
@@ -3807,7 +3817,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
                 </thead>
                 <tbody id="itemsBody">
                   <tr>
-                    <td><select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option></select></td>
+                    <td><select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option><option value="階梯">階梯</option></select></td>
                     <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
                     <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
@@ -3824,10 +3834,10 @@ app.get('/quote/create', async (req: Request, res: Response) => {
                       <div class="f-level-heights-editor" style="font-size:12px;color:#6b7280;">選擇展示櫃及輸入 Levels 後設定</div>
                     </td>
                     <td>
-                      <div style="min-width:300px;max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;font-size:12px;background:#fff;">
+                      <div class="f-stair-no-accessories" style="display:none;font-size:12px;color:#6b7280;">階梯不適用</div>
+                      <div class="f-accessories-editor" style="min-width:300px;max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;font-size:12px;background:#fff;">
                         <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">單次配件</div>
                         <div class="f-acc-wrap" style="margin-bottom:8px;">
-                          <label style="display:block;"><input type="checkbox" value="樓梯"> 樓梯</label>
                           <label style="display:block;"><input type="checkbox" value="趟門"> 趟門</label>
                           <label style="display:block;"><input type="checkbox" value="磁石門"> 磁石門</label>
                           <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
@@ -3979,6 +3989,8 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     }
 
     function getSingleAccessories(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      if (itemType === '階梯') return [];
       var acc = [];
       row.querySelectorAll('.f-acc-wrap input[type=checkbox]:checked').forEach(function(cb) {
         acc.push(cb.value);
@@ -3987,6 +3999,8 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     }
 
     function getAccessoryQtyMap(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      if (itemType === '階梯') return {};
       var map = {};
       row.querySelectorAll('.f-acc-qty').forEach(function(input) {
         var name = input.getAttribute('data-name') || '';
@@ -4058,7 +4072,9 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     function updateLevelHeightEditor(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
-      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+      var isStair = itemType === '階梯';
+      var enteredLevels = parseInt((row.querySelector('.f-lv') || {}).value, 10);
+      var levels = Math.max(1, enteredLevels || 1);
       var editor = row.querySelector('.f-level-heights-editor');
       var hidden = row.querySelector('.f-lh');
       var interHInput = row.querySelector('.f-ih');
@@ -4072,7 +4088,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       if (interHNote) interHNote.style.display = isDisplayCase ? 'block' : 'none';
 
       if (!isDisplayCase) {
-        editor.innerHTML = '只適用於疊高展示櫃';
+        editor.innerHTML = isStair ? '階梯不適用' : '只適用於疊高展示櫃';
         hidden.value = '';
         return;
       }
@@ -4120,6 +4136,22 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       syncLevelHeights(row);
     }
 
+    function updateAccessoryEditor(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      var isStair = itemType === '階梯';
+      var editor = row.querySelector('.f-accessories-editor');
+      var note = row.querySelector('.f-stair-no-accessories');
+      if (editor) editor.style.display = isStair ? 'none' : '';
+      if (note) note.style.display = isStair ? 'block' : 'none';
+      if (!isStair) return;
+      row.querySelectorAll('.f-acc-wrap input[type=checkbox]').forEach(function(input) {
+        input.checked = false;
+      });
+      row.querySelectorAll('.f-acc-qty').forEach(function(input) {
+        input.value = '0';
+      });
+    }
+
     function getLevelHeightsForCalculation(row, levels) {
       var inputs = Array.from(row.querySelectorAll('.f-level-height-input'));
       if (inputs.length !== levels) {
@@ -4133,6 +4165,11 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     function calcDisplayBoxRmb(l, d, h) {
       var fiveSideArea = (l * d) + ((l * h + d * h) * 2);
       return (fiveSideArea * 0.025) + (l * d * 0.013) + (l * d * 0.013) + 20;
+    }
+
+    function calcStairRmb(l, d, h) {
+      var fiveSideArea = (l * d) + ((l * h + d * h) * 2);
+      return (fiveSideArea * 0.025) + (l * d * 0.01) + (l * d * 0.01);
     }
 
     function calcLightBoardRmb(l, d) {
@@ -4191,13 +4228,15 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     function updateOuterDimensionMode(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
+      var isStair = itemType === '階梯';
+      var isManualOuter = isDisplayCase || isStair;
       ['.f-ol', '.f-od', '.f-oh'].forEach(function(selector) {
         var input = row.querySelector(selector);
         if (!input) return;
-        input.readOnly = !isDisplayCase;
-        input.style.background = isDisplayCase ? '#fff' : '#f9fafb';
+        input.readOnly = !isManualOuter;
+        input.style.background = isManualOuter ? '#fff' : '#f9fafb';
       });
-      return isDisplayCase;
+      return isManualOuter;
     }
 
     function formatDimensionInputValue(value) {
@@ -4206,8 +4245,8 @@ app.get('/quote/create', async (req: Request, res: Response) => {
     }
 
     function updateOuterDimensions(row) {
-      var isDisplayCase = updateOuterDimensionMode(row);
-      if (isDisplayCase) {
+      var isManualOuter = updateOuterDimensionMode(row);
+      if (isManualOuter) {
         return;
       }
 
@@ -4266,19 +4305,27 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       var profit = parseNum((row.querySelector('.f-profit') || {}).value);
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
-      var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
+      var isStair = itemType === '階梯';
+      var enteredLevels = parseInt((row.querySelector('.f-lv') || {}).value, 10);
+      var levels = Math.max(1, enteredLevels || 1);
       var qtyMap = getAccessoryQtyMap(row);
       var levelHeights = isDisplayCase ? getLevelHeightsForCalculation(row, levels) : [h];
+      var outerL = parseNum((row.querySelector('.f-ol') || {}).value);
+      var outerD = parseNum((row.querySelector('.f-od') || {}).value);
+      var outerH = parseNum((row.querySelector('.f-oh') || {}).value);
 
-      if (!(l > 0 && d > 0) || (!isDisplayCase && !(h > 0)) || !levelHeights) {
+      if ((isStair && (!(outerL > 0 && outerD > 0 && outerH > 0) || !(enteredLevels > 0)))
+        || (!isStair && (!(l > 0 && d > 0) || (!isDisplayCase && !(h > 0)) || !levelHeights))) {
         (row.querySelector('.f-amt') || {}).value = '';
         return 0;
       }
       var accessoryHeight = isDisplayCase ? levelHeights[0] : h;
 
-      var sizeRmb = levelHeights.reduce(function(sum, levelHeight) {
-        return sum + calcDisplayBoxRmb(l, d, levelHeight);
-      }, 0);
+      var sizeRmb = isStair
+        ? calcStairRmb(outerL, outerD, outerH)
+        : levelHeights.reduce(function(sum, levelHeight) {
+          return sum + calcDisplayBoxRmb(l, d, levelHeight);
+        }, 0);
       var accessoryRmb = 0;
       var hkdAddons = 0;
 
@@ -4346,6 +4393,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
           if (el.classList.contains('f-type') || el.classList.contains('f-lv')) {
             updateLevelHeightEditor(row);
           }
+          if (el.classList.contains('f-type')) updateAccessoryEditor(row);
           updateOuterDimensions(row);
           recalcSubtotal();
         });
@@ -4376,6 +4424,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       tbody.appendChild(clone);
       bindRowEvents(clone);
       updateLevelHeightEditor(clone);
+      updateAccessoryEditor(clone);
       updateOuterDimensionMode(clone);
       updateOuterDimensions(clone);
       recalcSubtotal();
@@ -4708,6 +4757,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
         bindRowEvents(row);
         updateLevelHeightEditor(row);
+        updateAccessoryEditor(row);
         updateOuterDimensions(row);
       });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
@@ -4727,6 +4777,7 @@ app.get('/quote/create', async (req: Request, res: Response) => {
           return;
         }
         var invalidLevelHeightInput = null;
+        var invalidStairInput = null;
         document.querySelectorAll('#itemsBody tr').forEach(function(row) {
           syncLevelHeights(row);
           var itemType = ((row.querySelector('.f-type') || {}).value || '');
@@ -4736,10 +4787,25 @@ app.get('/quote/create', async (req: Request, res: Response) => {
             && !getLevelHeightsForCalculation(row, levels, innerHeight) && !invalidLevelHeightInput) {
             invalidLevelHeightInput = row.querySelector('.f-level-height-input');
           }
+          if (itemType === '階梯' && !invalidStairInput) {
+            var outerL = parseNum((row.querySelector('.f-ol') || {}).value);
+            var outerD = parseNum((row.querySelector('.f-od') || {}).value);
+            var outerH = parseNum((row.querySelector('.f-oh') || {}).value);
+            var stairLevels = parseInt((row.querySelector('.f-lv') || {}).value, 10);
+            if (!(outerL > 0)) invalidStairInput = row.querySelector('.f-ol');
+            else if (!(outerD > 0)) invalidStairInput = row.querySelector('.f-od');
+            else if (!(outerH > 0)) invalidStairInput = row.querySelector('.f-oh');
+            else if (!(stairLevels > 0)) invalidStairInput = row.querySelector('.f-lv');
+          }
         });
         if (invalidLevelHeightInput) {
           alert('請完整輸入疊高展示櫃每一層的內高。');
           invalidLevelHeightInput.focus();
+          return;
+        }
+        if (invalidStairInput) {
+          alert('階梯請完整輸入 Outer L／Outer D／Outer H 及 Levels。');
+          invalidStairInput.focus();
           return;
         }
         var payload = {
@@ -5160,8 +5226,8 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     // Items table rows
     const descriptionSummary = (quote['Description Summary'] as string) || '';
-    const hasDisplayCase = items.some((item: any) => String(item?.itemType || '').includes('Display Case'));
-    const itemColumnCount = hasDisplayCase ? 10 : 9;
+    const hasLevels = items.some((item: any) => Number(item?.noOfLevels) > 0);
+    const itemColumnCount = hasLevels ? 10 : 9;
 
     const itemRows = items.length === 0
       ? (
@@ -5174,12 +5240,12 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
         )
       : items.map((item: any, idx: number) => {
           const internalDimensions = itemInternalDimensionLines(item);
-          const isDisplayCase = String(item?.itemType || '').includes('Display Case');
+          const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr class="item-main-row">
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
-            ${hasDisplayCase ? `<td style="text-align:center;">${isDisplayCase ? (item.noOfLevels || '-') : '-'}</td>` : ''}
+            ${hasLevels ? `<td style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
@@ -5189,7 +5255,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
           </tr>
           <tr class="item-sub-detail">
             <td></td>
-            <td colspan="${hasDisplayCase ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
+            <td colspan="${hasLevels ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
@@ -5240,7 +5306,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
                   <col class="col-index">
                   <col class="col-item-type">
                   <col class="col-for-what">
-                  ${hasDisplayCase ? '<col class="col-levels">' : ''}
+                  ${hasLevels ? '<col class="col-levels">' : ''}
                   <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
                   <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
                 </colgroup>
@@ -5249,7 +5315,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
                     <th>#</th>
                     <th>${L.itemType}</th>
                     <th>${L.forWhat}</th>
-                    ${hasDisplayCase ? `<th>${L.levels}</th>` : ''}
+                    ${hasLevels ? `<th>${L.levels}</th>` : ''}
                     <th>${L.interL}</th>
                     <th>${L.interD}</th>
                     <th>${L.interH}</th>
@@ -5331,8 +5397,8 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
       ? `Lead time 🕐<br><br>📦 <strong>Tailor-made display box / stackable display case</strong><br>Usually ready for dispatch within <strong>30 working days</strong> ☺️<br><br>⚡ <strong>Ready-made / in-stock products</strong><br>Usually ready for dispatch within <strong>15 working days</strong> 😊<br><br>During long holidays such as Lunar New Year or National Day,<br>lead time may be extended by an additional <strong>10–15 working days</strong> 🙏🏻<br><br>Please do not place an order if the lead time is not suitable for you 🙏🏻<br><br>If the order is completed earlier, we will arrange dispatch as soon as possible 😊<br>🔥 Early ordering is recommended 🔥<br>❗️Rush orders are not accepted❗️`
       : `貨期時間🕐<br><br>📦 <strong>度身訂造展示盒／疊高展示櫃</strong><br>一般會於 <strong>30個工作天內發貨</strong> ☺️<br><br>⚡ <strong>現貨成品</strong><br>一般會於 <strong>15個工作天內發貨</strong> 😊<br><br>如遇農曆新年、國慶等長假期，<br>貨期需額外增加 <strong>10–15個工作天</strong> 🙏🏻<br><br>介意貨期者請勿下單🙏🏻<br><br>如提早完成，我哋會立即安排發貨😊<br>🔥 寧早莫遲，建議預早訂購 🔥<br>❗️不接急單❗️`;
     const installationText = isEnglish
-      ? `🔧 Installation notes<br><br>Each display box and stair accessory requires self-installation.<br>The installation process is simple ☺️<br><br>No glue is needed,<br>and no heavy force is required 💪🏻<br>If needed, the display box can also be disassembled and reassembled later 😉<br><br>An electronic installation guide will be provided upon delivery for easy reference 😎<br><br>For orders delivered by the LKS fleet, if any panel issue is found after delivery,<br>please contact us within 3 days after receiving the goods for panel replacement arrangement 🙏🏻<br><br>🌟 Human damage is excluded 🌟`
-      : `🔧 安裝說明<br><br>每個展示盒及樓梯配件均需要自行安裝，<br>安裝過程非常簡單☺️<br><br>全程唔需要用膠水，<br>亦唔需要「大力士」先裝到💪🏻<br>日後有需要時，亦可以自行拆卸及重新安裝😉<br><br>送貨時會附上電子版安裝說明書，方便跟住步驟安裝😎<br><br>使用 LKS 車隊送貨，如收貨後發現板件有問題，<br>可於收貨後 3 日內聯絡我哋安排補板🙏🏻<br><br>🌟 人為損壞除外 🌟`;
+      ? `🔧 Installation notes<br><br>Each display box and stair requires self-installation.<br>The installation process is simple ☺️<br><br>No glue is needed,<br>and no heavy force is required 💪🏻<br>If needed, the display box can also be disassembled and reassembled later 😉<br><br>An electronic installation guide will be provided upon delivery for easy reference 😎<br><br>For orders delivered by the LKS fleet, if any panel issue is found after delivery,<br>please contact us within 3 days after receiving the goods for panel replacement arrangement 🙏🏻<br><br>🌟 Human damage is excluded 🌟`
+      : `🔧 安裝說明<br><br>每個展示盒及階梯均需要自行安裝，<br>安裝過程非常簡單☺️<br><br>全程唔需要用膠水，<br>亦唔需要「大力士」先裝到💪🏻<br>日後有需要時，亦可以自行拆卸及重新安裝😉<br><br>送貨時會附上電子版安裝說明書，方便跟住步驟安裝😎<br><br>使用 LKS 車隊送貨，如收貨後發現板件有問題，<br>可於收貨後 3 日內聯絡我哋安排補板🙏🏻<br><br>🌟 人為損壞除外 🌟`;
 
     // If already submitted, show read-only view
     if (status === 'Ready to Convert' || status === 'Mark as Paid') {
@@ -5804,19 +5870,19 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       }
     }
     items = await getConfirmedOrderItems(order.id, items);
-    const hasDisplayCase = items.some((item: any) => String(item?.itemType || '').includes('Display Case'));
-    const invoiceItemColumnCount = hasDisplayCase ? 14 : 13;
+    const hasLevels = items.some((item: any) => Number(item?.noOfLevels) > 0);
+    const invoiceItemColumnCount = hasLevels ? 14 : 13;
 
     const itemRows = items.length === 0
       ? `<tr><td colspan="${invoiceItemColumnCount}" style="text-align:center;color:#9ca3af;">${I.noItems}</td></tr>`
       : items.map((item: any, idx: number) => {
           const internalDimensions = itemInternalDimensionLines(item);
-          const isDisplayCase = String(item?.itemType || '').includes('Display Case');
+          const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr>
             <td>${idx + 1}</td>
             <td>${escapeHtml(item.itemType) || '-'}</td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
-            ${hasDisplayCase ? `<td style="text-align:center;">${isDisplayCase ? (item.noOfLevels || '-') : '-'}</td>` : ''}
+            ${hasLevels ? `<td style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
@@ -5883,7 +5949,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
                   <col class="col-index">
                   <col class="col-item-type">
                   <col class="col-for-what">
-                  ${hasDisplayCase ? '<col class="col-levels">' : ''}
+                  ${hasLevels ? '<col class="col-levels">' : ''}
                   <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
                   <col class="col-dimension"><col class="col-dimension"><col class="col-dimension">
                   <col class="col-accessories"><col class="col-description"><col class="col-qty"><col class="col-amount">
@@ -5893,7 +5959,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
                     <th>#</th>
                     <th>${I.itemType}</th>
                     <th>${I.forWhat}</th>
-                    ${hasDisplayCase ? `<th>${I.levels}</th>` : ''}
+                    ${hasLevels ? `<th>${I.levels}</th>` : ''}
                     <th>${I.interL}</th>
                     <th>${I.interD}</th>
                     <th>${I.interH}</th>

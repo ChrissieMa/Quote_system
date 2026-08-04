@@ -188,6 +188,53 @@ test('Display box still requires Inter H', () => {
   }), /Inner height/);
 });
 
+test('階梯 uses entered Outer L D H and the confirmed 3MM formula without Level Heights or Accessories', () => {
+  const calculated = calculatePilotItem({
+    itemType: '階梯',
+    innerDimensions: {},
+    outerDimensions: { length: 30, depth: 20, height: 15 },
+    quantity: 2,
+    levels: 3,
+    chinaFreight: 100,
+    hongKongDelivery: 200,
+    profit: 500,
+  });
+  const area = (30 * 20) + ((30 * 15 + 20 * 15) * 2);
+  const expectedRmb = (area * 0.025) + (30 * 20 * 0.01) + (30 * 20 * 0.01);
+  const expectedProductTotal = Math.round(((expectedRmb / 0.85) * 2) * 100) / 100;
+
+  assert.deepEqual(
+    { l: calculated.outerL, d: calculated.outerD, h: calculated.outerH },
+    { l: '30', d: '20', h: '15' },
+  );
+  assert.deepEqual(
+    { l: calculated.interL, d: calculated.interD, h: calculated.interH },
+    { l: '', d: '', h: '' },
+  );
+  assert.equal(calculated.noOfLevels, 3);
+  assert.equal(calculated.levelHeights, '');
+  assert.deepEqual(calculated.accessories, []);
+  assert.equal(calculated.baseProductAmountHkd, Math.round((expectedRmb / 0.85) * 100) / 100);
+  assert.equal(calculated.productAndAccessoriesTotalHkd, expectedProductTotal);
+  assert.equal(calculated.amount, Math.round((expectedProductTotal + 100 + 200 + 500) * 100) / 100);
+});
+
+test('階梯 rejects Accessories and requires manual outer dimensions plus Levels', () => {
+  const common = {
+    itemType: '階梯' as const,
+    innerDimensions: {},
+    outerDimensions: { length: 30, depth: 20, height: 15 },
+    quantity: 1,
+    levels: 3,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  };
+  assert.throws(() => calculatePilotItem({ ...common, accessories: { '趟門': 1 } }), /不使用 Accessories/);
+  assert.throws(() => calculatePilotItem({ ...common, outerDimensions: undefined }), /requires outerDimensions/);
+  assert.throws(() => calculatePilotItem({ ...common, levels: undefined }), /Levels/);
+});
+
 test('Create Quote preserves an explicit discount even when a Promotion is also selected', () => {
   assert.deepEqual(resolveAuthoritativeOffer({
     promotionType: '首次落單優惠',
