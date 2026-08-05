@@ -2486,7 +2486,10 @@ const SHARED_CSS = `
 
   /* ── Items Table ── */
   .items-table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  .quote-items-table { table-layout: fixed; }
+  /* Keep the customer quote grid at its full document width on narrow screens.
+     Without a minimum width, the only flexible column (For What) collapses to
+     zero and its content runs into Inter L, making values look like "-53 cm". */
+  .quote-items-table { table-layout: fixed; min-width: 836px; }
   .invoice-items-table { table-layout: fixed; min-width: 1280px; }
   .items-table .col-index { width: 34px; }
   .items-table .col-item-type { width: 140px; }
