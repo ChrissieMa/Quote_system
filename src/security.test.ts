@@ -76,6 +76,23 @@ test('admin writes accept configured and current deployment origins but reject c
   assert.equal(isSameOriginWrite('', '', 'https://quote.example'), false);
 });
 
+test('remote-controlled Chrome accepts opaque same-origin form posts but still rejects cross-site posts', () => {
+  assert.equal(isSameOriginWrite(
+    'null',
+    '',
+    'https://quote.example',
+    'https://quote.example',
+    'same-origin',
+  ), true);
+  assert.equal(isSameOriginWrite(
+    'null',
+    '',
+    'https://quote.example',
+    'https://quote.example',
+    'cross-site',
+  ), false);
+});
+
 test('login limiter blocks repeated failures and clears on success', () => {
   const limiter = new LoginRateLimiter(2, 60_000);
   assert.equal(limiter.check('ip', 1000).allowed, true);

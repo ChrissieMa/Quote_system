@@ -115,11 +115,17 @@ export const isSameOriginWrite = (
     }
   }
   if (allowedOrigins.size === 0) return false;
-  const candidate = String(origin || referer || '').trim();
+  const originValue = String(origin || '').trim();
+  const refererValue = String(referer || '').trim();
+  const candidate = originValue && originValue.toLowerCase() !== 'null'
+    ? originValue
+    : refererValue;
   if (!candidate) {
     // Some privacy-focused browsers suppress Origin/Referer on ordinary HTML
-    // form posts. Sec-Fetch-Site is a forbidden browser header, so page
-    // scripts cannot forge "same-origin" from another site.
+    // form posts. Chrome DevTools/remote-control sessions can also serialize a
+    // same-origin form Origin as the opaque value "null". Sec-Fetch-Site is a
+    // forbidden browser header, so page scripts cannot forge "same-origin"
+    // from another site. Cross-site and headerless writes remain rejected.
     return String(fetchSite || '').toLowerCase() === 'same-origin' && Boolean(requestOrigin);
   }
   try {
