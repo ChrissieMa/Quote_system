@@ -400,7 +400,15 @@ const requireAdminOrPilotInternal = (req: Request, res: Response, next: () => vo
 
 const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
   if (res.locals.pilotInternal === true) return next();
-  if (!isSameOriginWrite(req.headers.origin, req.headers.referer, PUBLIC_BASE_URL)) {
+  const requestHost = req.get('host') || '';
+  const requestOrigin = requestHost ? `${req.protocol}://${requestHost}` : '';
+  if (!isSameOriginWrite(
+    req.headers.origin,
+    req.headers.referer,
+    PUBLIC_BASE_URL,
+    requestOrigin,
+    req.headers['sec-fetch-site'],
+  )) {
     if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'Invalid request origin.' });
     return res.status(403).type('text/plain').send('Invalid request origin.');
   }

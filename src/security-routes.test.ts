@@ -53,3 +53,8 @@ test('server-wide privacy headers, HTML noindex, crawlable robots, and dead site
     "app.all(['/sitemap.xml', '/sitemap_index.xml']",
   ]) assert.ok(source.includes(value), `missing security directive: ${value}`);
 });
+
+test('same-origin writes support the active Railway/custom-domain request origin and browser fetch metadata', () => {
+  assert.ok(source.includes("req.headers['sec-fetch-site']"));
+  assert.ok(source.includes("`${req.protocol}://${requestHost}`"));
+});

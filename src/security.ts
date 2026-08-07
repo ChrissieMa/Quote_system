@@ -99,17 +99,31 @@ export const sanitizeAdminNextPath = (value: unknown): string => {
   return allowed.some(prefix => path === prefix || path.startsWith(`${prefix}/`)) ? path : '/quotes';
 };
 
-export const isSameOriginWrite = (origin: unknown, referer: unknown, publicBaseUrl: string): boolean => {
-  let expected: URL;
-  try {
-    expected = new URL(publicBaseUrl);
-  } catch {
-    return false;
+export const isSameOriginWrite = (
+  origin: unknown,
+  referer: unknown,
+  publicBaseUrl: string,
+  requestOrigin = '',
+  fetchSite: unknown = '',
+): boolean => {
+  const allowedOrigins = new Set<string>();
+  for (const value of [publicBaseUrl, requestOrigin]) {
+    try {
+      if (value) allowedOrigins.add(new URL(value).origin);
+    } catch {
+      // Invalid configured/request origins are never trusted.
+    }
   }
+  if (allowedOrigins.size === 0) return false;
   const candidate = String(origin || referer || '').trim();
-  if (!candidate) return false;
+  if (!candidate) {
+    // Some privacy-focused browsers suppress Origin/Referer on ordinary HTML
+    // form posts. Sec-Fetch-Site is a forbidden browser header, so page
+    // scripts cannot forge "same-origin" from another site.
+    return String(fetchSite || '').toLowerCase() === 'same-origin' && Boolean(requestOrigin);
+  }
   try {
-    return new URL(candidate).origin === expected.origin;
+    return allowedOrigins.has(new URL(candidate).origin);
   } catch {
     return false;
   }

@@ -43,10 +43,36 @@ test('admin next paths cannot redirect off-site or carry arbitrary query data', 
   assert.equal(sanitizeAdminNextPath('/invoice/secret'), '/quotes');
 });
 
-test('admin writes require the configured same origin', () => {
+test('admin writes accept configured and current deployment origins but reject cross-site requests', () => {
   assert.equal(isSameOriginWrite('https://quote.example', '', 'https://quote.example'), true);
   assert.equal(isSameOriginWrite('', 'https://quote.example/admin', 'https://quote.example'), true);
+  assert.equal(isSameOriginWrite(
+    'https://quote.lksdisplaybox.online',
+    '',
+    'http://localhost:3000',
+    'https://quote.lksdisplaybox.online',
+  ), true);
+  assert.equal(isSameOriginWrite(
+    'https://service-production.up.railway.app',
+    '',
+    'https://quote.lksdisplaybox.online',
+    'https://service-production.up.railway.app',
+  ), true);
+  assert.equal(isSameOriginWrite(
+    '',
+    '',
+    'https://quote.example',
+    'https://quote.example',
+    'same-origin',
+  ), true);
   assert.equal(isSameOriginWrite('https://evil.example', '', 'https://quote.example'), false);
+  assert.equal(isSameOriginWrite(
+    '',
+    '',
+    'https://quote.example',
+    'https://quote.example',
+    'cross-site',
+  ), false);
   assert.equal(isSameOriginWrite('', '', 'https://quote.example'), false);
 });
 
