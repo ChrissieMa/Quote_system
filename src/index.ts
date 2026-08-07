@@ -48,15 +48,41 @@ import {
   type ProductionMutationRecord,
 } from './production-mutation';
 import { installAirtableReadRetry, withAirtableReadRetry } from './airtable-retry';
+import {
+  ADMIN_SESSION_COOKIE,
+  LoginRateLimiter,
+  adminSessionCookie,
+  clearAdminSessionCookie,
+  generatePublicToken,
+  isSameOriginWrite,
+  isValidPublicToken,
+  issueAdminSession,
+  parseCookies,
+  publicTokenTtlMs,
+  safeEqual,
+  sanitizeAdminNextPath,
+  verifyAdminSession,
+} from './security';
 
 dotenv.config();
 
 const app = express();
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use((_req: Request, res: Response, next: () => void) => {
+  res.setHeader('X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet');
+  res.setHeader('Cache-Control', 'private, no-store, max-age=0, must-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Referrer-Policy', 'no-referrer');
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});
+app.use(express.json({ limit: '1mb' }));
+app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
@@ -67,7 +93,7 @@ const maintenanceMutationInFlight = new Map<string, Promise<Record<string, unkno
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 
 // ─── Helpers ───────────────────────────────────────────────────────────────
-const generateToken = () => crypto.randomBytes(16).toString('hex');
+const generateToken = () => generatePublicToken();
 
 const cleanEnv = (value: string | undefined, fallback: string): string => {
   const v = (value || '').trim();
@@ -226,15 +252,23 @@ const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST 
 const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
 const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
 
-const getAdminCredentials = () => ({
-  username: String(process.env.ADMIN_USERNAME || 'lks').trim(),
-  password: String(process.env.ADMIN_PASSWORD || '').trim(),
-});
+const getAdminCredentials = () => {
+  const configuredSessionSecret = String(process.env.SESSION_SECRET || '').trim();
+  const existingSecretStoreValue = String(process.env.QUOTE_PILOT_CONFIRMATION_SECRET || '').trim();
+  const derivedSessionSecret = existingSecretStoreValue
+    ? crypto.createHmac('sha256', existingSecretStoreValue).update('lks-admin-session-v1').digest('base64url')
+    : '';
+  return {
+    username: String(process.env.ADMIN_USERNAME || 'lks').trim(),
+    password: String(process.env.ADMIN_PASSWORD || '').trim(),
+    sessionSecret: configuredSessionSecret || derivedSessionSecret,
+  };
+};
+const loginRateLimiter = new LoginRateLimiter(5, 15 * 60 * 1000);
 
-const safeEqual = (left: string, right: string): boolean => {
-  const a = Buffer.from(left);
-  const b = Buffer.from(right);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+const adminConfigured = (): boolean => {
+  const credentials = getAdminCredentials();
+  return Boolean(credentials.username && credentials.password && credentials.sessionSecret.length >= 32);
 };
 
 const getQuotePilotSecrets = () => ({
@@ -343,23 +377,34 @@ const buildAuthoritativeQuoteBody = (rawBody: any): any => {
 
 const requireAdmin = (req: Request, res: Response, next: () => void) => {
   const expected = getAdminCredentials();
-  if (!expected.password) {
-    return res.status(503).send('ADMIN_PASSWORD is not configured.');
+  if (!adminConfigured()) {
+    return res.status(503).type('text/plain').send('Owner login is unavailable.');
   }
-  const auth = String(req.headers.authorization || '');
-  if (auth.startsWith('Basic ')) {
-    try {
-      const decoded = Buffer.from(auth.slice(6), 'base64').toString('utf8');
-      const separator = decoded.indexOf(':');
-      const username = separator >= 0 ? decoded.slice(0, separator) : '';
-      const password = separator >= 0 ? decoded.slice(separator + 1) : '';
-      if (safeEqual(username, expected.username) && safeEqual(password, expected.password)) return next();
-    } catch {
-      // Fall through to the authentication challenge.
-    }
+  const cookie = parseCookies(req.headers.cookie)[ADMIN_SESSION_COOKIE] || '';
+  if (verifyAdminSession(cookie, expected.username, expected.sessionSecret)) return next();
+  const acceptsJson = req.path.startsWith('/api/') || String(req.headers.accept || '').includes('application/json');
+  if (acceptsJson) return res.status(401).json({ error: 'Owner login required.' });
+  return res.redirect(303, `/login?next=${encodeURIComponent(sanitizeAdminNextPath(req.path))}`);
+};
+
+const requireAdminOrPilotInternal = (req: Request, res: Response, next: () => void) => {
+  const remoteAddress = String(req.socket.remoteAddress || '');
+  const supplied = String(req.headers['x-lks-quote-pilot-internal'] || '');
+  const isLoopback = remoteAddress === '127.0.0.1' || remoteAddress === '::1' || remoteAddress === '::ffff:127.0.0.1';
+  if (isLoopback && supplied && safeEqual(supplied, PILOT_INTERNAL_TOKEN)) {
+    res.locals.pilotInternal = true;
+    return next();
   }
-  res.setHeader('WWW-Authenticate', 'Basic realm="LKS Owner", charset="UTF-8"');
-  return res.status(401).send('Owner login required.');
+  return requireAdmin(req, res, next);
+};
+
+const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
+  if (res.locals.pilotInternal === true) return next();
+  if (!isSameOriginWrite(req.headers.origin, req.headers.referer, PUBLIC_BASE_URL)) {
+    if (req.path.startsWith('/api/')) return res.status(403).json({ error: 'Invalid request origin.' });
+    return res.status(403).type('text/plain').send('Invalid request origin.');
+  }
+  return next();
 };
 
 type AirtableMetadataField = {
@@ -2712,6 +2757,10 @@ const renderPage = (title: string, content: string, extraHead = ''): string => `
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow, noarchive, nosnippet">
+  <meta name="description" content="Secure LKS document portal">
+  <meta property="og:title" content="LKS Display Box Document Portal">
+  <meta property="og:description" content="Secure document access">
   <title>${escapeHtml(title)} | LKS Display Box</title>
   <style>${SHARED_CSS}</style>
   ${extraHead}
@@ -2722,6 +2771,20 @@ const renderPage = (title: string, content: string, extraHead = ''): string => `
   </div>
 </body>
 </html>`;
+
+const publicDocumentNotFound = (res: Response): Response => res.status(404).send(
+  renderPage('Not Found', '<div class="alert alert-danger">Document not found or link unavailable.</div>'),
+);
+
+const acceptedPublicToken = (token: unknown): token is string =>
+  isValidPublicToken(token, Date.now(), PUBLIC_TOKEN_TTL_MS);
+
+const logSafeError = (context: string, error: any): void => {
+  console.error(context, {
+    name: String(error?.name || 'Error'),
+    code: String(error?.statusCode || error?.status || error?.code || ''),
+  });
+};
 
 // ─── Shared Components ───────────────────────────────────────────────────────
 const docHeader = (title: string, subtitle: string, isEnglish = false): string => `
@@ -2933,6 +2996,69 @@ const renderQuickInquiryForm = (
       </div>
     </div>`;
 };
+
+const adminLogoutForm = (): string => `
+  <form method="POST" action="/logout" style="display:inline;">
+    <button type="submit" class="btn btn-outline btn-sm">Logout</button>
+  </form>`;
+
+const renderLoginForm = (nextPath: string, errorMessage = ''): string => renderPage('Owner Login', `
+  <div class="doc-card" style="max-width:480px;margin:48px auto;">
+    <div class="doc-body">
+      <h1 style="font-size:24px;margin-bottom:8px;color:#d8833b;">LKS Owner Login</h1>
+      <p style="color:#6b7280;margin-bottom:22px;">Internal system access only.</p>
+      ${errorMessage ? `<div class="alert alert-danger">${escapeHtml(errorMessage)}</div>` : ''}
+      <form method="POST" action="/login" autocomplete="on">
+        <input type="hidden" name="next" value="${escapeHtml(nextPath)}">
+        <div class="form-group">
+          <label for="admin-username">Username</label>
+          <input id="admin-username" name="username" autocomplete="username" required>
+        </div>
+        <div class="form-group">
+          <label for="admin-password">Password</label>
+          <input id="admin-password" name="password" type="password" autocomplete="current-password" required>
+        </div>
+        <button class="btn btn-primary" type="submit">Login</button>
+      </form>
+    </div>
+  </div>`);
+
+app.get('/login', (req: Request, res: Response) => {
+  if (!adminConfigured()) return res.status(503).type('text/plain').send('Owner login is unavailable.');
+  const expected = getAdminCredentials();
+  const cookie = parseCookies(req.headers.cookie)[ADMIN_SESSION_COOKIE] || '';
+  const nextPath = sanitizeAdminNextPath(req.query.next);
+  if (verifyAdminSession(cookie, expected.username, expected.sessionSecret)) return res.redirect(303, nextPath);
+  return res.send(renderLoginForm(nextPath));
+});
+
+app.post('/login', requireSameOrigin, (req: Request, res: Response) => {
+  if (!adminConfigured()) return res.status(503).type('text/plain').send('Owner login is unavailable.');
+  const expected = getAdminCredentials();
+  const username = String(req.body?.username || '').trim();
+  const password = String(req.body?.password || '');
+  const nextPath = sanitizeAdminNextPath(req.body?.next);
+  const rateKey = `${String(req.ip || req.socket.remoteAddress || 'unknown')}|${username.toLowerCase()}`;
+  const currentLimit = loginRateLimiter.check(rateKey);
+  if (!currentLimit.allowed) {
+    res.setHeader('Retry-After', String(currentLimit.retryAfterSeconds));
+    return res.status(429).send(renderLoginForm(nextPath, 'Too many login attempts. Please try again later.'));
+  }
+  if (!safeEqual(username, expected.username) || !safeEqual(password, expected.password)) {
+    const updatedLimit = loginRateLimiter.fail(rateKey);
+    if (!updatedLimit.allowed) res.setHeader('Retry-After', String(updatedLimit.retryAfterSeconds));
+    return res.status(updatedLimit.allowed ? 401 : 429).send(renderLoginForm(nextPath, 'Invalid username or password.'));
+  }
+  loginRateLimiter.success(rateKey);
+  const session = issueAdminSession(expected.username, expected.sessionSecret);
+  res.setHeader('Set-Cookie', adminSessionCookie(session));
+  return res.redirect(303, nextPath);
+});
+
+app.post('/logout', requireAdmin, requireSameOrigin, (_req: Request, res: Response) => {
+  res.setHeader('Set-Cookie', clearAdminSessionCookie());
+  return res.redirect(303, '/login');
+});
 
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3352,7 +3478,7 @@ app.get('/inquiry/create', requireAdmin, async (_req: Request, res: Response) =>
   res.send(renderPage('Quick Inquiry', renderQuickInquiryForm({}, [], '', channels, products), extraHead));
 });
 
-app.post('/inquiry/create', requireAdmin, async (req: Request, res: Response) => {
+app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   const values: Record<string, string> = {
     phone: String(req.body.phone || '').trim(),
     customerName: String(req.body.customerName || '').trim(),
@@ -3572,6 +3698,7 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
           <a href="/admin/dashboard" class="btn btn-outline">老闆 Dashboard</a>
           <a href="/inquiry/create" class="btn btn-outline">+ 新增查詢</a>
           <a href="/quote/create" class="btn btn-primary">+ New Quote</a>
+          ${adminLogoutForm()}
         </div>
       </div>
 
@@ -4867,7 +4994,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /quote/create
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/quote/create', requireAdmin, async (req: Request, res: Response) => {
+app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     // Both the existing Create Quote UI and the Natural-language Pilot pass
     // through this single authoritative v4.6 calculator before any write.
@@ -4967,7 +5094,7 @@ app.post('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     const quoteNumber = await getNextNumber(tableQuotes, 'Quote Number', 'QT');
     const requestedPilotToken = isPilotInternal ? String(b.__pilotPublicToken || '').trim() : '';
-    if (requestedPilotToken && !/^[a-f0-9]{32}$/.test(requestedPilotToken)) {
+    if (requestedPilotToken && !acceptedPublicToken(requestedPilotToken)) {
       throw new Error('Invalid internal Quote Pilot public token.');
     }
     const publicToken = requestedPilotToken || generateToken();
@@ -5146,8 +5273,9 @@ app.post('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 app.get('/quote/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const quote = records[0].fields;
     const convertedOrder = await getConvertedOrderForQuote(quote);
@@ -5349,8 +5477,8 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 
     res.send(renderPage(`${isEnglish ? 'Quote' : '報價單'} ${quote['Quote Number']}`, content));
   } catch (error: any) {
-    console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
+    logSafeError('Public quote rendering failed.', error);
+    res.status(500).send(renderPage('Error', '<div class="alert alert-danger">Unable to open this document.</div>'));
   }
 });
 
@@ -5360,8 +5488,9 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const quote = records[0].fields;
     const status = (quote['Status'] as string) || 'Draft';
@@ -5501,8 +5630,8 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
 
     res.send(renderPage(`${C.formTitle} — ${qNum}`, content));
   } catch (error: any) {
-    console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
+    logSafeError('Public customer form rendering failed.', error);
+    res.status(500).send(renderPage('Error', '<div class="alert alert-danger">Unable to open this form.</div>'));
   }
 });
 
@@ -5512,10 +5641,11 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
 app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const { customerName, customerPhone, customerEmail, chineseDeliveryAddress, howDidYouKnowUs } = req.body;
 
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const record = records[0];
     const isEnglish = isEnglishLanguage(record.fields['Quote Language']);
@@ -5607,19 +5737,20 @@ app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
       </div>
     `));
   } catch (error: any) {
-    console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
+    logSafeError('Public customer form submission failed.', error);
+    res.status(500).send(renderPage('Error', '<div class="alert alert-danger">Unable to submit this form.</div>'));
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /admin/quote/:token/convert
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/admin/quote/:token/convert', requireAdmin, async (req: Request, res: Response) => {
+app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableQuotes.select({ filterByFormula: `{Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Quote not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const quote = records[0];
     const qf = quote.fields;
@@ -5809,8 +5940,9 @@ app.post('/admin/quote/:token/convert', requireAdmin, async (req: Request, res: 
 app.get('/invoice/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Invoice not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const order = records[0];
     const of = order.fields;
@@ -6002,19 +6134,20 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
 
     res.send(renderPage(`${isEnglish ? 'Invoice' : '發票'} ${of['Invoice Number']}`, content));
   } catch (error: any) {
-    console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
+    logSafeError('Public invoice rendering failed.', error);
+    res.status(500).send(renderPage('Error', '<div class="alert alert-danger">Unable to open this document.</div>'));
   }
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /admin/invoice/:token/mark-paid
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/admin/invoice/:token/mark-paid', requireAdmin, async (req: Request, res: Response) => {
+app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Invoice not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const order = records[0];
     if (order.fields['Status'] === 'Paid') {
@@ -6048,8 +6181,9 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, async (req: Request, r
 app.get('/receipt/:token', async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
+    if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Receipt Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return res.status(404).send(renderPage('Not Found', '<div class="alert alert-danger">Receipt not found.</div>'));
+    if (records.length === 0) return publicDocumentNotFound(res);
 
     const order = records[0];
     const of = order.fields;
@@ -6130,8 +6264,8 @@ app.get('/receipt/:token', async (req: Request, res: Response) => {
 
     res.send(renderPage(`${isEnglish ? 'Receipt' : '收據'} ${of['Receipt Number']}`, content));
   } catch (error: any) {
-    console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error: ${escapeHtml(error.message)}</div>`));
+    logSafeError('Public receipt rendering failed.', error);
+    res.status(500).send(renderPage('Error', '<div class="alert alert-danger">Unable to open this document.</div>'));
   }
 });
 
@@ -6290,7 +6424,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     const content = `<div class="owner-dashboard">
       <div class="owner-topbar">
         <div><div class="owner-eyebrow">LKS OWNER</div><h1>老闆 Dashboard</h1><p>收入、成本、廣告及每月支出集中一頁。</p></div>
-        <div class="owner-actions"><a class="btn btn-outline" href="/quotes">Quote System</a><a class="btn btn-primary" href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">補成本資料</a></div>
+        <div class="owner-actions"><a class="btn btn-outline" href="/quotes">Quote System</a><a class="btn btn-primary" href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">補成本資料</a>${adminLogoutForm()}</div>
       </div>
       <div class="owner-controls">
         <form method="GET" action="/admin/dashboard"><label>月份<input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label><button class="btn btn-primary" type="submit">查看／重新整理</button></form>
@@ -6610,10 +6744,10 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
   }
 });
 
-app.post('/admin/china-shipments', requireAdmin, async (req: Request, res: Response) => {
+app.post('/admin/china-shipments', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
-      return res.status(403).send('Invalid form token.');
+      return res.status(403).type('text/plain').send('Invalid form token.');
     }
     const selectedMonth = String(req.body.month || getHongKongMonth());
     monthBounds(selectedMonth);
@@ -6735,10 +6869,10 @@ app.post('/admin/china-shipments', requireAdmin, async (req: Request, res: Respo
   }
 });
 
-app.post('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
+app.post('/admin/costs', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
-      return res.status(403).send('Invalid form token.');
+      return res.status(403).type('text/plain').send('Invalid form token.');
     }
     const selectedMonth = String(req.body.month || getHongKongMonth());
     const updatesById = new Map<string, FieldSet>();
@@ -6844,7 +6978,7 @@ app.post('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
   }
 });
 
-app.post('/admin/finance/sync', requireAdmin, async (req: Request, res: Response) => {
+app.post('/admin/finance/sync', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     const month = String(req.body.month || req.query.month || getHongKongMonth());
     const result = await syncMonthlyFinance(month);
@@ -6858,17 +6992,29 @@ app.post('/admin/finance/sync', requireAdmin, async (req: Request, res: Response
 // ─── Root redirect ───────────────────────────────────────────────────────────
 app.get('/', (_req: Request, res: Response) => res.redirect('/quotes'));
 
+// Search engines must be able to crawl the subdomain while response-level
+// noindex directives remove previously indexed documents.
+app.get('/robots.txt', (_req: Request, res: Response) => {
+  res.type('text/plain').send('User-agent: *\nAllow: /\n');
+});
+
+app.all(['/sitemap.xml', '/sitemap_index.xml'], (_req: Request, res: Response) => {
+  res.status(410).type('text/plain').send('Sitemap is not available.');
+});
+
+app.use((_req: Request, res: Response) => publicDocumentNotFound(res));
+
 // ─── Start server ────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`LKS Quote System running on port ${PORT}`);
   console.log(`Public Base URL: ${PUBLIC_BASE_URL}`);
   console.log(`Dashboard: ${PUBLIC_BASE_URL}/quotes`);
-  if (getAdminCredentials().password) {
+  if (adminConfigured() && process.env.NODE_ENV !== 'test') {
     syncMonthlyFinance().catch(error => console.error('Initial finance sync failed:', error));
     setInterval(() => {
       syncMonthlyFinance().catch(error => console.error('Scheduled finance sync failed:', error));
     }, 6 * 60 * 60 * 1000).unref();
-  } else {
-    console.warn('ADMIN_PASSWORD is missing; owner cost page and automatic finance sync are disabled.');
+  } else if (!adminConfigured()) {
+    console.warn('Owner login configuration is incomplete; all owner routes are fail-closed.');
   }
 });

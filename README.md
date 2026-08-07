@@ -30,6 +30,8 @@ This is a complete, independent Quote, Invoice, and Receipt system built for LKS
    - `AIRTABLE_API_KEY`: Your Airtable Personal Access Token (or API Key).
    - `AIRTABLE_BASE_ID`: The ID of your Airtable Base.
    - Other variables like `COMPANY_NAME`, `PUBLIC_BASE_URL`, etc.
+   - `ADMIN_PASSWORD` and a server-side session signing secret are required for owner login. Set a separate `SESSION_SECRET` in Railway. During migration only, the app can derive a separated signing key in memory from the existing `QUOTE_PILOT_CONFIRMATION_SECRET`; if neither secret exists, owner access fails closed.
+   - `PUBLIC_TOKEN_TTL_DAYS`: validity period for new v2 customer document links (default and maximum: 3650 days).
 
 ## Development
 
@@ -64,7 +66,9 @@ This project is ready to be deployed on Railway.
 4. Update `PUBLIC_BASE_URL` in the Railway variables to match your Railway deployment URL (e.g., `https://your-app-name.up.railway.app`).
 
 ## Features
-- **Owner Login**: `/quotes`, quote creation, inquiry creation, customer search, invoice conversion, and payment actions require `ADMIN_USERNAME` / `ADMIN_PASSWORD`.
+- **Owner Login**: `/quotes`, quote creation, inquiry creation, customer search, invoice conversion, payment actions, costs, and finance pages require a signed secure session. Login is rate-limited and supports logout.
+- **Private-by-default responses**: the complete Quote subdomain sends `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet` and `Cache-Control: private, no-store`.
+- **Secret document links**: Quote, Invoice, Receipt, and Customer Information pages accept only expiring v2 256-bit tokens. Legacy 32-character tokens are rejected.
 - **Quote Creation**: Signed-in internal users can generate quotes with items, discounts, and terms.
 - **Public Quote Page**: Customers can view quotes and submit their details to confirm the order.
 - **Invoice Generation**: Convert confirmed quotes into official orders (invoices) in Airtable.

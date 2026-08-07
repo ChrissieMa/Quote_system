@@ -1,0 +1,55 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+
+const source = fs.readFileSync(path.join(__dirname, 'index.ts'), 'utf8');
+
+test('all owner pages and owner data APIs require the admin session', () => {
+  const protectedRoutes = [
+    "app.get('/api/customers/search', requireAdmin,",
+    "app.get('/api/inquiries/check-phone', requireAdmin,",
+    "app.get('/inquiry/create', requireAdmin,",
+    "app.post('/inquiry/create', requireAdmin, requireSameOrigin,",
+    "app.get('/quotes', requireAdmin,",
+    "app.get('/quote/create', requireAdmin,",
+    "app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin,",
+    "app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin,",
+    "app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin,",
+    "app.get('/admin/dashboard', requireAdmin,",
+    "app.get('/admin/costs', requireAdmin,",
+    "app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,",
+    "app.post('/admin/costs', requireAdmin, requireSameOrigin,",
+    "app.post('/admin/finance/sync', requireAdmin, requireSameOrigin,",
+  ];
+  for (const route of protectedRoutes) assert.ok(source.includes(route), `missing protection: ${route}`);
+  assert.ok(!/ADMIN_PASSWORD\s*\|\|\s*['"][^'"]+/.test(source), 'admin password must never have a default');
+});
+
+test('service APIs remain bearer-protected and confirmed', () => {
+  const serviceRoutes = [
+    '/api/quote-pilot/preview', '/api/quote-pilot/create', '/api/quote-pilot/lookup',
+    '/api/production-maintenance/delete-preview', '/api/production-maintenance/delete-confirm',
+    '/api/production-maintenance/edit-preview', '/api/production-maintenance/edit-confirm',
+    '/api/production-maintenance/cancel-preview', '/api/production-maintenance/cancel-confirm',
+  ];
+  for (const route of serviceRoutes) {
+    assert.match(source, new RegExp(`app\\.post\\('${route.replaceAll('/', '\\/')}', requireQuotePilotApi,`));
+  }
+});
+
+test('public document routes validate v2 tokens before Airtable lookup', () => {
+  assert.equal((source.match(/if \(!acceptedPublicToken\(token\)\) return publicDocumentNotFound\(res\);/g) || []).length, 7);
+  assert.ok(!source.includes('/^[a-f0-9]{32}$/'));
+});
+
+test('server-wide privacy headers, HTML noindex, crawlable robots, and dead sitemaps are present', () => {
+  for (const value of [
+    "X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet",
+    "Cache-Control', 'private, no-store, max-age=0, must-revalidate",
+    '<meta name="robots" content="noindex, nofollow, noarchive, nosnippet">',
+    "app.get('/robots.txt'",
+    "Allow: /",
+    "app.all(['/sitemap.xml', '/sitemap_index.xml']",
+  ]) assert.ok(source.includes(value), `missing security directive: ${value}`);
+});

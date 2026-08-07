@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import { formatDeterministicPublicToken } from './security';
 
 export const PILOT_CONFIRMATION_TEXT = '確認開報價';
 export const SHORT_QUOTE_CONFIRMATION_TEXT = '確認開單';
@@ -575,8 +576,17 @@ export const verifyConfirmationId = (
   return { input: decoded.input, preview: recalculated };
 };
 
-export const idempotencyPublicToken = (confirmationId: string, secret: string): string =>
-  crypto.createHmac('sha256', secret).update(`quote:${confirmationId}`).digest('hex').slice(0, 32);
+export const idempotencyPublicToken = (confirmationId: string, secret: string): string => {
+  const [payload] = String(confirmationId || '').split('.');
+  let issuedAt: number;
+  try {
+    issuedAt = Number(JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')).issuedAt);
+  } catch {
+    throw new Error('Invalid confirmation ID.');
+  }
+  const digest = crypto.createHmac('sha256', secret).update(`quote:${confirmationId}`).digest();
+  return formatDeterministicPublicToken(issuedAt, digest);
+};
 
 export const toCreateQuoteBody = (input: PilotQuoteInput, preview: PilotPreview) => ({
   quoteLanguage: '中文',
