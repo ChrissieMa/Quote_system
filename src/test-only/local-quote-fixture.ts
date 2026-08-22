@@ -74,7 +74,11 @@ const matchesFormula = (fixtureRecord: FixtureRecord, formula: unknown): boolean
   return true;
 };
 
-const createTable = (name: string, seed: FixtureRecord[]): FixtureTable => {
+const createTable = (
+  name: string,
+  seed: FixtureRecord[],
+  onCreate: (fields: FieldSet) => FieldSet = fields => fields,
+): FixtureTable => {
   const records = seed;
   let nextId = records.length + 1;
   const selected = (options: Record<string, any> = {}): FixtureRecord[] => {
@@ -103,7 +107,10 @@ const createTable = (name: string, seed: FixtureRecord[]): FixtureTable => {
     },
     async create(inputs) {
       return inputs.map(input => {
-        const created = record(`rec_local_${name.replace(/[^a-z0-9]/gi, '_')}_${nextId++}`, { ...input.fields });
+        const created = record(
+          `rec_local_${name.replace(/[^a-z0-9]/gi, '_')}_${nextId++}`,
+          onCreate({ ...input.fields }),
+        );
         records.push(created);
         return created;
       });
@@ -221,11 +228,16 @@ export const createLocalQuoteFixture = (): {
   };
 
   const tables = new Map<string, FixtureTable>();
-  const register = (names: string[], seed: FixtureRecord[] = []) => {
-    const table = createTable(names[0], seed);
+  const register = (
+    names: string[],
+    seed: FixtureRecord[] = [],
+    onCreate?: (fields: FieldSet) => FieldSet,
+  ) => {
+    const table = createTable(names[0], seed, onCreate);
     names.forEach(name => tables.set(name, table));
   };
-  register(['Quotes'], [record('rec_local_quote_1', quoteFields)]);
+  const quoteRecords = [record('rec_local_quote_1', quoteFields)];
+  register(['Quotes'], quoteRecords);
   register(['Customers'], [record('rec_local_customer_1', {
     'Customer ID': 'L9001',
     'Customer Name': 'TEST-ONLY FICTIONAL CUSTOMER',
@@ -234,7 +246,17 @@ export const createLocalQuoteFixture = (): {
     'Address': 'NO PRODUCTION DATA',
   })]);
   register(['Customers (Active)']);
-  register(['Order_2026'], [record('rec_local_order_1', orderFields)]);
+  register(['Order_2026'], [record('rec_local_order_1', orderFields)], fields => {
+    // Production's Final Amount is a computed Airtable field and therefore is
+    // intentionally absent from the real write payload. The local adapter has
+    // no formula engine, so preserve the already-authoritative source Quote
+    // Total instead of independently rounding it a second time.
+    const sourceQuoteNumber = String(fields['Source Quote Ref'] || '');
+    const sourceQuote = quoteRecords.find(item => item.fields['Quote Number'] === sourceQuoteNumber);
+    return sourceQuote
+      ? { ...fields, 'Final Amount': sourceQuote.fields['Total'] }
+      : fields;
+  });
   register(['Order Items'], [record('rec_local_order_item_1', {
     'Item No': 'AUG2699-A',
     'Order': ['rec_local_order_1'],

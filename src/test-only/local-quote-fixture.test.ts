@@ -78,6 +78,22 @@ test('local original-route fixture keeps every conditional bottom section popula
     assert.ok(String(order.fields['Payment Method'] || '').trim());
     assert.ok(String(order.fields['Notes'] || '').trim());
     assert.ok(String(order.fields['Terms and Conditions'] || '').trim());
+
+    const createdQuote = (await fixture.base('Quotes').create([{
+      fields: {
+        'Quote Number': 'QT-2026-9002',
+        'Sub Total': 1407.89,
+        'Total': 1408,
+      },
+    }]))[0];
+    const createdOrder = (await fixture.base('Order_2026').create([{
+      fields: {
+        'Source Quote Ref': createdQuote.fields['Quote Number'],
+        'Product Amount': createdQuote.fields['Sub Total'],
+        'Discount': 1.0001,
+      },
+    }]))[0];
+    assert.equal(createdOrder.fields['Final Amount'], createdQuote.fields['Total']);
   } finally {
     if (previousPng === undefined) delete process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG;
     else process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG = previousPng;
