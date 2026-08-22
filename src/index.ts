@@ -106,7 +106,7 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
 const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
-const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = LOCAL_QUOTE_FIXTURE
+const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = LOCAL_QUOTE_FIXTURE || !QUOTATION_IMAGE_ENABLED
   ? null
   : createGoogleDriveQuotationImageProviderFromEnvironment(process.env);
 // Phase 2B-1 deliberately provides no Production adapter. A later approved

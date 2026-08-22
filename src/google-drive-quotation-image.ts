@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import type { Express, Request, Response as ExpressResponse } from 'express';
 import {
+  isImmutableItemId,
   QuotationImageError,
   type QuotationImagePresentationResolver,
   type QuotationImageStorage,
@@ -14,6 +15,7 @@ const IDEMPOTENCY_KEY_PATTERN = /^sha256:([a-f0-9]{64})$/;
 const FILE_ID_PATTERN = /^[A-Za-z0-9_-]{8,200}$/;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 const MAX_PNG_BYTES = 10 * 1024 * 1024;
+const QUOTATION_IMAGE_DIMENSION = 1280;
 const DRIVE_FILE_SCOPE = 'https://www.googleapis.com/auth/drive.file';
 
 type FetchLike = typeof fetch;
@@ -130,7 +132,9 @@ type DriveFile = {
   mimeType?: string;
   trashed?: boolean;
   appProperties?: Record<string, string>;
-  permissions?: Array<{ type?: string; role?: string }>;
+  parents?: string[];
+  permissions?: Array<{ id?: string; type?: string; role?: string }>;
+  capabilities?: { canAddChildren?: boolean };
 };
 
 export type GoogleDriveQuotationImageStorageConfig = {
@@ -140,6 +144,8 @@ export type GoogleDriveQuotationImageStorageConfig = {
   timeoutMs?: number;
   maxAttempts?: number;
   retryDelay?: (attempt: number) => Promise<void>;
+  folderId: string;
+  expectedOwnerEmail: string;
 };
 
 const driveAssetDigest = (assetKey: string, idempotencyKey?: string): string => {
@@ -156,13 +162,30 @@ const driveAssetDigest = (assetKey: string, idempotencyKey?: string): string => 
 
 const isRetryableStatus = (status: number): boolean => status === 408 || status === 429 || status >= 500;
 
+const assertQuotationPng = (bytes: Uint8Array, message: string): void => {
+  const png = Buffer.from(bytes);
+  const hasIhdr = png.length >= 33
+    && png.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)
+    && png.readUInt32BE(8) === 13
+    && png.subarray(12, 16).toString('ascii') === 'IHDR';
+  if (!hasIhdr
+    || png.length > MAX_PNG_BYTES
+    || png.readUInt32BE(16) !== QUOTATION_IMAGE_DIMENSION
+    || png.readUInt32BE(20) !== QUOTATION_IMAGE_DIMENSION) {
+    throw new QuotationImageError(message, 'terminal');
+  }
+};
+
 export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
   private readonly fetchImpl: FetchLike;
   private readonly apiOrigin: string;
   private readonly timeoutMs: number;
   private readonly maxAttempts: number;
   private readonly retryDelay: (attempt: number) => Promise<void>;
+  private readonly folderId: string;
+  private readonly expectedOwnerEmail: string;
   private readonly inFlight = new Map<string, Promise<{ assetKey: string }>>();
+  private preflight?: Promise<{ ownerPermissionId: string }>;
 
   constructor(private readonly config: GoogleDriveQuotationImageStorageConfig) {
     this.fetchImpl = config.fetch || fetch;
@@ -170,6 +193,12 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
     this.timeoutMs = boundedInteger(config.timeoutMs, 10_000, 500, 60_000);
     this.maxAttempts = boundedInteger(config.maxAttempts, 3, 1, 5);
     this.retryDelay = config.retryDelay || (attempt => new Promise(resolve => setTimeout(resolve, attempt * 250)));
+    this.folderId = requiredSecret(config.folderId, 'Google Drive quotation-image folder ID');
+    if (!FILE_ID_PATTERN.test(this.folderId)) throw new Error('Google Drive quotation-image folder ID is invalid.');
+    this.expectedOwnerEmail = requiredSecret(config.expectedOwnerEmail, 'Expected Google Drive OAuth owner').toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(this.expectedOwnerEmail)) {
+      throw new Error('Expected Google Drive OAuth owner is invalid.');
+    }
   }
 
   async put(input: {
@@ -179,12 +208,10 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
     mimeType: 'image/png';
   }): Promise<{ assetKey: string }> {
     const digest = driveAssetDigest(input.assetKey, input.idempotencyKey);
-    if (input.mimeType !== 'image/png'
-      || input.bytes.length < PNG_SIGNATURE.length
-      || input.bytes.length > MAX_PNG_BYTES
-      || !Buffer.from(input.bytes.subarray(0, PNG_SIGNATURE.length)).equals(PNG_SIGNATURE)) {
-      throw new QuotationImageError('Google Drive storage accepts only bounded PNG artifacts.', 'terminal');
+    if (input.mimeType !== 'image/png') {
+      throw new QuotationImageError('Google Drive storage accepts only PNG artifacts.', 'terminal');
     }
+    assertQuotationPng(input.bytes, 'Google Drive storage accepts only 1280 x 1280 PNG artifacts.');
     const active = this.inFlight.get(input.assetKey);
     if (active) return active;
     const operation = this.putOnce(input.assetKey, digest, input.bytes).finally(() => {
@@ -196,6 +223,7 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
 
   async read(assetKey: string): Promise<Uint8Array> {
     const digest = driveAssetDigest(assetKey);
+    await this.ensurePreflight();
     const file = await this.findPrivateFile(digest);
     if (!file) throw new QuotationImageError('Google Drive quotation image was not found.', 'terminal');
     const response = await this.authorizedFetch(
@@ -205,22 +233,24 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
     if (!response.ok) throw this.driveError('Google Drive image download failed', response.status);
     const contentType = String(response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase();
     const bytes = new Uint8Array(await response.arrayBuffer());
-    if (contentType !== 'image/png'
-      || bytes.length < PNG_SIGNATURE.length
-      || bytes.length > MAX_PNG_BYTES
-      || !Buffer.from(bytes.subarray(0, PNG_SIGNATURE.length)).equals(PNG_SIGNATURE)) {
+    if (contentType !== 'image/png') {
       throw new QuotationImageError('Google Drive returned an invalid quotation image.', 'terminal');
     }
+    assertQuotationPng(bytes, 'Google Drive returned an invalid quotation image.');
     return bytes;
   }
 
   private async putOnce(assetKey: string, digest: string, bytes: Uint8Array): Promise<{ assetKey: string }> {
+    await this.ensurePreflight();
     const existing = await this.findPrivateFile(digest);
     if (existing) return { assetKey };
+    const fileId = await this.generateFileId();
     const boundary = `lks-quotation-image-${digest}`;
     const metadata = {
+      id: fileId,
       name: `quotation-image-${digest}.png`,
       mimeType: 'image/png',
+      parents: [this.folderId],
       appProperties: {
         lks_contract: 'quotation-image-v1',
         lks_asset_digest: digest,
@@ -233,40 +263,65 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
       Buffer.from(`\r\n--${boundary}--\r\n`),
     ]);
     const response = await this.authorizedFetch(
-      `${this.apiOrigin}/upload/drive/v3/files?uploadType=multipart&fields=id`,
+      `${this.apiOrigin}/upload/drive/v3/files?uploadType=multipart&fields=id&ignoreDefaultVisibility=true`,
       {
         method: 'POST',
         headers: { 'Content-Type': `multipart/related; boundary=${boundary}` },
         body: multipart,
       },
     );
+    if (response.status === 409) {
+      await this.getAndAssertPrivate(fileId, digest);
+      await this.findPrivateFile(digest);
+      return { assetKey };
+    }
     if (!response.ok) throw this.driveError('Google Drive image upload failed', response.status);
     const created = await response.json() as Record<string, unknown>;
-    const fileId = String(created.id || '');
-    if (!FILE_ID_PATTERN.test(fileId)) throw new QuotationImageError('Google Drive returned an invalid file ID.', 'terminal');
+    if (String(created.id || '') !== fileId) throw new QuotationImageError('Google Drive returned an unexpected file ID.', 'terminal');
     await this.getAndAssertPrivate(fileId, digest);
+    await this.findPrivateFile(digest);
     return { assetKey };
   }
 
+  private async generateFileId(): Promise<string> {
+    const parameters = new URLSearchParams({ count: '1', space: 'drive', type: 'files' });
+    const response = await this.authorizedFetch(
+      `${this.apiOrigin}/drive/v3/files/generateIds?${parameters}`,
+      { method: 'GET' },
+    );
+    if (!response.ok) throw this.driveError('Google Drive file ID generation failed', response.status);
+    const body = await response.json() as { ids?: unknown[] };
+    const ids = (body.ids || []).map(String).filter(id => FILE_ID_PATTERN.test(id));
+    if (ids.length !== 1) throw new QuotationImageError('Google Drive returned an invalid generated file ID.', 'terminal');
+    return ids[0];
+  }
+
   private async findPrivateFile(digest: string): Promise<DriveFile | null> {
-    const query = `trashed = false and appProperties has { key='lks_asset_digest' and value='${digest}' }`;
+    const query = `'${this.folderId}' in parents and trashed = false and appProperties has { key='lks_asset_digest' and value='${digest}' }`;
     const parameters = new URLSearchParams({
       q: query,
       spaces: 'drive',
-      pageSize: '2',
+      pageSize: '3',
       orderBy: 'createdTime,name',
       fields: 'files(id)',
     });
     const response = await this.authorizedFetch(`${this.apiOrigin}/drive/v3/files?${parameters}`, { method: 'GET' });
     if (!response.ok) throw this.driveError('Google Drive image lookup failed', response.status);
     const body = await response.json() as { files?: Array<{ id?: unknown }> };
-    const ids = (body.files || []).map(file => String(file.id || '')).filter(id => FILE_ID_PATTERN.test(id));
+    const rawIds = (body.files || []).map(file => String(file.id || ''));
+    if (rawIds.some(id => !FILE_ID_PATTERN.test(id))) {
+      throw new QuotationImageError('Google Drive lookup returned an invalid file identity.', 'terminal');
+    }
+    const ids = rawIds.filter(Boolean);
     if (ids.length === 0) return null;
-    return this.getAndAssertPrivate(ids.sort()[0], digest);
+    if (ids.length > 1) {
+      throw new QuotationImageError('Google Drive contains duplicate files for one quotation image identity.', 'terminal');
+    }
+    return this.getAndAssertPrivate(ids[0], digest);
   }
 
   private async getAndAssertPrivate(fileId: string, digest: string): Promise<DriveFile> {
-    const fields = 'id,name,mimeType,trashed,appProperties,permissions(type,role)';
+    const fields = 'id,name,mimeType,trashed,parents,appProperties,permissions(id,type,role)';
     const response = await this.authorizedFetch(
       `${this.apiOrigin}/drive/v3/files/${encodeURIComponent(fileId)}?fields=${encodeURIComponent(fields)}`,
       { method: 'GET' },
@@ -274,17 +329,68 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
     if (!response.ok) throw this.driveError('Google Drive file verification failed', response.status);
     const file = await response.json() as DriveFile;
     const permissions = file.permissions || [];
-    const privateOwnerOnly = permissions.length > 0 && permissions.every(permission =>
-      permission.type === 'user' && permission.role === 'owner');
+    const ownerPermissionId = (await this.ensurePreflight()).ownerPermissionId;
+    const privateOwnerOnly = permissions.length === 1
+      && permissions[0].id === ownerPermissionId
+      && permissions[0].type === 'user'
+      && permissions[0].role === 'owner';
     if (!FILE_ID_PATTERN.test(String(file.id || ''))
       || file.mimeType !== 'image/png'
       || file.trashed === true
       || file.appProperties?.lks_contract !== 'quotation-image-v1'
       || file.appProperties?.lks_asset_digest !== digest
+      || file.parents?.length !== 1
+      || file.parents[0] !== this.folderId
       || !privateOwnerOnly) {
       throw new QuotationImageError('Google Drive file is not a private quotation image.', 'terminal');
     }
     return file;
+  }
+
+  private async ensurePreflight(): Promise<{ ownerPermissionId: string }> {
+    if (this.preflight) return this.preflight;
+    const operation = this.runPreflight().catch(error => {
+      if (this.preflight === operation) this.preflight = undefined;
+      throw error;
+    });
+    this.preflight = operation;
+    return operation;
+  }
+
+  private async runPreflight(): Promise<{ ownerPermissionId: string }> {
+    const aboutFields = 'user(emailAddress,permissionId)';
+    const aboutResponse = await this.authorizedFetch(
+      `${this.apiOrigin}/drive/v3/about?fields=${encodeURIComponent(aboutFields)}`,
+      { method: 'GET' },
+    );
+    if (!aboutResponse.ok) throw this.driveError('Google Drive OAuth owner verification failed', aboutResponse.status);
+    const about = await aboutResponse.json() as { user?: { emailAddress?: unknown; permissionId?: unknown } };
+    const emailAddress = String(about.user?.emailAddress || '').trim().toLowerCase();
+    const ownerPermissionId = String(about.user?.permissionId || '');
+    if (emailAddress !== this.expectedOwnerEmail || !FILE_ID_PATTERN.test(ownerPermissionId)) {
+      throw new QuotationImageError('Google Drive OAuth owner does not match the configured owner.', 'terminal');
+    }
+
+    const folderFields = 'id,mimeType,trashed,capabilities(canAddChildren),permissions(id,type,role)';
+    const folderResponse = await this.authorizedFetch(
+      `${this.apiOrigin}/drive/v3/files/${encodeURIComponent(this.folderId)}?fields=${encodeURIComponent(folderFields)}`,
+      { method: 'GET' },
+    );
+    if (!folderResponse.ok) throw this.driveError('Google Drive quotation-image folder verification failed', folderResponse.status);
+    const folder = await folderResponse.json() as DriveFile;
+    const permissions = folder.permissions || [];
+    const privateOwnerOnly = permissions.length === 1
+      && permissions[0].id === ownerPermissionId
+      && permissions[0].type === 'user'
+      && permissions[0].role === 'owner';
+    if (folder.id !== this.folderId
+      || folder.mimeType !== 'application/vnd.google-apps.folder'
+      || folder.trashed === true
+      || folder.capabilities?.canAddChildren !== true
+      || !privateOwnerOnly) {
+      throw new QuotationImageError('Google Drive quotation-image folder is not a private writable owner folder.', 'terminal');
+    }
+    return { ownerPermissionId };
   }
 
   private async authorizedFetch(url: string, init: RequestInit): Promise<FetchResponse> {
@@ -331,7 +437,7 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
   }
 }
 
-type SignedProxyPayload = { v: 1; asset_key: string; expires_at: number };
+type SignedProxyPayload = { v: 2; asset_key: string; item_id: string; expires_at: number };
 
 export class GoogleDriveQuotationImageProxy {
   readonly routePath = '/quotation-images/google-drive/:token';
@@ -350,8 +456,8 @@ export class GoogleDriveQuotationImageProxy {
     this.ttlSeconds = boundedInteger(options.ttlSeconds, 300, 30, 900);
     this.now = options.now || Date.now;
     this.presentationResolver = {
-      resolve: async assetKey => ({
-        src: `/quotation-images/google-drive/${this.sign(assetKey)}`,
+      resolve: async (assetKey, context) => ({
+        src: `/quotation-images/google-drive/${this.sign(assetKey, context.itemId)}`,
         expiresAt: new Date(this.now() + this.ttlSeconds * 1000).toISOString(),
       }),
     };
@@ -362,11 +468,13 @@ export class GoogleDriveQuotationImageProxy {
     return this.storage.read(payload.asset_key);
   }
 
-  private sign(assetKey: string): string {
+  private sign(assetKey: string, itemId: string): string {
     driveAssetDigest(assetKey);
+    if (!isImmutableItemId(itemId)) throw new QuotationImageError('Quotation image proxy item identity is invalid.', 'terminal');
     const payload: SignedProxyPayload = {
-      v: 1,
+      v: 2,
       asset_key: assetKey,
+      item_id: itemId.toLowerCase(),
       expires_at: Math.floor(this.now() / 1000) + this.ttlSeconds,
     };
     const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
@@ -394,7 +502,10 @@ export class GoogleDriveQuotationImageProxy {
       throw new QuotationImageError('Quotation image proxy token is invalid.', 'terminal');
     }
     driveAssetDigest(payload.asset_key);
-    if (payload.v !== 1 || !Number.isInteger(payload.expires_at) || payload.expires_at <= Math.floor(this.now() / 1000)) {
+    if (payload.v !== 2
+      || !isImmutableItemId(payload.item_id)
+      || !Number.isInteger(payload.expires_at)
+      || payload.expires_at <= Math.floor(this.now() / 1000)) {
       throw new QuotationImageError('Quotation image proxy token has expired.', 'terminal');
     }
     return payload;
@@ -440,6 +551,14 @@ export const createGoogleDriveQuotationImageProviderFromEnvironment = (
   const storage = new GoogleDriveQuotationImageStorage({
     accessTokenProvider: tokenProvider,
     fetch: options.fetch,
+    folderId: requiredSecret(
+      environment.GOOGLE_DRIVE_QUOTATION_IMAGE_FOLDER_ID,
+      'GOOGLE_DRIVE_QUOTATION_IMAGE_FOLDER_ID',
+    ),
+    expectedOwnerEmail: requiredSecret(
+      environment.GOOGLE_DRIVE_EXPECTED_OWNER_EMAIL,
+      'GOOGLE_DRIVE_EXPECTED_OWNER_EMAIL',
+    ),
   });
   const proxy = new GoogleDriveQuotationImageProxy(storage, {
     signingSecret: requiredSecret(
