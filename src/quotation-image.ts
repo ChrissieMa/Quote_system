@@ -68,6 +68,7 @@ export interface QuotationImagePresentationResolver {
 
 export type QuotationImageRuntimeAdapters = {
   coordinator?: QuotationImageCoordinator;
+  storage?: QuotationImageStorage;
   jobScheduler?: QuotationImageJobScheduler;
   metadataWriter?: QuotationImageMetadataWriter;
   presentationResolver?: QuotationImagePresentationResolver;

@@ -80,6 +80,10 @@ import {
   createLocalQuoteFixture,
   localQuoteFixtureEnabled,
 } from './test-only/local-quote-fixture';
+import {
+  createGoogleDriveQuotationImageProviderFromEnvironment,
+  installGoogleDriveQuotationImageProvider,
+} from './google-drive-quotation-image';
 
 dotenv.config();
 
@@ -102,6 +106,9 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
 const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
+const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = LOCAL_QUOTE_FIXTURE
+  ? null
+  : createGoogleDriveQuotationImageProviderFromEnvironment(process.env);
 // Phase 2B-1 deliberately provides no Production adapter. A later approved
 // composition step may supply these provider-neutral interfaces without
 // changing Quote item persistence or public presentation call sites.
@@ -111,6 +118,14 @@ const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown
 const maintenanceMutationPlans = new Map<string, ProductionMutationPlan>();
 const maintenanceMutationCompleted = new Map<string, Record<string, unknown>>();
 const maintenanceMutationInFlight = new Map<string, Promise<Record<string, unknown>>>();
+
+if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER) {
+  installGoogleDriveQuotationImageProvider(
+    app,
+    quotationImageRuntime,
+    GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER,
+  );
+}
 
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 

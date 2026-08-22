@@ -70,8 +70,13 @@ This project is ready to be deployed on Railway.
 - **Private-by-default responses**: the complete Quote subdomain sends `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet` and `Cache-Control: private, no-store`.
 - **Secret document links**: Quote, Invoice, Receipt, and Customer Information pages accept only expiring v2 256-bit tokens. Legacy 32-character tokens are rejected.
 - **Quote Creation**: Signed-in internal users can generate quotes with items, discounts, and terms.
+- **Optional quotation images**: The feature is off by default. A private Google Drive storage adapter and short-lived same-origin image proxy are available only after explicit provider configuration and human OAuth authorization; no Drive URL or permission is made public.
 - **Public Quote Page**: Customers can view quotes and submit their details to confirm the order.
 - **Invoice Generation**: Convert confirmed quotes into official orders (invoices) in Airtable.
 - **Public Invoice Page**: Customers can view their invoices.
 - **Receipt Generation**: Mark invoices as paid to generate receipts.
 - **Public Receipt Page**: Customers can view their payment receipts.
+
+## Google Drive quotation-image storage
+
+See [`docs/quotation-image-google-drive.md`](docs/quotation-image-google-drive.md). This storage component does not provide a renderer and does not enable quotation images by itself. Never use a service account for a personal My Drive: service accounts have no storage quota and cannot own files. Use the least-privilege `drive.file` scope with an explicitly authorized human account instead.
