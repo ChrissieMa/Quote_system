@@ -190,8 +190,11 @@ export const createLocalQuoteFixture = (): {
     'Delivery Display Text': 'Local fixture only',
     'Quote Items JSON': JSON.stringify([item]),
     'Description Summary': 'TEST-ONLY quotation image acceptance fixture',
-    'Notes': '',
-    'Terms and Conditions': '',
+    // Non-empty test-only values exercise the genuine conditional sections.
+    // English Quote rendering intentionally uses the application's canonical
+    // DEFAULT_QUOTE_NOTES_EN and DEFAULT_TERMS_EN text when these fields exist.
+    'Notes': 'TEST-ONLY: render the original Quote notes section.',
+    'Terms and Conditions': 'TEST-ONLY: render the original Quote terms section.',
     'Status': 'Draft',
     'Order Ref': 'rec_local_order_1',
     'Invoice Public Token': LOCAL_INVOICE_TOKEN,
@@ -210,6 +213,9 @@ export const createLocalQuoteFixture = (): {
     'Discount Value HKD': 0,
     'Delivery Charge Mode': '已包本地送貨',
     'Delivery Display Text': 'Local fixture only',
+    'Payment Method': 'Bank Transfer',
+    'Notes': 'TEST-ONLY LOCAL FIXTURE — NO PRODUCTION DATA',
+    'Terms and Conditions': 'TEST-ONLY: preserve the original Invoice presentation.',
     'Source Quote Ref': 'QT-2026-9001',
     'Quote Language': 'English',
   };
