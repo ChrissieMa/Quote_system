@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "ts-node src/index.ts",
     "build": "tsc",
-    "test": "node --test -r ts-node/register src/airtable-retry.test.ts src/quotation-image.test.ts src/quote-pilot.test.ts src/quote-lookup.test.ts src/quote-short.test.ts src/production-maintenance.test.ts src/production-mutation.test.ts src/security.test.ts src/security-routes.test.ts",
+    "test": "node --test -r ts-node/register src/airtable-retry.test.ts src/quotation-image.test.ts src/quotation-image-local-preview.test.ts src/quote-pilot.test.ts src/quote-lookup.test.ts src/quote-short.test.ts src/production-maintenance.test.ts src/production-mutation.test.ts src/security.test.ts src/security-routes.test.ts",
+    "preview:quotation-image": "ts-node src/quotation-image-local-preview.ts",
     "start": "node dist/index.js"
   },
   "dependencies": {
