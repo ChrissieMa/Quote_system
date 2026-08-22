@@ -63,6 +63,14 @@ import {
   sanitizeAdminNextPath,
   verifyAdminSession,
 } from './security';
+import {
+  createImmutableItemId,
+  ensureImmutableItemIds,
+  isImmutableItemId,
+  quotationImageEnabled,
+  quotationImagePresentation,
+  type QuoteItemWithQuotationImage,
+} from './quotation-image';
 
 dotenv.config();
 
@@ -83,6 +91,7 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
+const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
@@ -287,7 +296,7 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
   return next();
 };
 
-const buildAuthoritativeQuoteBody = (rawBody: any): any => {
+const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = false): any => {
   const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
   const promotionType = String(rawBody?.promotionType || '').trim();
   const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠']);
@@ -337,6 +346,9 @@ const buildAuthoritativeQuoteBody = (rawBody: any): any => {
         height: Number(item?.outerH),
       } : undefined;
       return {
+        ...(preserveTrustedItemIds && isImmutableItemId(item?.item_id)
+          ? { item_id: String(item.item_id).toLowerCase() }
+          : {}),
         itemType,
         forWhat: String(item?.forWhat || ''),
         innerDimensions: {
@@ -580,6 +592,29 @@ const escapeHtml = (unsafe: unknown): string =>
 
 const nl2br = (str: unknown): string =>
   escapeHtml(str).replace(/\n/g, '<br>');
+
+// Public documents share this presentation boundary. A storage adapter must
+// resolve asset_key to a short-lived URL for the current request; no URL is
+// persisted in Quote Items JSON. Until such an adapter is configured, the
+// helper returns an empty string and the Quote remains fully usable.
+const renderOptionalQuotationImage = (
+  item: QuoteItemWithQuotationImage,
+  resolvedSrc?: string,
+): string => {
+  if (!QUOTATION_IMAGE_ENABLED) return '';
+  const presentation = quotationImagePresentation(item, resolvedSrc);
+  if (!presentation) return '';
+  return `<div class="quotation-image"><img src="${escapeHtml(presentation.src)}" alt="${escapeHtml(presentation.alt)}" loading="lazy"></div>`;
+};
+
+const renderOptionalQuotationImageRow = (
+  item: QuoteItemWithQuotationImage,
+  columnCount: number,
+  resolvedSrc?: string,
+): string => {
+  const content = renderOptionalQuotationImage(item, resolvedSrc);
+  return content ? `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}</td></tr>` : '';
+};
 
 const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
   const single = {
@@ -2563,6 +2598,9 @@ const SHARED_CSS = `
   .items-table td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: top; }
   .items-table tr:nth-child(even) td { background: #fdf8f5; }
   .items-table .item-sub-detail td { background: #fffaf5 !important; }
+  .items-table .quotation-image-row td { background:#fff !important; text-align:center; }
+  .quotation-image { display:flex; justify-content:center; padding:8px 0; }
+  .quotation-image img { display:block; width:min(100%, 420px); height:auto; aspect-ratio:1; object-fit:contain; }
   .mini-label { font-size: 11px; font-weight: 700; color: #d8833b; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
   .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
   .offer-preview { background:#fffaf6; border:1px solid #f0e0d0; border-radius:6px; padding:12px; font-size:13px; }
@@ -3110,6 +3148,12 @@ app.post('/api/quote-pilot/preview', requireQuotePilotApi, async (req: Request, 
     } else {
       input = req.body as PilotQuoteInput;
     }
+    // Item identity is minted by this server before the signed preview.  The
+    // signed payload then carries the same immutable ID through creation.
+    input = {
+      ...input,
+      items: input.items.map(item => ({ ...item, item_id: createImmutableItemId() })),
+    };
     const preview = buildPilotPreview(input);
     const { confirmationSecret } = getQuotePilotSecrets();
     const confirmationId = issueConfirmationId(input, confirmationSecret);
@@ -5004,11 +5048,13 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async (req: Request, res: Response) => {
   try {
-    // Both the existing Create Quote UI and the Natural-language Pilot pass
-    // through this single authoritative v4.6 calculator before any write.
-    const b = buildAuthoritativeQuoteBody(req.body);
     const internalPilotHeader = String(req.headers['x-lks-quote-pilot-internal'] || '');
     const isPilotInternal = internalPilotHeader.length > 0 && safeEqual(internalPilotHeader, PILOT_INTERNAL_TOKEN);
+    // Both the existing Create Quote UI and the Natural-language Pilot pass
+    // through this single authoritative v4.6 calculator before any write.
+    // Only the signed internal Pilot route may preserve a pre-minted item ID;
+    // ordinary Create Quote bodies always receive fresh server IDs here.
+    const b = buildAuthoritativeQuoteBody(req.body, isPilotInternal);
 
     // Body is JSON from fetch — items is already a clean array
     let items: any[] = Array.isArray(b.items) ? b.items : [];
@@ -5016,6 +5062,9 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     items = items.filter((item: any) => item && (item.itemType || item.amount));
     // Normalize
     items = items.map((item: any) => ({
+      ...(isPilotInternal && isImmutableItemId(item.item_id)
+        ? { item_id: String(item.item_id).toLowerCase() }
+        : {}),
       itemType: String(item.itemType || ''),
       forWhat: String(item.forWhat || ''),
       interL: String(item.interL || ''),
@@ -5039,6 +5088,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       localDeliveryNotes: String(item.localDeliveryNotes || ''),
       amount: parseFloat(String(item.amount)) || 0,
     }));
+    items = ensureImmutableItemIds(items, { preserveExisting: isPilotInternal });
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
@@ -5398,7 +5448,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
-          </tr>`;
+          </tr>${renderOptionalQuotationImageRow(item, itemColumnCount)}`;
         }).join('');
 
     // Contact info block (always shown from Quotes table)
@@ -6036,7 +6086,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>
-          </tr>`;
+          </tr>${renderOptionalQuotationImageRow(item, invoiceItemColumnCount)}`;
         }).join('');
 
     const subtotal = (of['Product Amount'] as number) || 0;

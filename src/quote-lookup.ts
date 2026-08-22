@@ -10,6 +10,8 @@ export type StoredQuoteRecord = {
 };
 
 type LookupItem = {
+  itemId: string | null;
+  quotationImageState: 'pending' | 'ready' | 'failed' | null;
   product: string;
   innerDimensionsCm: {
     length: string | null;
@@ -65,6 +67,15 @@ const parseStoredItems = (raw: unknown): unknown[] => {
 const mapStoredItem = (raw: unknown): LookupItem => {
   const item = raw && typeof raw === 'object' ? raw as Record<string, unknown> : {};
   return {
+    itemId: typeof item.item_id === 'string' && item.item_id.trim() ? item.item_id.trim() : null,
+    quotationImageState: (() => {
+      const metadata = item.quotation_image;
+      if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return null;
+      const state = String((metadata as Record<string, unknown>).state || '');
+      return ['pending', 'ready', 'failed'].includes(state)
+        ? state as LookupItem['quotationImageState']
+        : null;
+    })(),
     product: text(item.itemType) || '未記錄',
     innerDimensionsCm: {
       length: dimensionOrNull(item.interL),

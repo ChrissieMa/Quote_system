@@ -32,6 +32,7 @@ export type PilotDimensions = { length: number; depth: number; height: number };
 export type PilotInnerDimensions = { length?: number; depth?: number; height?: number };
 
 export type PilotItemInput = {
+  item_id?: string;
   itemType: typeof PILOT_ITEM_TYPES[number];
   forWhat?: string;
   innerDimensions: PilotInnerDimensions;
@@ -98,6 +99,7 @@ export type PilotQuoteInput = {
 };
 
 export type CalculatedPilotItem = {
+  item_id?: string;
   itemType: string;
   forWhat: string;
   interL: string;
@@ -387,6 +389,7 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   ];
 
   return {
+    ...(input.item_id ? { item_id: input.item_id } : {}),
     itemType: input.itemType,
     forWhat: String(input.forWhat || ''),
     interL: inner.length > 0 ? formatDimensionValue(inner.length) : '',
