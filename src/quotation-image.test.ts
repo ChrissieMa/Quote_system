@@ -7,6 +7,7 @@ import {
   FixtureQuotationImageRenderer,
   InMemoryQuotationImageJobScheduler,
   LocalTestQuotationImageStorage,
+  QUOTE_TO_3D_ACCESSORIES,
   QuotationImageCoordinator,
   QuotationImageError,
   createImmutableItemId,
@@ -53,7 +54,7 @@ const renderRequest = (): RenderRequestV1 => ({
     actual: { length: 32, depth: 22, height: 28.5 },
   },
   cabinet_layers: [],
-  accessories: [{ accessory_type: '磁石門', quantity: 1 }],
+  accessories: [{ accessory_type: 'door_magnetic', quantity: 1 }],
   colours: { body: 'clear_acrylic', background: 'light_blue_gray' },
   engraving: { enabled: false },
   model_preview: { enabled: false },
@@ -199,9 +200,91 @@ test('new Quote item builds a central-schema request without price or customer f
   assert.equal(request.show_price, false);
   assert.equal(request.output.width, 1280);
   assert.equal(request.output.height, 1280);
+  assert.deepEqual(request.accessories, [{ accessory_type: 'door_magnetic', quantity: 1 }]);
   const serialized = JSON.stringify(request);
   for (const forbidden of ['forWhat', 'freight', 'hongKongDelivery', 'profit', 'amount', 'quote_token']) {
     assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test('every provider-free Quote accessory maps to the exact 3D browser applicator support matrix', () => {
+  const expected = {
+    '趟門': ['door_sliding'],
+    '磁石門': ['door_magnetic'],
+    '黑底板': ['bottom_base_black'],
+    '透明底板': ['bottom_base_clear'],
+    '獨立燈板 - 上燈': [
+      'light_board_top_independent',
+      'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
+    ],
+    '獨立燈板 - 下燈': [
+      'light_board_bottom_independent',
+      'light_bottom_outer_ring', 'light_bottom_middle_ring', 'light_bottom_inner_ring',
+    ],
+    '獨立燈板 - 上下燈': [
+      'light_board_both_independent',
+      'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
+      'light_bottom_outer_ring', 'light_bottom_middle_ring', 'light_bottom_inner_ring',
+    ],
+    '上下燈': [
+      'light_board_both_standard',
+      'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
+      'light_bottom_outer_ring', 'light_bottom_middle_ring', 'light_bottom_inner_ring',
+    ],
+    '背燈': ['back_light', 'background_back'],
+    '左板鏡面': ['mirror_left'],
+    '右板鏡面': ['mirror_right'],
+    '底板鏡面': ['mirror_bottom'],
+    '頂板鏡面': ['mirror_top'],
+    '背板鏡面': ['mirror_back'],
+  } as const;
+  assert.deepEqual(Object.keys(QUOTE_TO_3D_ACCESSORIES), Object.keys(expected));
+  for (const [quoteAccessory, canonicalTypes] of Object.entries(expected)) {
+    const request = buildQuotationRenderRequestFromQuoteItem({
+      ...storedQuoteItem(),
+      accessories: [quoteAccessory],
+      accessoryQty: { [quoteAccessory]: 1 },
+    });
+    assert.deepEqual(
+      request?.accessories.map(accessory => accessory.accessory_type),
+      canonicalTypes,
+      quoteAccessory,
+    );
+  }
+  assert.deepEqual(QUOTE_TO_3D_ACCESSORIES['背燈'][0], {
+    accessory_type: 'back_light', quantity: 1, colour: 'white',
+  });
+});
+
+test('unsupported accessories and ambiguous combinations skip scheduling without perpetual pending metadata', () => {
+  const unsupported = [
+    { '前板白色刻字': 1 },
+    { '前板彩色刻字': 1 },
+    { '左板圖片': 1 },
+    { '右板圖片': 1 },
+    { '底板圖片': 1 },
+    { '頂板圖片': 1 },
+    { '背板圖片': 1 },
+    { '未來配件': 1 },
+    { '背燈': 2 },
+    { '趟門': 1, '磁石門': 1 },
+    { '黑底板': 1, '透明底板': 1 },
+    { '獨立燈板 - 上燈': 1, '上下燈': 1 },
+  ];
+  const runtime = {
+    coordinator: new QuotationImageCoordinator(
+      new FixtureQuotationImageRenderer(renderedFixture()),
+      new LocalTestQuotationImageStorage(),
+    ),
+    jobScheduler: new InMemoryQuotationImageJobScheduler(),
+    metadataWriter: { async update() {} },
+  };
+  for (const accessoryQty of unsupported) {
+    const item = { ...storedQuoteItem(), accessories: Object.keys(accessoryQty), accessoryQty };
+    assert.equal(buildQuotationRenderRequestFromQuoteItem(item), null);
+    const prepared = prepareNewQuoteItemsForQuotationImageJobs([item], { enabled: true, runtime });
+    assert.equal(prepared.jobs.length, 0);
+    assert.equal(prepared.items[0].quotation_image, undefined);
   }
 });
 

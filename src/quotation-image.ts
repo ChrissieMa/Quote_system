@@ -393,21 +393,83 @@ const storedNumber = (value: unknown): number | null => {
   return Number.isFinite(number) && number > 0 ? number : null;
 };
 
-const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['accessories'] => {
+type StoredAccessory = { name: string; quantity: number };
+type CanonicalAccessory = RenderRequestV1['accessories'][number];
+
+const whiteRing = (position: 'top' | 'bottom', ring: 'outer' | 'middle' | 'inner'): CanonicalAccessory => ({
+  accessory_type: `light_${position}_${ring}_ring`,
+  quantity: 1,
+  colour: 'white',
+});
+
+const lightBoard = (
+  mode: 'top_independent' | 'bottom_independent' | 'both_independent' | 'both_standard',
+  positions: Array<'top' | 'bottom'>,
+): CanonicalAccessory[] => [
+  { accessory_type: `light_board_${mode}`, quantity: 1 },
+  ...positions.flatMap(position => (
+    ['outer', 'middle', 'inner'] as const
+  ).map(ring => whiteRing(position, ring))),
+];
+
+// This is an explicit Quote -> 3D applicator allowlist. It intentionally does
+// not include Quote engraving or panel-image accessories: the 3D applicator
+// requires an approved asset provider for those and rejects them otherwise.
+// Light rings/background entries mirror the 3D exporter output so the browser
+// applicator can verify the materialized configuration exactly.
+export const QUOTE_TO_3D_ACCESSORIES: Readonly<Record<string, readonly CanonicalAccessory[]>> = Object.freeze({
+  '趟門': [{ accessory_type: 'door_sliding', quantity: 1 }],
+  '磁石門': [{ accessory_type: 'door_magnetic', quantity: 1 }],
+  '黑底板': [{ accessory_type: 'bottom_base_black', quantity: 1 }],
+  '透明底板': [{ accessory_type: 'bottom_base_clear', quantity: 1 }],
+  '獨立燈板 - 上燈': lightBoard('top_independent', ['top']),
+  '獨立燈板 - 下燈': lightBoard('bottom_independent', ['bottom']),
+  '獨立燈板 - 上下燈': lightBoard('both_independent', ['top', 'bottom']),
+  '上下燈': lightBoard('both_standard', ['top', 'bottom']),
+  '背燈': [
+    { accessory_type: 'back_light', quantity: 1, colour: 'white' },
+    { accessory_type: 'background_back', quantity: 1 },
+  ],
+  '左板鏡面': [{ accessory_type: 'mirror_left', quantity: 1 }],
+  '右板鏡面': [{ accessory_type: 'mirror_right', quantity: 1 }],
+  '底板鏡面': [{ accessory_type: 'mirror_bottom', quantity: 1 }],
+  '頂板鏡面': [{ accessory_type: 'mirror_top', quantity: 1 }],
+  '背板鏡面': [{ accessory_type: 'mirror_back', quantity: 1 }],
+});
+
+const parseStoredAccessories = (item: QuoteItemWithQuotationImage): StoredAccessory[] | null => {
   if (isRecord(item.accessoryQty)) {
-    return Object.entries(item.accessoryQty)
-      .map(([accessoryType, value]) => ({ accessory_type: accessoryType.trim(), quantity: Number(value) }))
-      .filter(entry => entry.accessory_type && Number.isInteger(entry.quantity) && entry.quantity >= 0);
+    return Object.entries(item.accessoryQty).map(([name, value]) => ({
+      name: name.trim(),
+      quantity: Number(value),
+    }));
   }
   if (!Array.isArray(item.accessories)) return [];
   return item.accessories.map(value => {
     const raw = String(value || '').trim();
     const match = raw.match(/^(.*?)\s+x(\d+)$/i);
     return {
-      accessory_type: (match ? match[1] : raw).trim(),
+      name: (match ? match[1] : raw).trim(),
       quantity: match ? Number(match[2]) : 1,
     };
-  }).filter(entry => entry.accessory_type);
+  });
+};
+
+const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['accessories'] | null => {
+  const stored = parseStoredAccessories(item);
+  if (!stored) return null;
+  if (stored.some(entry => !entry.name || entry.quantity !== 1 || !QUOTE_TO_3D_ACCESSORIES[entry.name])) {
+    return null;
+  }
+  if (new Set(stored.map(entry => entry.name)).size !== stored.length) return null;
+
+  const canonical = stored.flatMap(entry => QUOTE_TO_3D_ACCESSORIES[entry.name].map(accessory => ({ ...accessory })));
+  const categoryCount = (prefix: string): number => canonical.filter(entry => entry.accessory_type.startsWith(prefix)).length;
+  if (categoryCount('door_') > 1 || categoryCount('bottom_base_') > 1 || categoryCount('light_board_') > 1) {
+    return null;
+  }
+  if (new Set(canonical.map(entry => entry.accessory_type)).size !== canonical.length) return null;
+  return canonical;
 };
 
 const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1['cabinet_layers'] => {
@@ -459,6 +521,8 @@ export const buildQuotationRenderRequestFromQuoteItem = (
   if (!productType || Object.values(inner).some(value => value === null) || Object.values(outer).some(value => value === null)) {
     return null;
   }
+  const accessories = storedAccessories(item);
+  if (!accessories) return null;
   const request: RenderRequestV1 = {
     purpose: 'quotation',
     product_type: productType,
@@ -470,7 +534,7 @@ export const buildQuotationRenderRequestFromQuoteItem = (
       actual: outer as DimensionSet,
     },
     cabinet_layers: storedCabinetLayers(item),
-    accessories: storedAccessories(item),
+    accessories,
     colours: { body: 'clear_acrylic', background: 'light_blue_gray' },
     camera_preset: 'quotation_square_three_quarter_v2',
     output: { width: QUOTATION_IMAGE_SIZE, height: QUOTATION_IMAGE_SIZE, background: 'configured' },
