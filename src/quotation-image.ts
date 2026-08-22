@@ -7,7 +7,7 @@ export const QUOTATION_IMAGE_SIZE = 1280;
 export type DimensionSet = { length: number; depth: number; height: number };
 
 export type RenderRequestV1 = {
-  purpose: 'quotation';
+  purpose: 'quotation' | 'social' | 'website';
   product_type: string;
   configuration_id?: string;
   dimensions: {
@@ -22,7 +22,7 @@ export type RenderRequestV1 = {
   engraving?: { enabled: boolean; artwork_asset_reference?: string };
   model_preview?: { enabled: boolean; preset?: string };
   camera_preset: string;
-  output: { width: 1280; height: 1280; background: 'white' | 'transparent' | 'configured' };
+  output: { width: number; height: number; background: 'white' | 'transparent' | 'configured' };
   branding: { enabled: boolean; style: 'none' | 'subtle_lks' };
   show_dimensions: boolean;
   show_price: false;
@@ -47,7 +47,7 @@ export type QuoteItemWithQuotationImage = Record<string, unknown> & {
 };
 
 export type RenderedQuotationImage = {
-  bytes: Buffer;
+  bytes: Uint8Array;
   mimeType: 'image/png';
   width: 1280;
   height: 1280;
@@ -58,12 +58,23 @@ export interface QuotationImageRenderer {
 }
 
 export interface QuotationImageStorage {
-  put(input: { idempotencyKey: string; bytes: Buffer; mimeType: 'image/png' }): Promise<{ assetKey: string }>;
+  put(input: { idempotencyKey: string; bytes: Uint8Array; mimeType: 'image/png' }): Promise<{ assetKey: string }>;
 }
 
 export interface QuotationImagePresentationResolver {
-  resolve(assetKey: string): Promise<{ src: string; expiresAt: string }>;
+  resolve(assetKey: string, context: { itemId: string }): Promise<{ src: string; expiresAt: string }>;
 }
+
+export type QuotationImageRuntimeAdapters = {
+  coordinator?: QuotationImageCoordinator;
+  presentationResolver?: QuotationImagePresentationResolver;
+};
+
+// Deliberately empty in this development PR. An approved composition module
+// can install provider adapters on this module singleton without changing the
+// Quote persistence/presentation flows. No Production provider or credential
+// is selected here.
+export const quotationImageRuntime: QuotationImageRuntimeAdapters = {};
 
 export type QuotationImagePresentation = {
   src: string;
@@ -150,7 +161,7 @@ export const sanitizeRenderRequest = (raw: unknown): RenderRequestV1 => {
     'colours', 'engraving', 'model_preview', 'camera_preset', 'output', 'branding',
     'show_dimensions', 'show_price',
   ], 'Render request');
-  if (raw.purpose !== 'quotation') throw new Error('Render purpose must be quotation.');
+  if (!['quotation', 'social', 'website'].includes(String(raw.purpose))) throw new Error('Render purpose is invalid.');
   if (!isRecord(raw.dimensions)) throw new Error('dimensions must be an object.');
   exactKeys(raw.dimensions, ['unit', 'inner', 'outer', 'actual'], 'dimensions');
   if (raw.dimensions.unit !== 'mm' && raw.dimensions.unit !== 'cm') throw new Error('dimensions.unit is invalid.');
@@ -160,9 +171,8 @@ export const sanitizeRenderRequest = (raw: unknown): RenderRequestV1 => {
   exactKeys(raw.colours, ['body', 'accent', 'background'], 'colours');
   if (!isRecord(raw.output)) throw new Error('output must be an object.');
   exactKeys(raw.output, ['width', 'height', 'background'], 'output');
-  if (raw.output.width !== QUOTATION_IMAGE_SIZE || raw.output.height !== QUOTATION_IMAGE_SIZE) {
-    throw new Error('Quotation output must be 1280 x 1280.');
-  }
+  const outputWidth = integer(raw.output.width, 'output.width', 1);
+  const outputHeight = integer(raw.output.height, 'output.height', 1);
   if (!['white', 'transparent', 'configured'].includes(String(raw.output.background))) {
     throw new Error('output.background is invalid.');
   }
@@ -214,7 +224,7 @@ export const sanitizeRenderRequest = (raw: unknown): RenderRequestV1 => {
   })();
 
   return {
-    purpose: 'quotation',
+    purpose: raw.purpose as RenderRequestV1['purpose'],
     product_type: text(raw.product_type, 'product_type'),
     ...(raw.configuration_id === undefined ? {} : { configuration_id: text(raw.configuration_id, 'configuration_id') }),
     dimensions: {
@@ -234,8 +244,8 @@ export const sanitizeRenderRequest = (raw: unknown): RenderRequestV1 => {
     ...(modelPreview ? { model_preview: modelPreview } : {}),
     camera_preset: text(raw.camera_preset, 'camera_preset'),
     output: {
-      width: QUOTATION_IMAGE_SIZE,
-      height: QUOTATION_IMAGE_SIZE,
+      width: outputWidth,
+      height: outputHeight,
       background: raw.output.background as RenderRequestV1['output']['background'],
     },
     branding: {
@@ -245,6 +255,15 @@ export const sanitizeRenderRequest = (raw: unknown): RenderRequestV1 => {
     show_dimensions: raw.show_dimensions,
     show_price: false,
   };
+};
+
+export const sanitizeQuotationRenderRequest = (raw: unknown): RenderRequestV1 & { purpose: 'quotation' } => {
+  const request = sanitizeRenderRequest(raw);
+  if (request.purpose !== 'quotation') throw new Error('Quotation render purpose must be quotation.');
+  if (request.output.width !== QUOTATION_IMAGE_SIZE || request.output.height !== QUOTATION_IMAGE_SIZE) {
+    throw new Error('Quotation output must be 1280 x 1280.');
+  }
+  return request as RenderRequestV1 & { purpose: 'quotation' };
 };
 
 export const createImmutableItemId = (uuid: string = crypto.randomUUID()): string => {
@@ -273,7 +292,7 @@ export const ensureImmutableItemIds = <T extends Record<string, unknown>>(
 
 export const quotationImageIdempotencyKey = (itemId: string, rawRequest: unknown): string => {
   if (!isImmutableItemId(itemId)) throw new Error('A valid immutable item_id is required.');
-  const request = sanitizeRenderRequest(rawRequest);
+  const request = sanitizeQuotationRenderRequest(rawRequest);
   const digest = crypto.createHash('sha256')
     .update(stableStringify({ contract: QUOTATION_IMAGE_CONTRACT, item_id: itemId, request }))
     .digest('hex');
@@ -294,6 +313,115 @@ export const pendingQuotationImageMetadata = (
 
 export const quotationImageEnabled = (value: unknown): boolean =>
   typeof value === 'string' && /^(1|true|enabled)$/i.test(value.trim());
+
+const storedNumber = (value: unknown): number | null => {
+  const number = Number(value);
+  return Number.isFinite(number) && number > 0 ? number : null;
+};
+
+const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['accessories'] => {
+  if (isRecord(item.accessoryQty)) {
+    return Object.entries(item.accessoryQty)
+      .map(([accessoryType, value]) => ({ accessory_type: accessoryType.trim(), quantity: Number(value) }))
+      .filter(entry => entry.accessory_type && Number.isInteger(entry.quantity) && entry.quantity >= 0);
+  }
+  if (!Array.isArray(item.accessories)) return [];
+  return item.accessories.map(value => {
+    const raw = String(value || '').trim();
+    const match = raw.match(/^(.*?)\s+x(\d+)$/i);
+    return {
+      accessory_type: (match ? match[1] : raw).trim(),
+      quantity: match ? Number(match[2]) : 1,
+    };
+  }).filter(entry => entry.accessory_type);
+};
+
+const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1['cabinet_layers'] => {
+  const count = Number(item.noOfLevels);
+  if (!Number.isInteger(count) || count < 1 || !String(item.itemType || '').includes('Display Case')) return [];
+  const segments = String(item.levelHeights || '')
+    .split(/[|｜,，、;；/／\n]+/)
+    .map(segment => (segment.match(/-?\d+(?:\.\d+)?/g) || []).map(Number).filter(Number.isFinite))
+    .filter(values => values.length > 0)
+    .map(values => values[values.length - 1]);
+  const fallback = storedNumber(item.interH);
+  const heights = segments.length === count
+    ? segments
+    : fallback
+      ? Array.from({ length: count }, () => fallback)
+      : [];
+  if (heights.length !== count || heights.some(height => height <= 0)) return [];
+  return heights.map((height, index) => ({
+    layer_id: `layer-${index + 1}`,
+    position: index + 1,
+    actual_height: height,
+  }));
+};
+
+// Quote currently stores product dimensions/accessories but not customer-safe
+// colour selections. The approved quotation defaults below are presentation
+// constants, not customer or business data. An incomplete item simply remains
+// image-less so legacy and unsupported product types fail open.
+export const buildQuotationRenderRequestFromQuoteItem = (
+  item: QuoteItemWithQuotationImage,
+): (RenderRequestV1 & { purpose: 'quotation' }) | null => {
+  if (!isImmutableItemId(item.item_id)) return null;
+  const productType = String(item.itemType || '').trim();
+  const inner = {
+    length: storedNumber(item.interL),
+    depth: storedNumber(item.interD),
+    height: storedNumber(item.interH),
+  };
+  const outer = {
+    length: storedNumber(item.outerL),
+    depth: storedNumber(item.outerD),
+    height: storedNumber(item.outerH),
+  };
+  if (!productType || Object.values(inner).some(value => value === null) || Object.values(outer).some(value => value === null)) {
+    return null;
+  }
+  const request: RenderRequestV1 = {
+    purpose: 'quotation',
+    product_type: productType,
+    configuration_id: item.item_id,
+    dimensions: {
+      unit: 'cm',
+      inner: inner as DimensionSet,
+      outer: outer as DimensionSet,
+      actual: outer as DimensionSet,
+    },
+    cabinet_layers: storedCabinetLayers(item),
+    accessories: storedAccessories(item),
+    colours: { body: 'clear', background: 'very-light-gray-blue' },
+    camera_preset: 'quotation-default',
+    output: { width: QUOTATION_IMAGE_SIZE, height: QUOTATION_IMAGE_SIZE, background: 'configured' },
+    branding: { enabled: false, style: 'none' },
+    show_dimensions: true,
+    show_price: false,
+  };
+  return sanitizeQuotationRenderRequest(request);
+};
+
+export const prepareNewQuoteItemsWithQuotationImages = async <T extends QuoteItemWithQuotationImage>(
+  items: T[],
+  options: { enabled: boolean; coordinator?: QuotationImageCoordinator },
+): Promise<Array<T & { quotation_image?: QuotationImageMetadata }>> => {
+  if (!options.enabled || !options.coordinator) return items;
+  const coordinator = options.coordinator;
+  return Promise.all(items.map(async item => {
+    const request = buildQuotationRenderRequestFromQuoteItem(item);
+    if (!request || !item.item_id) return item;
+    try {
+      const metadata = await coordinator.process(item.item_id, request);
+      return { ...item, quotation_image: metadata };
+    } catch {
+      // Unexpected adapter failures must never alter pricing or prevent the
+      // authoritative Quote write. Expected failures are returned as metadata
+      // by the coordinator and are persisted above.
+      return item;
+    }
+  })) as Promise<Array<T & { quotation_image?: QuotationImageMetadata }>>;
+};
 
 export class QuotationImageError extends Error {
   constructor(message: string, readonly classification: 'temporary' | 'terminal') {
@@ -333,9 +461,9 @@ export class FixtureQuotationImageRenderer implements QuotationImageRenderer {
 }
 
 export class LocalTestQuotationImageStorage implements QuotationImageStorage {
-  private readonly assets = new Map<string, Buffer>();
+  private readonly assets = new Map<string, Uint8Array>();
 
-  async put(input: { idempotencyKey: string; bytes: Buffer; mimeType: 'image/png' }): Promise<{ assetKey: string }> {
+  async put(input: { idempotencyKey: string; bytes: Uint8Array; mimeType: 'image/png' }): Promise<{ assetKey: string }> {
     if (input.mimeType !== 'image/png') throw new QuotationImageError('Only PNG is supported.', 'terminal');
     const digest = crypto.createHash('sha256').update(input.idempotencyKey).digest('hex');
     const assetKey = `test-only/quotation-images/${digest}.png`;
@@ -343,9 +471,9 @@ export class LocalTestQuotationImageStorage implements QuotationImageStorage {
     return { assetKey };
   }
 
-  get(assetKey: string): Buffer | undefined {
+  get(assetKey: string): Uint8Array | undefined {
     const value = this.assets.get(assetKey);
-    return value ? Buffer.from(value) : undefined;
+    return value ? new Uint8Array(value) : undefined;
   }
 
   get size(): number {
@@ -369,7 +497,7 @@ export class QuotationImageCoordinator {
   ) {}
 
   async process(itemId: string, rawRequest: unknown): Promise<QuotationImageMetadata> {
-    const request = sanitizeRenderRequest(rawRequest);
+    const request = sanitizeQuotationRenderRequest(rawRequest);
     const idempotencyKey = quotationImageIdempotencyKey(itemId, request);
     const completed = this.completed.get(idempotencyKey);
     if (completed) return { ...completed };
@@ -379,7 +507,12 @@ export class QuotationImageCoordinator {
     this.inFlight.set(idempotencyKey, operation);
     try {
       const result = await operation;
-      this.completed.set(idempotencyKey, result);
+      // Successful and terminal results are idempotent for this process.
+      // Temporary/timeout results remain retryable on a later call while the
+      // in-flight map still deduplicates concurrent callers.
+      if (result.state === 'ready' || result.error_class === 'terminal') {
+        this.completed.set(idempotencyKey, result);
+      }
       return { ...result };
     } finally {
       this.inFlight.delete(idempotencyKey);
@@ -408,7 +541,7 @@ export class QuotationImageCoordinator {
           || rendered.width !== QUOTATION_IMAGE_SIZE
           || rendered.height !== QUOTATION_IMAGE_SIZE
           || rendered.bytes.length < PNG_SIGNATURE.length
-          || !rendered.bytes.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+          || !Buffer.from(rendered.bytes.subarray(0, PNG_SIGNATURE.length)).equals(PNG_SIGNATURE)) {
           throw new QuotationImageError('Renderer returned an invalid quotation PNG.', 'terminal');
         }
         const stored = await this.storage.put({
@@ -461,4 +594,37 @@ export const quotationImagePresentation = (
     src: resolvedSrc,
     alt: 'Quotation product preview',
   };
+};
+
+export const resolveQuotationImagePresentation = async (
+  item: QuoteItemWithQuotationImage,
+  resolver?: QuotationImagePresentationResolver,
+  now = Date.now(),
+): Promise<QuotationImagePresentation | null> => {
+  const metadata = item.quotation_image;
+  if (!resolver || !isImmutableItemId(item.item_id) || !metadata
+    || metadata.state !== 'ready' || !metadata.asset_key
+    || !ASSET_KEY_PATTERN.test(metadata.asset_key) || metadata.asset_key.includes('..')) return null;
+  try {
+    const resolved = await resolver.resolve(metadata.asset_key, { itemId: item.item_id });
+    const expiry = Date.parse(resolved.expiresAt);
+    if (!Number.isFinite(expiry) || expiry <= now) return null;
+    return quotationImagePresentation(item, resolved.src);
+  } catch {
+    return null;
+  }
+};
+
+export const resolveQuotationImagePresentations = async (
+  items: QuoteItemWithQuotationImage[],
+  options: { enabled: boolean; resolver?: QuotationImagePresentationResolver },
+): Promise<Map<string, QuotationImagePresentation>> => {
+  const presentations = new Map<string, QuotationImagePresentation>();
+  if (!options.enabled || !options.resolver) return presentations;
+  await Promise.all(items.map(async item => {
+    if (!isImmutableItemId(item.item_id)) return;
+    const presentation = await resolveQuotationImagePresentation(item, options.resolver);
+    if (presentation) presentations.set(item.item_id, presentation);
+  }));
+  return presentations;
 };

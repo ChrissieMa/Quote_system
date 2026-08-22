@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import test from 'node:test';
 import {
+  buildQuotationRenderRequestFromQuoteItem,
   FixtureQuotationImageRenderer,
   LocalTestQuotationImageStorage,
   QuotationImageCoordinator,
@@ -8,10 +11,14 @@ import {
   createImmutableItemId,
   ensureImmutableItemIds,
   pendingQuotationImageMetadata,
+  prepareNewQuoteItemsWithQuotationImages,
   quotationImageEnabled,
   quotationImageIdempotencyKey,
   quotationImagePresentation,
+  resolveQuotationImagePresentation,
+  resolveQuotationImagePresentations,
   sanitizeRenderRequest,
+  sanitizeQuotationRenderRequest,
   type QuotationImageRenderer,
   type RenderRequestV1,
   type RenderedQuotationImage,
@@ -53,6 +60,25 @@ const renderRequest = (): RenderRequestV1 => ({
 });
 
 const ITEM_ID = '18a15180-0f8a-4ec2-98f6-69c9f65a83eb';
+
+const storedQuoteItem = () => ({
+  item_id: ITEM_ID,
+  itemType: 'Display box 展示盒',
+  forWhat: 'must not enter render payload',
+  interL: '30',
+  interD: '20',
+  interH: '25',
+  outerL: '32',
+  outerD: '22',
+  outerH: '28.5',
+  accessories: ['磁石門'],
+  accessoryQty: { '磁石門': 1 },
+  qty: 1,
+  freight: 100,
+  hongKongDelivery: 200,
+  profit: 500,
+  amount: 1800,
+});
 
 test('new items receive server UUIDs while trusted existing IDs remain immutable', () => {
   const generated = [
@@ -100,13 +126,71 @@ test('item identity does not alter authoritative pricing and survives calculated
   assert.equal(identified.finalTotal, baseline.finalTotal);
 });
 
-test('render contract is product-only, fixed at 1280 PNG intent and show_price false', () => {
+test('new Quote item builds a central-schema request without price or customer fields', () => {
+  const request = buildQuotationRenderRequestFromQuoteItem(storedQuoteItem());
+  assert.ok(request);
+  assert.equal(request.configuration_id, ITEM_ID);
+  assert.equal(request.purpose, 'quotation');
+  assert.equal(request.show_price, false);
+  assert.equal(request.output.width, 1280);
+  assert.equal(request.output.height, 1280);
+  const serialized = JSON.stringify(request);
+  for (const forbidden of ['forWhat', 'freight', 'hongKongDelivery', 'profit', 'amount', 'quote_token']) {
+    assert.equal(serialized.includes(forbidden), false);
+  }
+});
+
+test('create-core persistence attaches metadata in Quote Items JSON without changing pricing', async () => {
+  const renderer = new FixtureQuotationImageRenderer(renderedFixture());
+  const storage = new LocalTestQuotationImageStorage();
+  const coordinator = new QuotationImageCoordinator(renderer, storage, {
+    now: () => '2026-08-22T12:00:00.000Z',
+  });
+  const original = storedQuoteItem();
+  const prepared = await prepareNewQuoteItemsWithQuotationImages([original], {
+    enabled: true,
+    coordinator,
+  });
+  const persisted = JSON.parse(JSON.stringify(prepared))[0];
+  assert.equal(persisted.item_id, ITEM_ID);
+  assert.equal(persisted.amount, original.amount);
+  assert.equal(persisted.freight, original.freight);
+  assert.equal(persisted.profit, original.profit);
+  assert.equal(persisted.quotation_image.state, 'ready');
+  assert.match(persisted.quotation_image.asset_key, /^test-only\/quotation-images\//);
+  assert.equal(JSON.stringify(persisted).includes('http'), false);
+  assert.equal(JSON.stringify(persisted).includes('fictional-test-only-png'), false);
+});
+
+test('create-core is a complete no-op when feature or provider is unavailable', async () => {
+  const renderer = new FixtureQuotationImageRenderer(renderedFixture());
+  const coordinator = new QuotationImageCoordinator(renderer, new LocalTestQuotationImageStorage());
+  const item = storedQuoteItem();
+  assert.deepEqual(await prepareNewQuoteItemsWithQuotationImages([item], {
+    enabled: false,
+    coordinator,
+  }), [item]);
+  assert.deepEqual(await prepareNewQuoteItemsWithQuotationImages([item], {
+    enabled: true,
+  }), [item]);
+  assert.equal(renderer.calls, 0);
+});
+
+test('central render schema stays broad while quotation policy requires 1280 and quotation purpose', () => {
   assert.deepEqual(sanitizeRenderRequest(renderRequest()), renderRequest());
   assert.throws(() => sanitizeRenderRequest({ ...renderRequest(), show_price: true }), /show_price must be false/);
-  assert.throws(() => sanitizeRenderRequest({
+  assert.equal(sanitizeRenderRequest({
+    ...renderRequest(),
+    purpose: 'social',
+    output: { width: 640, height: 1280, background: 'configured' },
+  }).purpose, 'social');
+  assert.throws(() => sanitizeQuotationRenderRequest({
     ...renderRequest(),
     output: { width: 640, height: 1280, background: 'configured' },
   }), /1280 x 1280/);
+  assert.throws(() => sanitizeQuotationRenderRequest({
+    ...renderRequest(), purpose: 'website',
+  }), /purpose must be quotation/);
 });
 
 test('renderer payload rejects PII, Quote tokens, credentials, payment and price fields', () => {
@@ -163,7 +247,7 @@ test('local end-to-end fixture renders, stores one durable asset_key and dedupli
   assert.match(first.asset_key || '', /^test-only\/quotation-images\/[a-f0-9]{64}\.png$/);
   assert.equal(renderer.calls, 1);
   assert.equal(storage.size, 1);
-  assert.deepEqual(storage.get(first.asset_key!), PNG_FIXTURE);
+  assert.deepEqual(Buffer.from(storage.get(first.asset_key!)!), PNG_FIXTURE);
   assert.equal(JSON.stringify(first).includes('PNG'), false);
   assert.equal(JSON.stringify(first).includes('http'), false);
 });
@@ -221,6 +305,47 @@ test('temporary failures retry within the bound while terminal failures fail ope
   assert.equal(terminalCalls, 1);
 });
 
+test('exhausted temporary result is not permanently cached and a later call retries renderer', async () => {
+  let calls = 0;
+  const renderer: QuotationImageRenderer = {
+    async render() {
+      calls += 1;
+      if (calls <= 2) throw new QuotationImageError('temporary fixture outage', 'temporary');
+      return renderedFixture();
+    },
+  };
+  const coordinator = new QuotationImageCoordinator(
+    renderer,
+    new LocalTestQuotationImageStorage(),
+    { maxAttempts: 2 },
+  );
+  const first = await coordinator.process(ITEM_ID, renderRequest());
+  assert.equal(first.state, 'failed');
+  assert.equal(first.error_class, 'temporary');
+  assert.equal(first.attempts, 2);
+  const later = await coordinator.process(ITEM_ID, renderRequest());
+  assert.equal(later.state, 'ready');
+  assert.equal(later.attempts, 1);
+  assert.equal(calls, 3);
+});
+
+test('create-core persists failed metadata but never throws or changes the Quote price', async () => {
+  const renderer: QuotationImageRenderer = {
+    async render() {
+      throw new QuotationImageError('terminal fictional fixture', 'terminal');
+    },
+  };
+  const item = storedQuoteItem();
+  const [prepared] = await prepareNewQuoteItemsWithQuotationImages([item], {
+    enabled: true,
+    coordinator: new QuotationImageCoordinator(renderer, new LocalTestQuotationImageStorage()),
+  });
+  assert.equal(prepared.quotation_image?.state, 'failed');
+  assert.equal(prepared.quotation_image?.error_class, 'terminal');
+  assert.equal(prepared.amount, item.amount);
+  assert.equal(prepared.profit, item.profit);
+});
+
 test('timeouts are bounded and return failed metadata instead of blocking Quote flow', async () => {
   let calls = 0;
   const renderer: QuotationImageRenderer = {
@@ -239,6 +364,29 @@ test('timeouts are bounded and return failed metadata instead of blocking Quote 
   assert.equal(result.error_class, 'timeout');
   assert.equal(result.attempts, 2);
   assert.equal(calls, 2);
+});
+
+test('exhausted timeout remains retryable on a later coordinator call', async () => {
+  let calls = 0;
+  const renderer: QuotationImageRenderer = {
+    async render(_request, { signal }) {
+      calls += 1;
+      if (calls > 2) return renderedFixture();
+      await new Promise<void>(resolve => signal.addEventListener('abort', () => resolve(), { once: true }));
+      throw new QuotationImageError('aborted timeout fixture', 'temporary');
+    },
+  };
+  const coordinator = new QuotationImageCoordinator(
+    renderer,
+    new LocalTestQuotationImageStorage(),
+    { timeoutMs: 5, maxAttempts: 2 },
+  );
+  const timedOut = await coordinator.process(ITEM_ID, renderRequest());
+  assert.equal(timedOut.state, 'failed');
+  assert.equal(timedOut.error_class, 'timeout');
+  const recovered = await coordinator.process(ITEM_ID, renderRequest());
+  assert.equal(recovered.state, 'ready');
+  assert.equal(calls, 3);
 });
 
 test('legacy, missing, pending and failed images produce no broken presentation', () => {
@@ -284,6 +432,47 @@ test('ready presentation requires a separately resolved short-lived safe URL', (
     src: '/temporary/signed/fixture.png',
     alt: 'Quotation product preview',
   });
+});
+
+test('provider-neutral resolver supplies ready presentation and absence remains image-less', async () => {
+  const item = {
+    ...storedQuoteItem(),
+    quotation_image: {
+      contract: 'quotation-image-v1' as const,
+      state: 'ready' as const,
+      idempotency_key: 'sha256:ready',
+      asset_key: 'quotation-images/fixture.png',
+      attempts: 1,
+      updated_at: '2026-08-22T12:00:00.000Z',
+    },
+  };
+  assert.equal(await resolveQuotationImagePresentation(item), null);
+  const resolver = {
+    async resolve(assetKey: string, context: { itemId: string }) {
+      assert.equal(assetKey, 'quotation-images/fixture.png');
+      assert.equal(context.itemId, ITEM_ID);
+      return {
+        src: '/temporary/signed/fixture.png',
+        expiresAt: '2026-08-22T13:00:00.000Z',
+      };
+    },
+  };
+  assert.deepEqual(
+    await resolveQuotationImagePresentation(item, resolver, Date.parse('2026-08-22T12:00:00.000Z')),
+    { src: '/temporary/signed/fixture.png', alt: 'Quotation product preview' },
+  );
+  const resolved = await resolveQuotationImagePresentations([item], { enabled: true, resolver });
+  assert.equal(resolved.get(ITEM_ID)?.src, '/temporary/signed/fixture.png');
+  assert.equal((await resolveQuotationImagePresentations([item], { enabled: false, resolver })).size, 0);
+  assert.equal((await resolveQuotationImagePresentations([item], { enabled: true })).size, 0);
+});
+
+test('real create, public Quote and invoice routes use the shared integration core', () => {
+  const source = readFileSync(path.join(__dirname, 'index.ts'), 'utf8');
+  assert.match(source, /items = await prepareNewQuoteItemsWithQuotationImages\(items,/);
+  assert.match(source, /'Quote Items JSON': itemsJson/);
+  assert.equal((source.match(/await resolveQuotationImagePresentations\(items,/g) || []).length, 2);
+  assert.equal((source.match(/renderOptionalQuotationImageRow\(quotationImagePresentations\.get/g) || []).length, 2);
 });
 
 test('feature flag is explicitly opt-in and fully disabled otherwise', () => {

@@ -67,9 +67,11 @@ import {
   createImmutableItemId,
   ensureImmutableItemIds,
   isImmutableItemId,
+  prepareNewQuoteItemsWithQuotationImages,
   quotationImageEnabled,
-  quotationImagePresentation,
-  type QuoteItemWithQuotationImage,
+  quotationImageRuntime,
+  resolveQuotationImagePresentations,
+  type QuotationImagePresentation,
 } from './quotation-image';
 
 dotenv.config();
@@ -92,6 +94,9 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
+// Phase 2B-1 deliberately provides no Production adapter. A later approved
+// composition step may supply these provider-neutral interfaces without
+// changing Quote item persistence or public presentation call sites.
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
@@ -598,21 +603,18 @@ const nl2br = (str: unknown): string =>
 // persisted in Quote Items JSON. Until such an adapter is configured, the
 // helper returns an empty string and the Quote remains fully usable.
 const renderOptionalQuotationImage = (
-  item: QuoteItemWithQuotationImage,
-  resolvedSrc?: string,
+  presentation?: QuotationImagePresentation,
 ): string => {
   if (!QUOTATION_IMAGE_ENABLED) return '';
-  const presentation = quotationImagePresentation(item, resolvedSrc);
   if (!presentation) return '';
   return `<div class="quotation-image"><img src="${escapeHtml(presentation.src)}" alt="${escapeHtml(presentation.alt)}" loading="lazy"></div>`;
 };
 
 const renderOptionalQuotationImageRow = (
-  item: QuoteItemWithQuotationImage,
+  presentation: QuotationImagePresentation | undefined,
   columnCount: number,
-  resolvedSrc?: string,
 ): string => {
-  const content = renderOptionalQuotationImage(item, resolvedSrc);
+  const content = renderOptionalQuotationImage(presentation);
   return content ? `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}</td></tr>` : '';
 };
 
@@ -5089,6 +5091,10 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       amount: parseFloat(String(item.amount)) || 0,
     }));
     items = ensureImmutableItemIds(items, { preserveExisting: isPilotInternal });
+    items = await prepareNewQuoteItemsWithQuotationImages(items, {
+      enabled: QUOTATION_IMAGE_ENABLED,
+      coordinator: quotationImageRuntime.coordinator,
+    });
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
@@ -5399,6 +5405,10 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     if (convertedOrder) {
       items = await getConfirmedOrderItems(convertedOrder.id, items);
     }
+    const quotationImagePresentations = await resolveQuotationImagePresentations(items, {
+      enabled: QUOTATION_IMAGE_ENABLED,
+      resolver: quotationImageRuntime.presentationResolver,
+    });
 
     const buildShareDeliveryText = (): string =>
       buildDeliveryWaiverText(financialFields, isEnglish, sumQuoteLocalDelivery(items), quote['Valid Until']);
@@ -5448,7 +5458,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
-          </tr>${renderOptionalQuotationImageRow(item, itemColumnCount)}`;
+          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), itemColumnCount)}`;
         }).join('');
 
     // Contact info block (always shown from Quotes table)
@@ -6063,6 +6073,10 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       }
     }
     items = await getConfirmedOrderItems(order.id, items);
+    const quotationImagePresentations = await resolveQuotationImagePresentations(items, {
+      enabled: QUOTATION_IMAGE_ENABLED,
+      resolver: quotationImageRuntime.presentationResolver,
+    });
     const hasLevels = items.some((item: any) => Number(item?.noOfLevels) > 0);
     const invoiceItemColumnCount = hasLevels ? 14 : 13;
 
@@ -6086,7 +6100,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>
-          </tr>${renderOptionalQuotationImageRow(item, invoiceItemColumnCount)}`;
+          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), invoiceItemColumnCount)}`;
         }).join('');
 
     const subtotal = (of['Product Amount'] as number) || 0;
