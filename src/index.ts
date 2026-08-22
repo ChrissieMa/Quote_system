@@ -76,6 +76,10 @@ import {
   scheduleQuotationImageJobsAfterWrite,
   type QuotationImagePresentation,
 } from './quotation-image';
+import {
+  createLocalQuoteFixture,
+  localQuoteFixtureEnabled,
+} from './test-only/local-quote-fixture';
 
 dotenv.config();
 
@@ -97,6 +101,7 @@ const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
+const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
 // Phase 2B-1 deliberately provides no Production adapter. A later approved
 // composition step may supply these provider-neutral interfaces without
 // changing Quote item persistence or public presentation call sites.
@@ -236,31 +241,33 @@ const requiredEnvVars = [
   'AIRTABLE_TABLE_QUOTES'
 ];
 for (const envVar of requiredEnvVars) {
-  if (!process.env[envVar]) {
+  if (!LOCAL_QUOTE_FIXTURE && !process.env[envVar]) {
     console.error(`Missing required environment variable: ${envVar}`);
     process.exit(1);
   }
 }
 
 // Airtable Setup
-const base = new Airtable({
+const base = (LOCAL_QUOTE_FIXTURE?.base || new Airtable({
   apiKey: process.env.AIRTABLE_API_KEY,
   requestTimeout: 15_000,
-}).base(process.env.AIRTABLE_BASE_ID!);
-installAirtableReadRetry(base, {
-  maxAttempts: 3,
-  delaysMs: [300, 900],
-  onRetry: ({ attempt, delayMs, error }) => {
-    const detail = String((error as any)?.code || (error as any)?.message || error);
-    console.warn(`Transient Airtable read failure; retry ${attempt + 1}/3 in ${delayMs}ms: ${detail}`);
-  },
-});
-const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS!);
+}).base(process.env.AIRTABLE_BASE_ID!)) as Airtable.Base;
+if (!LOCAL_QUOTE_FIXTURE) {
+  installAirtableReadRetry(base, {
+    maxAttempts: 3,
+    delaysMs: [300, 900],
+    onRetry: ({ attempt, delayMs, error }) => {
+      const detail = String((error as any)?.code || (error as any)?.message || error);
+      console.warn(`Transient Airtable read failure; retry ${attempt + 1}/3 in ${delayMs}ms: ${detail}`);
+    },
+  });
+}
+const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS || 'Customers');
 const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
-const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
-const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
+const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS || 'Order_2026');
+const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS || 'Order Items');
 const tableChinaShipments = base(process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS || 'China Shipments');
-const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
+const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES || 'Quotes');
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
 const tableCampaigns = base(process.env.AIRTABLE_TABLE_CAMPAIGNS || 'Campaigns');
@@ -268,6 +275,12 @@ const tableBusinessExpenses = base(process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES 
 const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST || 'Expense Checklist');
 const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
 const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
+if (LOCAL_QUOTE_FIXTURE) LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
+if (LOCAL_QUOTE_FIXTURE) {
+  app.get(LOCAL_QUOTE_FIXTURE.asset.path, (_req: Request, res: Response) => {
+    res.type('image/png').send(LOCAL_QUOTE_FIXTURE.asset.bytes);
+  });
+}
 
 const getAdminCredentials = () => {
   const configuredSessionSecret = String(process.env.SESSION_SECRET || '').trim();
@@ -453,6 +466,9 @@ type AirtableMetadataTable = {
 let airtableMetadataCache: { expiresAt: number; tables: AirtableMetadataTable[] } | null = null;
 
 const getAirtableMetadataTables = async (): Promise<AirtableMetadataTable[]> => {
+  if (LOCAL_QUOTE_FIXTURE) {
+    return LOCAL_QUOTE_FIXTURE.metadataTables as AirtableMetadataTable[];
+  }
   if (airtableMetadataCache && airtableMetadataCache.expiresAt > Date.now()) {
     return airtableMetadataCache.tables;
   }
@@ -7095,10 +7111,15 @@ app.all(['/sitemap.xml', '/sitemap_index.xml'], (_req: Request, res: Response) =
 app.use((_req: Request, res: Response) => publicDocumentNotFound(res));
 
 // ─── Start server ────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+const onServerListening = () => {
   console.log(`LKS Quote System running on port ${PORT}`);
   console.log(`Public Base URL: ${PUBLIC_BASE_URL}`);
   console.log(`Dashboard: ${PUBLIC_BASE_URL}/quotes`);
+  if (LOCAL_QUOTE_FIXTURE) {
+    console.log(`TEST-ONLY original Create Quote: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.create}`);
+    console.log(`TEST-ONLY original Share: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.share}`);
+    console.log(`TEST-ONLY original Invoice: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.invoice}`);
+  }
   if (adminConfigured() && process.env.NODE_ENV !== 'test') {
     syncMonthlyFinance().catch(error => console.error('Initial finance sync failed:', error));
     setInterval(() => {
@@ -7107,4 +7128,7 @@ app.listen(PORT, () => {
   } else if (!adminConfigured()) {
     console.warn('Owner login configuration is incomplete; all owner routes are fail-closed.');
   }
-});
+};
+
+if (LOCAL_QUOTE_FIXTURE) app.listen(Number(PORT), '127.0.0.1', onServerListening);
+else app.listen(PORT, onServerListening);
