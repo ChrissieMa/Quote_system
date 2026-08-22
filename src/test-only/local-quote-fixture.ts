@@ -11,6 +11,10 @@ import {
   sanitizeQuotationRenderRequest,
   type QuotationImageRuntimeAdapters,
 } from '../quotation-image';
+import {
+  LocalBrowserQuotationImageBridge,
+  localBrowserQuotationImageClientHtml,
+} from './local-browser-quotation-image-bridge';
 
 type FixtureRecord = {
   id: string;
@@ -151,12 +155,31 @@ export const createLocalQuoteFixture = (): {
   base: ((tableName: string) => FixtureTable) & { _tables: Map<string, FixtureTable> };
   metadataTables: Array<Record<string, unknown>>;
   installQuotationImageRuntime(runtime: QuotationImageRuntimeAdapters): void;
-  asset: { path: string; bytes: Buffer };
+  assetStore: {
+    pathPrefix: string;
+    resolve(digest: string): Uint8Array | undefined;
+  };
+  browserBridge?: {
+    rendererOrigin: string;
+    clientHtml: string;
+    renderer: LocalBrowserQuotationImageBridge;
+  };
   urls: { create: string; share: string; invoice: string };
 } => {
   const { png, request } = requireFixtureFiles();
   const idempotencyKey = quotationImageIdempotencyKey(LOCAL_ITEM_ID, request);
   const assetKey = quotationImageAssetKey(idempotencyKey);
+  const browserTransportEnabled = process.env.LKS_LOCAL_3D_BROWSER_TRANSPORT === '1';
+  const rendererOrigin = String(process.env.LKS_LOCAL_3D_RENDERER_ORIGIN || '').trim();
+  const browserRenderer = browserTransportEnabled
+    ? new LocalBrowserQuotationImageBridge()
+    : undefined;
+  const browserBridge = browserRenderer ? {
+    rendererOrigin: new URL(rendererOrigin).origin,
+    clientHtml: localBrowserQuotationImageClientHtml(rendererOrigin),
+    renderer: browserRenderer,
+  } : undefined;
+  let storage: LocalTestQuotationImageStorage | undefined;
   const item = {
     item_id: LOCAL_ITEM_ID,
     itemType: 'Display box 展示盒',
@@ -311,15 +334,15 @@ export const createLocalQuoteFixture = (): {
     base,
     metadataTables,
     installQuotationImageRuntime(runtime) {
-      const storage = new LocalTestQuotationImageStorage();
-      const renderer = new FixtureQuotationImageRenderer({
+      storage = new LocalTestQuotationImageStorage();
+      const renderer = browserRenderer || new FixtureQuotationImageRenderer({
         bytes: png,
         mimeType: 'image/png',
         width: 1280,
         height: 1280,
       });
       runtime.coordinator = new QuotationImageCoordinator(renderer, storage, {
-        timeoutMs: 2_000,
+        timeoutMs: browserRenderer ? 30_000 : 2_000,
         maxAttempts: 2,
       });
       runtime.jobScheduler = {
@@ -341,15 +364,26 @@ export const createLocalQuoteFixture = (): {
       };
       runtime.presentationResolver = {
         async resolve(resolvedAssetKey) {
-          if (!resolvedAssetKey.startsWith('quotation-images/')) throw new Error('Unexpected local fixture asset key.');
+          const match = resolvedAssetKey.match(/^quotation-images\/([a-f0-9]{64})\.png$/);
+          if (!match) throw new Error('Unexpected local fixture asset key.');
           return {
-            src: '/__test-only/quotation-image.png',
+            src: `/__test-only/quotation-images/${match[1]}.png`,
             expiresAt: new Date(Date.now() + 60_000).toISOString(),
           };
         },
       };
     },
-    asset: { path: '/__test-only/quotation-image.png', bytes: png },
+    assetStore: {
+      pathPrefix: '/__test-only/quotation-images/',
+      resolve(digest) {
+        if (!/^[a-f0-9]{64}$/.test(digest)) return undefined;
+        const resolvedAssetKey = `quotation-images/${digest}.png`;
+        const dynamic = storage?.get(resolvedAssetKey);
+        if (dynamic) return dynamic;
+        return resolvedAssetKey === assetKey ? new Uint8Array(png) : undefined;
+      },
+    },
+    ...(browserBridge ? { browserBridge } : {}),
     urls: {
       create: '/quote/create',
       share: `/quote/${LOCAL_QUOTE_TOKEN}`,

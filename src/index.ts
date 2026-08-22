@@ -277,9 +277,64 @@ const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || '
 const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
 if (LOCAL_QUOTE_FIXTURE) LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
 if (LOCAL_QUOTE_FIXTURE) {
-  app.get(LOCAL_QUOTE_FIXTURE.asset.path, (_req: Request, res: Response) => {
-    res.type('image/png').send(LOCAL_QUOTE_FIXTURE.asset.bytes);
+  app.get(`${LOCAL_QUOTE_FIXTURE.assetStore.pathPrefix}:digest.png`, (req: Request, res: Response) => {
+    const bytes = LOCAL_QUOTE_FIXTURE.assetStore.resolve(String(req.params.digest || ''));
+    if (!bytes) return res.status(404).type('text/plain').send('Local test image not found.');
+    return res.type('image/png').send(Buffer.from(bytes));
   });
+  const browserBridge = LOCAL_QUOTE_FIXTURE.browserBridge;
+  if (browserBridge) {
+    const requireLocalFixtureOrigin = (req: Request, res: Response, next: () => void) => {
+      const expectedOrigin = new URL(PUBLIC_BASE_URL).origin;
+      if (String(req.get('Origin') || '') !== expectedOrigin) {
+        return res.status(403).type('text/plain').send('Local test origin rejected.');
+      }
+      return next();
+    };
+    app.get('/__test-only/quotation-image-bridge.html', (_req: Request, res: Response) => {
+      res.setHeader(
+        'Content-Security-Policy',
+        `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src ${browserBridge.rendererOrigin}; connect-src 'self'`,
+      );
+      res.type('html').send(browserBridge.clientHtml);
+    });
+    app.get('/__test-only/quotation-image-bridge/next', (_req: Request, res: Response) => {
+      const job = browserBridge.renderer.takeNext();
+      return job ? res.json(job) : res.status(204).end();
+    });
+    app.get('/__test-only/quotation-image-bridge/status', (_req: Request, res: Response) => {
+      return res.json(browserBridge.renderer.status());
+    });
+    app.post(
+      '/__test-only/quotation-image-bridge/complete/:requestId',
+      requireLocalFixtureOrigin,
+      express.raw({ type: 'application/octet-stream', limit: '8mb' }),
+      (req: Request, res: Response) => {
+        try {
+          const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+          browserBridge.renderer.complete({
+            requestId: String(req.params.requestId || ''),
+            contract: String(req.get('X-LKS-Contract') || ''),
+            mimeType: String(req.get('X-LKS-Mime-Type') || ''),
+            width: Number(req.get('X-LKS-Width')),
+            height: Number(req.get('X-LKS-Height')),
+            requestIdentity: String(req.get('X-LKS-Request-Identity') || ''),
+            bytes,
+          });
+          return res.status(204).end();
+        } catch (error) {
+          console.warn('Local browser quotation-image completion rejected:', error);
+          return res.status(400).type('text/plain').send('Local test artifact rejected.');
+        }
+      },
+    );
+    app.post('/__test-only/quotation-image-bridge/fail', requireLocalFixtureOrigin, (req: Request, res: Response) => {
+      const requestId = String(req.body?.request_id || '');
+      const errorCode = String(req.body?.error_code || 'quotation-image-local-transport-render-failed');
+      browserBridge.renderer.fail(requestId, errorCode);
+      return res.status(204).end();
+    });
+  }
 }
 
 const getAdminCredentials = () => {
