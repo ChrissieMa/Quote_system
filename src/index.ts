@@ -67,10 +67,13 @@ import {
   createImmutableItemId,
   ensureImmutableItemIds,
   isImmutableItemId,
-  prepareNewQuoteItemsWithQuotationImages,
+  linkQuoteItemsToOrderItemRecords,
+  overlayConfirmedOrderItemsByIdentity,
+  prepareNewQuoteItemsForQuotationImageJobs,
   quotationImageEnabled,
   quotationImageRuntime,
   resolveQuotationImagePresentations,
+  scheduleQuotationImageJobsAfterWrite,
   type QuotationImagePresentation,
 } from './quotation-image';
 
@@ -830,7 +833,11 @@ const getConfirmedOrderItems = async (orderRecordId: string, baseItems: any[]): 
     .sort((a, b) => String(a.fields['Item No'] || a.id).localeCompare(String(b.fields['Item No'] || b.id)));
 
   if (linkedItems.length === 0) return baseItems;
-  return linkedItems.map((itemRecord, index) => overlayConfirmedOrderItem(baseItems[index] || {}, itemRecord));
+  return overlayConfirmedOrderItemsByIdentity(
+    baseItems,
+    linkedItems,
+    (baseItem, itemRecord) => overlayConfirmedOrderItem(baseItem, itemRecord),
+  );
 };
 
 const getCustomerText = (fields: FieldSet, fieldName: string): string =>
@@ -5091,10 +5098,11 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       amount: parseFloat(String(item.amount)) || 0,
     }));
     items = ensureImmutableItemIds(items, { preserveExisting: isPilotInternal });
-    items = await prepareNewQuoteItemsWithQuotationImages(items, {
+    const preparedQuotationImages = prepareNewQuoteItemsForQuotationImageJobs(items, {
       enabled: QUOTATION_IMAGE_ENABLED,
-      coordinator: quotationImageRuntime.coordinator,
+      runtime: quotationImageRuntime,
     });
+    items = preparedQuotationImages.items;
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
@@ -5237,6 +5245,13 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
 
     const createdQuoteRecords = await tableQuotes.create([{ fields: quoteFields }]);
     const createdQuoteRecordId = createdQuoteRecords[0].id;
+    // Enqueue only after the authoritative Quote exists. This call never
+    // awaits rendering/storage and cannot delay or fail the create response.
+    scheduleQuotationImageJobsAfterWrite(
+      preparedQuotationImages.jobs,
+      createdQuoteRecordId,
+      quotationImageRuntime,
+    );
 
     if (campaignSourceDetailWasManual && campaignSourceDetail) {
       try {
@@ -5937,6 +5952,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
     // C. Order Items
     let items: any[] = [];
     items = parseQuoteItems(qf['Quote Items JSON']);
+    let itemsWithOrderItemIdentity = items;
 
     if (items.length > 0) {
       const orderItemsPayload = items.map((item: any, itemIndex: number) => {
@@ -5978,7 +5994,8 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
         if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
         return { fields };
       });
-      await tableOrderItems.create(orderItemsPayload);
+      const createdOrderItems = await tableOrderItems.create(orderItemsPayload);
+      itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
     }
 
     // D. Update Quote
@@ -5991,6 +6008,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
         'Customer': [customerRecordId],
         'Converted At': new Date().toISOString(),
         'Invoice Public Token': invoicePublicToken,
+        'Quote Items JSON': JSON.stringify(itemsWithOrderItemIdentity),
         'Status': 'Mark as Paid',
       }
     }]);

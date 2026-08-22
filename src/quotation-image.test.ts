@@ -5,18 +5,23 @@ import test from 'node:test';
 import {
   buildQuotationRenderRequestFromQuoteItem,
   FixtureQuotationImageRenderer,
+  InMemoryQuotationImageJobScheduler,
   LocalTestQuotationImageStorage,
   QuotationImageCoordinator,
   QuotationImageError,
   createImmutableItemId,
   ensureImmutableItemIds,
+  linkQuoteItemsToOrderItemRecords,
+  overlayConfirmedOrderItemsByIdentity,
   pendingQuotationImageMetadata,
+  prepareNewQuoteItemsForQuotationImageJobs,
   prepareNewQuoteItemsWithQuotationImages,
   quotationImageEnabled,
   quotationImageIdempotencyKey,
   quotationImagePresentation,
   resolveQuotationImagePresentation,
   resolveQuotationImagePresentations,
+  scheduleQuotationImageJobsAfterWrite,
   sanitizeRenderRequest,
   sanitizeQuotationRenderRequest,
   type QuotationImageRenderer,
@@ -39,7 +44,7 @@ const renderedFixture = (): RenderedQuotationImage => ({
 
 const renderRequest = (): RenderRequestV1 => ({
   purpose: 'quotation',
-  product_type: 'Display box 展示盒',
+  product_type: 'display_box',
   configuration_id: 'fictional-config-001',
   dimensions: {
     unit: 'cm',
@@ -49,10 +54,10 @@ const renderRequest = (): RenderRequestV1 => ({
   },
   cabinet_layers: [],
   accessories: [{ accessory_type: '磁石門', quantity: 1 }],
-  colours: { body: 'clear', background: 'light-gray-blue' },
+  colours: { body: 'clear_acrylic', background: 'light_blue_gray' },
   engraving: { enabled: false },
   model_preview: { enabled: false },
-  camera_preset: 'quotation-default',
+  camera_preset: 'quotation_square_three_quarter_v2',
   output: { width: 1280, height: 1280, background: 'configured' },
   branding: { enabled: false, style: 'none' },
   show_dimensions: true,
@@ -101,6 +106,62 @@ test('new items receive server UUIDs while trusted existing IDs remain immutable
   );
 });
 
+test('convert linkage and share/invoice overlays follow immutable item identity across reorder/insert/remove', () => {
+  const secondId = 'b8c72003-92fb-4c56-a552-e0d9773bb17b';
+  const imageMetadata = (marker: string) => ({
+    contract: 'quotation-image-v1' as const,
+    state: 'ready' as const,
+    idempotency_key: `sha256:${marker}`,
+    asset_key: `quotation-images/${marker}.png`,
+    attempts: 1,
+    updated_at: '2026-08-22T12:00:00.000Z',
+    marker,
+  });
+  const base = [
+    { ...storedQuoteItem(), item_id: ITEM_ID, quotation_image: imageMetadata('image-a') },
+    { ...storedQuoteItem(), item_id: secondId, itemType: 'Display Case 疊高展示櫃', quotation_image: imageMetadata('image-b') },
+  ];
+  const linked = linkQuoteItemsToOrderItemRecords(base, [{ id: 'rec-a' }, { id: 'rec-b' }]);
+  assert.equal(linked[0].order_item_identity?.item_id, ITEM_ID);
+  assert.equal(linked[1].order_item_identity?.item_id, secondId);
+
+  const records = [{ id: 'rec-extra' }, { id: 'rec-b' }, { id: 'rec-a' }];
+  const overlaid = overlayConfirmedOrderItemsByIdentity(
+    linked,
+    records,
+    (item, record) => ({ ...item, confirmed_record: record.id }),
+  );
+  assert.deepEqual(overlaid.map(item => item.confirmed_record), ['rec-a', 'rec-b']);
+  assert.deepEqual(overlaid.map(item => (item.quotation_image as { marker: string }).marker), ['image-a', 'image-b']);
+
+  const removed = overlayConfirmedOrderItemsByIdentity(
+    linked,
+    [{ id: 'rec-b' }],
+    (item, record) => ({ ...item, confirmed_record: record.id }),
+  );
+  assert.equal(removed[0].confirmed_record, undefined);
+  assert.equal(removed[0].item_id, ITEM_ID);
+  assert.equal(removed[1].confirmed_record, 'rec-b');
+});
+
+test('position fallback is retained only when both Quote items and confirmed records are legacy', () => {
+  const legacy = [{ description: 'legacy-a' }, { description: 'legacy-b' }];
+  const records = [{ id: 'rec-b' }, { id: 'rec-a' }];
+  const overlaid = overlayConfirmedOrderItemsByIdentity(
+    legacy,
+    records,
+    (item, record) => ({ ...item, confirmed_record: record.id }),
+  );
+  assert.deepEqual(overlaid.map(item => item.confirmed_record), ['rec-b', 'rec-a']);
+
+  const unsafeMixed = overlayConfirmedOrderItemsByIdentity(
+    [{ ...storedQuoteItem(), item_id: ITEM_ID }],
+    [{ id: 'rec-x' }],
+    (item, record) => ({ ...item, confirmed_record: record.id }),
+  );
+  assert.equal(unsafeMixed[0].confirmed_record, undefined);
+});
+
 test('item identity does not alter authoritative pricing and survives calculated preview', () => {
   const input = {
     customer: 'FICTIONAL TEST CUSTOMER',
@@ -131,6 +192,10 @@ test('new Quote item builds a central-schema request without price or customer f
   assert.ok(request);
   assert.equal(request.configuration_id, ITEM_ID);
   assert.equal(request.purpose, 'quotation');
+  assert.equal(request.product_type, 'display_box');
+  assert.equal(request.colours.body, 'clear_acrylic');
+  assert.equal(request.colours.background, 'light_blue_gray');
+  assert.equal(request.camera_preset, 'quotation_square_three_quarter_v2');
   assert.equal(request.show_price, false);
   assert.equal(request.output.width, 1280);
   assert.equal(request.output.height, 1280);
@@ -138,6 +203,28 @@ test('new Quote item builds a central-schema request without price or customer f
   for (const forbidden of ['forWhat', 'freight', 'hongKongDelivery', 'profit', 'amount', 'quote_token']) {
     assert.equal(serialized.includes(forbidden), false);
   }
+});
+
+test('Quote item type mapping matches 3D applicator canonical fixtures and rejects unsupported types', () => {
+  const stacked = buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    itemType: 'Display Case 疊高展示櫃',
+    noOfLevels: 2,
+    levelHeights: '第1層：25 cm｜第2層：30 cm',
+  });
+  assert.equal(stacked?.product_type, 'stacked_cabinet');
+  assert.deepEqual(stacked?.cabinet_layers, [
+    { layer_id: 'layer-1', position: 1, actual_height: 25 },
+    { layer_id: 'layer-2', position: 2, actual_height: 30 },
+  ]);
+  assert.equal(buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    itemType: '階梯',
+  }), null);
+  assert.equal(buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    itemType: 'Unknown future product',
+  }), null);
 });
 
 test('create-core persistence attaches metadata in Quote Items JSON without changing pricing', async () => {
@@ -157,7 +244,7 @@ test('create-core persistence attaches metadata in Quote Items JSON without chan
   assert.equal(persisted.freight, original.freight);
   assert.equal(persisted.profit, original.profit);
   assert.equal(persisted.quotation_image.state, 'ready');
-  assert.match(persisted.quotation_image.asset_key, /^test-only\/quotation-images\//);
+  assert.match(persisted.quotation_image.asset_key, /^quotation-images\//);
   assert.equal(JSON.stringify(persisted).includes('http'), false);
   assert.equal(JSON.stringify(persisted).includes('fictional-test-only-png'), false);
 });
@@ -174,6 +261,74 @@ test('create-core is a complete no-op when feature or provider is unavailable', 
     enabled: true,
   }), [item]);
   assert.equal(renderer.calls, 0);
+});
+
+test('authoritative create persists deterministic pending metadata before non-blocking slow render job', async () => {
+  let renderCalls = 0;
+  let release!: () => void;
+  const slow = new Promise<void>(resolve => { release = resolve; });
+  const renderer: QuotationImageRenderer = {
+    async render() {
+      renderCalls += 1;
+      await slow;
+      return renderedFixture();
+    },
+  };
+  const scheduler = new InMemoryQuotationImageJobScheduler();
+  const updates: Array<{ quoteRecordId: string; itemId: string; state: string }> = [];
+  const runtime = {
+    coordinator: new QuotationImageCoordinator(renderer, new LocalTestQuotationImageStorage()),
+    jobScheduler: scheduler,
+    metadataWriter: {
+      async update(input: { quoteRecordId: string; itemId: string; metadata: { state: string } }) {
+        updates.push({ quoteRecordId: input.quoteRecordId, itemId: input.itemId, state: input.metadata.state });
+      },
+    },
+  };
+  const prepared = prepareNewQuoteItemsForQuotationImageJobs([storedQuoteItem()], {
+    enabled: true,
+    runtime,
+    now: '2026-08-22T12:00:00.000Z',
+  });
+  assert.equal(prepared.items[0].quotation_image?.state, 'pending');
+  assert.match(prepared.items[0].quotation_image?.asset_key || '', /^quotation-images\/[a-f0-9]{64}\.png$/);
+  assert.equal(renderCalls, 0);
+
+  // Simulates successful tableQuotes.create. Scheduling returns immediately;
+  // the slow renderer has not started and cannot delay the create response.
+  let authoritativeCreateReturned = true;
+  scheduleQuotationImageJobsAfterWrite(prepared.jobs, 'rec-fake-quote', runtime);
+  assert.equal(authoritativeCreateReturned, true);
+  assert.equal(scheduler.size, 1);
+  assert.equal(renderCalls, 0);
+
+  const drained = scheduler.drain();
+  await Promise.resolve();
+  assert.equal(renderCalls, 1);
+  assert.equal(updates.length, 0);
+  release();
+  await drained;
+  assert.deepEqual(updates, [{
+    quoteRecordId: 'rec-fake-quote',
+    itemId: ITEM_ID,
+    state: 'ready',
+  }]);
+});
+
+test('after-write preparation is a no-op unless coordinator, scheduler and writer are all configured', () => {
+  const item = storedQuoteItem();
+  const coordinator = new QuotationImageCoordinator(
+    new FixtureQuotationImageRenderer(renderedFixture()),
+    new LocalTestQuotationImageStorage(),
+  );
+  for (const runtime of [
+    {},
+    { coordinator },
+    { coordinator, jobScheduler: new InMemoryQuotationImageJobScheduler() },
+  ]) {
+    const prepared = prepareNewQuoteItemsForQuotationImageJobs([item], { enabled: true, runtime });
+    assert.deepEqual(prepared, { items: [item], jobs: [] });
+  }
 });
 
 test('central render schema stays broad while quotation policy requires 1280 and quotation purpose', () => {
@@ -231,7 +386,7 @@ test('pending metadata is JSON-only and carries the deterministic asset identity
   assert.equal(pending.state, 'pending');
   assert.equal(pending.attempts, 0);
   assert.equal(pending.idempotency_key, quotationImageIdempotencyKey(ITEM_ID, renderRequest()));
-  assert.equal('asset_key' in pending, false);
+  assert.match(pending.asset_key || '', /^quotation-images\/[a-f0-9]{64}\.png$/);
 });
 
 test('local end-to-end fixture renders, stores one durable asset_key and deduplicates replay', async () => {
@@ -244,7 +399,7 @@ test('local end-to-end fixture renders, stores one durable asset_key and dedupli
   const replay = await coordinator.process(ITEM_ID, renderRequest());
   assert.deepEqual(replay, first);
   assert.equal(first.state, 'ready');
-  assert.match(first.asset_key || '', /^test-only\/quotation-images\/[a-f0-9]{64}\.png$/);
+  assert.match(first.asset_key || '', /^quotation-images\/[a-f0-9]{64}\.png$/);
   assert.equal(renderer.calls, 1);
   assert.equal(storage.size, 1);
   assert.deepEqual(Buffer.from(storage.get(first.asset_key!)!), PNG_FIXTURE);
@@ -469,8 +624,12 @@ test('provider-neutral resolver supplies ready presentation and absence remains 
 
 test('real create, public Quote and invoice routes use the shared integration core', () => {
   const source = readFileSync(path.join(__dirname, 'index.ts'), 'utf8');
-  assert.match(source, /items = await prepareNewQuoteItemsWithQuotationImages\(items,/);
+  assert.match(source, /prepareNewQuoteItemsForQuotationImageJobs\(items,/);
+  assert.match(source, /scheduleQuotationImageJobsAfterWrite\(/);
   assert.match(source, /'Quote Items JSON': itemsJson/);
+  assert.match(source, /linkQuoteItemsToOrderItemRecords\(items, createdOrderItems\)/);
+  assert.match(source, /'Quote Items JSON': JSON\.stringify\(itemsWithOrderItemIdentity\)/);
+  assert.equal((source.match(/items = await getConfirmedOrderItems\(/g) || []).length, 2);
   assert.equal((source.match(/await resolveQuotationImagePresentations\(items,/g) || []).length, 2);
   assert.equal((source.match(/renderOptionalQuotationImageRow\(quotationImagePresentations\.get/g) || []).length, 2);
 });

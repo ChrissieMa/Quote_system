@@ -44,6 +44,7 @@ export type QuotationImageMetadata = {
 export type QuoteItemWithQuotationImage = Record<string, unknown> & {
   item_id?: string;
   quotation_image?: QuotationImageMetadata;
+  order_item_identity?: { item_id: string; record_id: string };
 };
 
 export type RenderedQuotationImage = {
@@ -58,7 +59,7 @@ export interface QuotationImageRenderer {
 }
 
 export interface QuotationImageStorage {
-  put(input: { idempotencyKey: string; bytes: Uint8Array; mimeType: 'image/png' }): Promise<{ assetKey: string }>;
+  put(input: { assetKey: string; idempotencyKey: string; bytes: Uint8Array; mimeType: 'image/png' }): Promise<{ assetKey: string }>;
 }
 
 export interface QuotationImagePresentationResolver {
@@ -67,7 +68,22 @@ export interface QuotationImagePresentationResolver {
 
 export type QuotationImageRuntimeAdapters = {
   coordinator?: QuotationImageCoordinator;
+  jobScheduler?: QuotationImageJobScheduler;
+  metadataWriter?: QuotationImageMetadataWriter;
   presentationResolver?: QuotationImagePresentationResolver;
+};
+
+export interface QuotationImageJobScheduler {
+  enqueue(task: () => Promise<void>): void;
+}
+
+export interface QuotationImageMetadataWriter {
+  update(input: { quoteRecordId: string; itemId: string; metadata: QuotationImageMetadata }): Promise<void>;
+}
+
+export type PreparedQuotationImageJob = {
+  itemId: string;
+  request: RenderRequestV1 & { purpose: 'quotation' };
 };
 
 // Deliberately empty in this development PR. An approved composition module
@@ -290,6 +306,54 @@ export const ensureImmutableItemIds = <T extends Record<string, unknown>>(
   });
 };
 
+export const linkQuoteItemsToOrderItemRecords = <T extends QuoteItemWithQuotationImage>(
+  items: T[],
+  records: ReadonlyArray<{ id: string }>,
+): Array<T & { order_item_identity?: { item_id: string; record_id: string } }> => items.map((item, index) => {
+  const record = records[index];
+  if (!record || !record.id || !isImmutableItemId(item.item_id)) return item;
+  return {
+    ...item,
+    order_item_identity: {
+      item_id: item.item_id,
+      record_id: record.id,
+    },
+  };
+});
+
+export const overlayConfirmedOrderItemsByIdentity = <
+  T extends QuoteItemWithQuotationImage,
+  R extends { id: string },
+  U extends T,
+>(
+  baseItems: T[],
+  linkedRecords: ReadonlyArray<R>,
+  overlay: (baseItem: T, linkedRecord: R) => U,
+): U[] => {
+  const recordItemId = (record: R): string | null => {
+    const direct = (record as R & { item_id?: unknown }).item_id;
+    return isImmutableItemId(direct) ? direct.toLowerCase() : null;
+  };
+  const fullyLegacy = baseItems.every(item => !isImmutableItemId(item.item_id))
+    && linkedRecords.every(record => !recordItemId(record));
+  if (fullyLegacy) {
+    return linkedRecords.map((record, index) => overlay((baseItems[index] || {}) as T, record));
+  }
+  const recordsById = new Map(linkedRecords.map(record => [record.id, record]));
+  const recordsByItemId = new Map(
+    linkedRecords.map(record => [recordItemId(record), record] as const).filter(([itemId]) => itemId),
+  );
+  return baseItems.map(item => {
+    if (!isImmutableItemId(item.item_id)) return item as U;
+    const directRecord = recordsByItemId.get(item.item_id.toLowerCase());
+    if (directRecord) return overlay(item, directRecord);
+    const identity = item.order_item_identity;
+    if (!identity || identity.item_id !== item.item_id || !identity.record_id) return item as U;
+    const record = recordsById.get(identity.record_id);
+    return record ? overlay(item, record) : item as U;
+  });
+};
+
 export const quotationImageIdempotencyKey = (itemId: string, rawRequest: unknown): string => {
   if (!isImmutableItemId(itemId)) throw new Error('A valid immutable item_id is required.');
   const request = sanitizeQuotationRenderRequest(rawRequest);
@@ -303,13 +367,23 @@ export const pendingQuotationImageMetadata = (
   itemId: string,
   rawRequest: unknown,
   now = new Date().toISOString(),
-): QuotationImageMetadata => ({
-  contract: QUOTATION_IMAGE_CONTRACT,
-  state: 'pending',
-  idempotency_key: quotationImageIdempotencyKey(itemId, rawRequest),
-  attempts: 0,
-  updated_at: now,
-});
+): QuotationImageMetadata => {
+  const idempotencyKey = quotationImageIdempotencyKey(itemId, rawRequest);
+  return {
+    contract: QUOTATION_IMAGE_CONTRACT,
+    state: 'pending',
+    idempotency_key: idempotencyKey,
+    asset_key: quotationImageAssetKey(idempotencyKey),
+    attempts: 0,
+    updated_at: now,
+  };
+};
+
+export const quotationImageAssetKey = (idempotencyKey: string): string => {
+  const match = String(idempotencyKey).match(/^sha256:([a-f0-9]{64})$/);
+  if (!match) throw new Error('A valid quotation image idempotency key is required.');
+  return `quotation-images/${match[1]}.png`;
+};
 
 export const quotationImageEnabled = (value: unknown): boolean =>
   typeof value === 'string' && /^(1|true|enabled)$/i.test(value.trim());
@@ -366,7 +440,12 @@ export const buildQuotationRenderRequestFromQuoteItem = (
   item: QuoteItemWithQuotationImage,
 ): (RenderRequestV1 & { purpose: 'quotation' }) | null => {
   if (!isImmutableItemId(item.item_id)) return null;
-  const productType = String(item.itemType || '').trim();
+  const productType = (() => {
+    const stored = String(item.itemType || '').trim();
+    if (stored === 'Display box 展示盒') return 'display_box';
+    if (stored === 'Display Case 疊高展示櫃') return 'stacked_cabinet';
+    return null;
+  })();
   const inner = {
     length: storedNumber(item.interL),
     depth: storedNumber(item.interD),
@@ -392,8 +471,8 @@ export const buildQuotationRenderRequestFromQuoteItem = (
     },
     cabinet_layers: storedCabinetLayers(item),
     accessories: storedAccessories(item),
-    colours: { body: 'clear', background: 'very-light-gray-blue' },
-    camera_preset: 'quotation-default',
+    colours: { body: 'clear_acrylic', background: 'light_blue_gray' },
+    camera_preset: 'quotation_square_three_quarter_v2',
     output: { width: QUOTATION_IMAGE_SIZE, height: QUOTATION_IMAGE_SIZE, background: 'configured' },
     branding: { enabled: false, style: 'none' },
     show_dimensions: true,
@@ -422,6 +501,73 @@ export const prepareNewQuoteItemsWithQuotationImages = async <T extends QuoteIte
     }
   })) as Promise<Array<T & { quotation_image?: QuotationImageMetadata }>>;
 };
+
+export const prepareNewQuoteItemsForQuotationImageJobs = <T extends QuoteItemWithQuotationImage>(
+  items: T[],
+  options: { enabled: boolean; runtime: QuotationImageRuntimeAdapters; now?: string },
+): { items: Array<T & { quotation_image?: QuotationImageMetadata }>; jobs: PreparedQuotationImageJob[] } => {
+  const configured = options.runtime.coordinator
+    && options.runtime.jobScheduler
+    && options.runtime.metadataWriter;
+  if (!options.enabled || !configured) return { items, jobs: [] };
+  const jobs: PreparedQuotationImageJob[] = [];
+  const prepared = items.map(item => {
+    const request = buildQuotationRenderRequestFromQuoteItem(item);
+    if (!request || !item.item_id) return item;
+    jobs.push({ itemId: item.item_id, request });
+    return {
+      ...item,
+      quotation_image: pendingQuotationImageMetadata(item.item_id, request, options.now),
+    };
+  });
+  return { items: prepared, jobs };
+};
+
+export const scheduleQuotationImageJobsAfterWrite = (
+  jobs: PreparedQuotationImageJob[],
+  quoteRecordId: string,
+  runtime: QuotationImageRuntimeAdapters,
+): void => {
+  const coordinator = runtime.coordinator;
+  const scheduler = runtime.jobScheduler;
+  const writer = runtime.metadataWriter;
+  if (!coordinator || !scheduler || !writer || !quoteRecordId) return;
+  for (const job of jobs) {
+    try {
+      scheduler.enqueue(async () => {
+        try {
+          const metadata = await coordinator.process(job.itemId, job.request);
+          await writer.update({ quoteRecordId, itemId: job.itemId, metadata });
+        } catch {
+          // Renderer, storage and metadata-writer errors are isolated from the
+          // already-completed authoritative Quote create response.
+        }
+      });
+    } catch {
+      // A scheduler refusing a job must likewise never change the create
+      // response after the authoritative Quote write has succeeded.
+    }
+  }
+};
+
+export class InMemoryQuotationImageJobScheduler implements QuotationImageJobScheduler {
+  private readonly tasks: Array<() => Promise<void>> = [];
+
+  enqueue(task: () => Promise<void>): void {
+    this.tasks.push(task);
+  }
+
+  get size(): number {
+    return this.tasks.length;
+  }
+
+  async drain(): Promise<void> {
+    while (this.tasks.length > 0) {
+      const task = this.tasks.shift();
+      if (task) await task();
+    }
+  }
+}
 
 export class QuotationImageError extends Error {
   constructor(message: string, readonly classification: 'temporary' | 'terminal') {
@@ -463,10 +609,9 @@ export class FixtureQuotationImageRenderer implements QuotationImageRenderer {
 export class LocalTestQuotationImageStorage implements QuotationImageStorage {
   private readonly assets = new Map<string, Uint8Array>();
 
-  async put(input: { idempotencyKey: string; bytes: Uint8Array; mimeType: 'image/png' }): Promise<{ assetKey: string }> {
+  async put(input: { assetKey: string; idempotencyKey: string; bytes: Uint8Array; mimeType: 'image/png' }): Promise<{ assetKey: string }> {
     if (input.mimeType !== 'image/png') throw new QuotationImageError('Only PNG is supported.', 'terminal');
-    const digest = crypto.createHash('sha256').update(input.idempotencyKey).digest('hex');
-    const assetKey = `test-only/quotation-images/${digest}.png`;
+    const assetKey = input.assetKey;
     if (!this.assets.has(assetKey)) this.assets.set(assetKey, Buffer.from(input.bytes));
     return { assetKey };
   }
@@ -545,11 +690,14 @@ export class QuotationImageCoordinator {
           throw new QuotationImageError('Renderer returned an invalid quotation PNG.', 'terminal');
         }
         const stored = await this.storage.put({
+          assetKey: quotationImageAssetKey(idempotencyKey),
           idempotencyKey,
           bytes: rendered.bytes,
           mimeType: rendered.mimeType,
         });
-        if (!ASSET_KEY_PATTERN.test(stored.assetKey) || stored.assetKey.includes('..')) {
+        const expectedAssetKey = quotationImageAssetKey(idempotencyKey);
+        if (!ASSET_KEY_PATTERN.test(stored.assetKey) || stored.assetKey.includes('..')
+          || stored.assetKey !== expectedAssetKey) {
           throw new QuotationImageError('Storage returned an invalid asset_key.', 'terminal');
         }
         return {
