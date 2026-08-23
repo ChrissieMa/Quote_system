@@ -699,7 +699,11 @@ test('provider-neutral resolver supplies ready presentation and absence remains 
     await resolveQuotationImagePresentation(item, resolver, Date.parse('2026-08-22T12:00:00.000Z')),
     { src: '/temporary/signed/fixture.png', alt: 'Quotation product preview' },
   );
-  const resolved = await resolveQuotationImagePresentations([item], { enabled: true, resolver });
+  const resolved = await resolveQuotationImagePresentations([item], {
+    enabled: true,
+    resolver,
+    now: Date.parse('2026-08-22T12:00:00.000Z'),
+  });
   assert.equal(resolved.get(ITEM_ID)?.src, '/temporary/signed/fixture.png');
   assert.equal((await resolveQuotationImagePresentations([item], { enabled: false, resolver })).size, 0);
   assert.equal((await resolveQuotationImagePresentations([item], { enabled: true })).size, 0);

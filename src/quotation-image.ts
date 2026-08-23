@@ -830,13 +830,13 @@ export const resolveQuotationImagePresentation = async (
 
 export const resolveQuotationImagePresentations = async (
   items: QuoteItemWithQuotationImage[],
-  options: { enabled: boolean; resolver?: QuotationImagePresentationResolver },
+  options: { enabled: boolean; resolver?: QuotationImagePresentationResolver; now?: number },
 ): Promise<Map<string, QuotationImagePresentation>> => {
   const presentations = new Map<string, QuotationImagePresentation>();
   if (!options.enabled || !options.resolver) return presentations;
   await Promise.all(items.map(async item => {
     if (!isImmutableItemId(item.item_id)) return;
-    const presentation = await resolveQuotationImagePresentation(item, options.resolver);
+    const presentation = await resolveQuotationImagePresentation(item, options.resolver, options.now);
     if (presentation) presentations.set(item.item_id, presentation);
   }));
   return presentations;
