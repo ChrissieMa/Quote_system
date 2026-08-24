@@ -63,6 +63,27 @@ import {
   sanitizeAdminNextPath,
   verifyAdminSession,
 } from './security';
+import {
+  createImmutableItemId,
+  ensureImmutableItemIds,
+  isImmutableItemId,
+  linkQuoteItemsToOrderItemRecords,
+  overlayConfirmedOrderItemsByIdentity,
+  prepareNewQuoteItemsForQuotationImageJobs,
+  quotationImageEnabled,
+  quotationImageRuntime,
+  resolveQuotationImagePresentations,
+  scheduleQuotationImageJobsAfterWrite,
+  type QuotationImagePresentation,
+} from './quotation-image';
+import {
+  createLocalQuoteFixture,
+  localQuoteFixtureEnabled,
+} from './test-only/local-quote-fixture';
+import {
+  createGoogleDriveQuotationImageProviderFromEnvironment,
+  installGoogleDriveQuotationImageProvider,
+} from './google-drive-quotation-image';
 
 dotenv.config();
 
@@ -83,12 +104,28 @@ app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
+const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
+const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
+const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = LOCAL_QUOTE_FIXTURE || !QUOTATION_IMAGE_ENABLED
+  ? null
+  : createGoogleDriveQuotationImageProviderFromEnvironment(process.env);
+// Phase 2B-1 deliberately provides no Production adapter. A later approved
+// composition step may supply these provider-neutral interfaces without
+// changing Quote item persistence or public presentation call sites.
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceMutationPlans = new Map<string, ProductionMutationPlan>();
 const maintenanceMutationCompleted = new Map<string, Record<string, unknown>>();
 const maintenanceMutationInFlight = new Map<string, Promise<Record<string, unknown>>>();
+
+if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER) {
+  installGoogleDriveQuotationImageProvider(
+    app,
+    quotationImageRuntime,
+    GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER,
+  );
+}
 
 const LOGO_URL = 'https://d2xsxph8kpxj0f.cloudfront.net/310519663253730031/dEsUrrvecqqFg5CteTMEZc/LKSnewLOGO%E9%80%8F%E6%98%8E2023_2674f8ba.png';
 
@@ -219,31 +256,33 @@ const requiredEnvVars = [
   'AIRTABLE_TABLE_QUOTES'
 ];
 for (const envVar of requiredEnvVars) {
-  if (!process.env[envVar]) {
+  if (!LOCAL_QUOTE_FIXTURE && !process.env[envVar]) {
     console.error(`Missing required environment variable: ${envVar}`);
     process.exit(1);
   }
 }
 
 // Airtable Setup
-const base = new Airtable({
+const base = (LOCAL_QUOTE_FIXTURE?.base || new Airtable({
   apiKey: process.env.AIRTABLE_API_KEY,
   requestTimeout: 15_000,
-}).base(process.env.AIRTABLE_BASE_ID!);
-installAirtableReadRetry(base, {
-  maxAttempts: 3,
-  delaysMs: [300, 900],
-  onRetry: ({ attempt, delayMs, error }) => {
-    const detail = String((error as any)?.code || (error as any)?.message || error);
-    console.warn(`Transient Airtable read failure; retry ${attempt + 1}/3 in ${delayMs}ms: ${detail}`);
-  },
-});
-const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS!);
+}).base(process.env.AIRTABLE_BASE_ID!)) as Airtable.Base;
+if (!LOCAL_QUOTE_FIXTURE) {
+  installAirtableReadRetry(base, {
+    maxAttempts: 3,
+    delaysMs: [300, 900],
+    onRetry: ({ attempt, delayMs, error }) => {
+      const detail = String((error as any)?.code || (error as any)?.message || error);
+      console.warn(`Transient Airtable read failure; retry ${attempt + 1}/3 in ${delayMs}ms: ${detail}`);
+    },
+  });
+}
+const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS || 'Customers');
 const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
-const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS!);
-const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS!);
+const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS || 'Order_2026');
+const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS || 'Order Items');
 const tableChinaShipments = base(process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS || 'China Shipments');
-const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES!);
+const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES || 'Quotes');
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
 const tableCampaigns = base(process.env.AIRTABLE_TABLE_CAMPAIGNS || 'Campaigns');
@@ -251,6 +290,67 @@ const tableBusinessExpenses = base(process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES 
 const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST || 'Expense Checklist');
 const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
 const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
+if (LOCAL_QUOTE_FIXTURE) LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
+if (LOCAL_QUOTE_FIXTURE) {
+  app.get(`${LOCAL_QUOTE_FIXTURE.assetStore.pathPrefix}:digest.png`, (req: Request, res: Response) => {
+    const bytes = LOCAL_QUOTE_FIXTURE.assetStore.resolve(String(req.params.digest || ''));
+    if (!bytes) return res.status(404).type('text/plain').send('Local test image not found.');
+    return res.type('image/png').send(Buffer.from(bytes));
+  });
+  const browserBridge = LOCAL_QUOTE_FIXTURE.browserBridge;
+  if (browserBridge) {
+    const requireLocalFixtureOrigin = (req: Request, res: Response, next: () => void) => {
+      const expectedOrigin = new URL(PUBLIC_BASE_URL).origin;
+      if (String(req.get('Origin') || '') !== expectedOrigin) {
+        return res.status(403).type('text/plain').send('Local test origin rejected.');
+      }
+      return next();
+    };
+    app.get('/__test-only/quotation-image-bridge.html', (_req: Request, res: Response) => {
+      res.setHeader(
+        'Content-Security-Policy',
+        `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src ${browserBridge.rendererOrigin}; connect-src 'self'`,
+      );
+      res.type('html').send(browserBridge.clientHtml);
+    });
+    app.get('/__test-only/quotation-image-bridge/next', (_req: Request, res: Response) => {
+      const job = browserBridge.renderer.takeNext();
+      return job ? res.json(job) : res.status(204).end();
+    });
+    app.get('/__test-only/quotation-image-bridge/status', (_req: Request, res: Response) => {
+      return res.json(browserBridge.renderer.status());
+    });
+    app.post(
+      '/__test-only/quotation-image-bridge/complete/:requestId',
+      requireLocalFixtureOrigin,
+      express.raw({ type: 'application/octet-stream', limit: '8mb' }),
+      (req: Request, res: Response) => {
+        try {
+          const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+          browserBridge.renderer.complete({
+            requestId: String(req.params.requestId || ''),
+            contract: String(req.get('X-LKS-Contract') || ''),
+            mimeType: String(req.get('X-LKS-Mime-Type') || ''),
+            width: Number(req.get('X-LKS-Width')),
+            height: Number(req.get('X-LKS-Height')),
+            requestIdentity: String(req.get('X-LKS-Request-Identity') || ''),
+            bytes,
+          });
+          return res.status(204).end();
+        } catch (error) {
+          console.warn('Local browser quotation-image completion rejected:', error);
+          return res.status(400).type('text/plain').send('Local test artifact rejected.');
+        }
+      },
+    );
+    app.post('/__test-only/quotation-image-bridge/fail', requireLocalFixtureOrigin, (req: Request, res: Response) => {
+      const requestId = String(req.body?.request_id || '');
+      const errorCode = String(req.body?.error_code || 'quotation-image-local-transport-render-failed');
+      browserBridge.renderer.fail(requestId, errorCode);
+      return res.status(204).end();
+    });
+  }
+}
 
 const getAdminCredentials = () => {
   const configuredSessionSecret = String(process.env.SESSION_SECRET || '').trim();
@@ -287,7 +387,7 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
   return next();
 };
 
-const buildAuthoritativeQuoteBody = (rawBody: any): any => {
+const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = false): any => {
   const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
   const promotionType = String(rawBody?.promotionType || '').trim();
   const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠']);
@@ -337,6 +437,9 @@ const buildAuthoritativeQuoteBody = (rawBody: any): any => {
         height: Number(item?.outerH),
       } : undefined;
       return {
+        ...(preserveTrustedItemIds && isImmutableItemId(item?.item_id)
+          ? { item_id: String(item.item_id).toLowerCase() }
+          : {}),
         itemType,
         forWhat: String(item?.forWhat || ''),
         innerDimensions: {
@@ -433,6 +536,9 @@ type AirtableMetadataTable = {
 let airtableMetadataCache: { expiresAt: number; tables: AirtableMetadataTable[] } | null = null;
 
 const getAirtableMetadataTables = async (): Promise<AirtableMetadataTable[]> => {
+  if (LOCAL_QUOTE_FIXTURE) {
+    return LOCAL_QUOTE_FIXTURE.metadataTables as AirtableMetadataTable[];
+  }
   if (airtableMetadataCache && airtableMetadataCache.expiresAt > Date.now()) {
     return airtableMetadataCache.tables;
   }
@@ -580,6 +686,26 @@ const escapeHtml = (unsafe: unknown): string =>
 
 const nl2br = (str: unknown): string =>
   escapeHtml(str).replace(/\n/g, '<br>');
+
+// Public documents share this presentation boundary. A storage adapter must
+// resolve asset_key to a short-lived URL for the current request; no URL is
+// persisted in Quote Items JSON. Until such an adapter is configured, the
+// helper returns an empty string and the Quote remains fully usable.
+const renderOptionalQuotationImage = (
+  presentation?: QuotationImagePresentation,
+): string => {
+  if (!QUOTATION_IMAGE_ENABLED) return '';
+  if (!presentation) return '';
+  return `<div class="quotation-image"><img src="${escapeHtml(presentation.src)}" alt="${escapeHtml(presentation.alt)}" loading="lazy"></div>`;
+};
+
+const renderOptionalQuotationImageRow = (
+  presentation: QuotationImagePresentation | undefined,
+  columnCount: number,
+): string => {
+  const content = renderOptionalQuotationImage(presentation);
+  return content ? `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}</td></tr>` : '';
+};
 
 const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
   const single = {
@@ -793,7 +919,11 @@ const getConfirmedOrderItems = async (orderRecordId: string, baseItems: any[]): 
     .sort((a, b) => String(a.fields['Item No'] || a.id).localeCompare(String(b.fields['Item No'] || b.id)));
 
   if (linkedItems.length === 0) return baseItems;
-  return linkedItems.map((itemRecord, index) => overlayConfirmedOrderItem(baseItems[index] || {}, itemRecord));
+  return overlayConfirmedOrderItemsByIdentity(
+    baseItems,
+    linkedItems,
+    (baseItem, itemRecord) => overlayConfirmedOrderItem(baseItem, itemRecord),
+  );
 };
 
 const getCustomerText = (fields: FieldSet, fieldName: string): string =>
@@ -2563,6 +2693,9 @@ const SHARED_CSS = `
   .items-table td { border: 1px solid #e5e7eb; padding: 8px 10px; vertical-align: top; }
   .items-table tr:nth-child(even) td { background: #fdf8f5; }
   .items-table .item-sub-detail td { background: #fffaf5 !important; }
+  .items-table .quotation-image-row td { background:#fff !important; text-align:center; }
+  .quotation-image { display:flex; justify-content:center; padding:8px 0; }
+  .quotation-image img { display:block; width:min(100%, 420px); height:auto; aspect-ratio:1; object-fit:contain; }
   .mini-label { font-size: 11px; font-weight: 700; color: #d8833b; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
   .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
   .offer-preview { background:#fffaf6; border:1px solid #f0e0d0; border-radius:6px; padding:12px; font-size:13px; }
@@ -3110,6 +3243,12 @@ app.post('/api/quote-pilot/preview', requireQuotePilotApi, async (req: Request, 
     } else {
       input = req.body as PilotQuoteInput;
     }
+    // Item identity is minted by this server before the signed preview.  The
+    // signed payload then carries the same immutable ID through creation.
+    input = {
+      ...input,
+      items: input.items.map(item => ({ ...item, item_id: createImmutableItemId() })),
+    };
     const preview = buildPilotPreview(input);
     const { confirmationSecret } = getQuotePilotSecrets();
     const confirmationId = issueConfirmationId(input, confirmationSecret);
@@ -5004,11 +5143,13 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async (req: Request, res: Response) => {
   try {
-    // Both the existing Create Quote UI and the Natural-language Pilot pass
-    // through this single authoritative v4.6 calculator before any write.
-    const b = buildAuthoritativeQuoteBody(req.body);
     const internalPilotHeader = String(req.headers['x-lks-quote-pilot-internal'] || '');
     const isPilotInternal = internalPilotHeader.length > 0 && safeEqual(internalPilotHeader, PILOT_INTERNAL_TOKEN);
+    // Both the existing Create Quote UI and the Natural-language Pilot pass
+    // through this single authoritative v4.6 calculator before any write.
+    // Only the signed internal Pilot route may preserve a pre-minted item ID;
+    // ordinary Create Quote bodies always receive fresh server IDs here.
+    const b = buildAuthoritativeQuoteBody(req.body, isPilotInternal);
 
     // Body is JSON from fetch — items is already a clean array
     let items: any[] = Array.isArray(b.items) ? b.items : [];
@@ -5016,6 +5157,9 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     items = items.filter((item: any) => item && (item.itemType || item.amount));
     // Normalize
     items = items.map((item: any) => ({
+      ...(isPilotInternal && isImmutableItemId(item.item_id)
+        ? { item_id: String(item.item_id).toLowerCase() }
+        : {}),
       itemType: String(item.itemType || ''),
       forWhat: String(item.forWhat || ''),
       interL: String(item.interL || ''),
@@ -5039,6 +5183,12 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       localDeliveryNotes: String(item.localDeliveryNotes || ''),
       amount: parseFloat(String(item.amount)) || 0,
     }));
+    items = ensureImmutableItemIds(items, { preserveExisting: isPilotInternal });
+    const preparedQuotationImages = prepareNewQuoteItemsForQuotationImageJobs(items, {
+      enabled: QUOTATION_IMAGE_ENABLED,
+      runtime: quotationImageRuntime,
+    });
+    items = preparedQuotationImages.items;
 
     const itemsJson = JSON.stringify(items);
     const descriptionSummary = items
@@ -5181,6 +5331,13 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
 
     const createdQuoteRecords = await tableQuotes.create([{ fields: quoteFields }]);
     const createdQuoteRecordId = createdQuoteRecords[0].id;
+    // Enqueue only after the authoritative Quote exists. This call never
+    // awaits rendering/storage and cannot delay or fail the create response.
+    scheduleQuotationImageJobsAfterWrite(
+      preparedQuotationImages.jobs,
+      createdQuoteRecordId,
+      quotationImageRuntime,
+    );
 
     if (campaignSourceDetailWasManual && campaignSourceDetail) {
       try {
@@ -5349,6 +5506,10 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
     if (convertedOrder) {
       items = await getConfirmedOrderItems(convertedOrder.id, items);
     }
+    const quotationImagePresentations = await resolveQuotationImagePresentations(items, {
+      enabled: QUOTATION_IMAGE_ENABLED,
+      resolver: quotationImageRuntime.presentationResolver,
+    });
 
     const buildShareDeliveryText = (): string =>
       buildDeliveryWaiverText(financialFields, isEnglish, sumQuoteLocalDelivery(items), quote['Valid Until']);
@@ -5398,7 +5559,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
-          </tr>`;
+          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), itemColumnCount)}`;
         }).join('');
 
     // Contact info block (always shown from Quotes table)
@@ -5877,6 +6038,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
     // C. Order Items
     let items: any[] = [];
     items = parseQuoteItems(qf['Quote Items JSON']);
+    let itemsWithOrderItemIdentity = items;
 
     if (items.length > 0) {
       const orderItemsPayload = items.map((item: any, itemIndex: number) => {
@@ -5918,7 +6080,8 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
         if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
         return { fields };
       });
-      await tableOrderItems.create(orderItemsPayload);
+      const createdOrderItems = await tableOrderItems.create(orderItemsPayload);
+      itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
     }
 
     // D. Update Quote
@@ -5931,6 +6094,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
         'Customer': [customerRecordId],
         'Converted At': new Date().toISOString(),
         'Invoice Public Token': invoicePublicToken,
+        'Quote Items JSON': JSON.stringify(itemsWithOrderItemIdentity),
         'Status': 'Mark as Paid',
       }
     }]);
@@ -6013,6 +6177,10 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
       }
     }
     items = await getConfirmedOrderItems(order.id, items);
+    const quotationImagePresentations = await resolveQuotationImagePresentations(items, {
+      enabled: QUOTATION_IMAGE_ENABLED,
+      resolver: quotationImageRuntime.presentationResolver,
+    });
     const hasLevels = items.some((item: any) => Number(item?.noOfLevels) > 0);
     const invoiceItemColumnCount = hasLevels ? 14 : 13;
 
@@ -6036,7 +6204,7 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>
-          </tr>`;
+          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), invoiceItemColumnCount)}`;
         }).join('');
 
     const subtotal = (of['Product Amount'] as number) || 0;
@@ -7013,10 +7181,15 @@ app.all(['/sitemap.xml', '/sitemap_index.xml'], (_req: Request, res: Response) =
 app.use((_req: Request, res: Response) => publicDocumentNotFound(res));
 
 // ─── Start server ────────────────────────────────────────────────────────────
-app.listen(PORT, () => {
+const onServerListening = () => {
   console.log(`LKS Quote System running on port ${PORT}`);
   console.log(`Public Base URL: ${PUBLIC_BASE_URL}`);
   console.log(`Dashboard: ${PUBLIC_BASE_URL}/quotes`);
+  if (LOCAL_QUOTE_FIXTURE) {
+    console.log(`TEST-ONLY original Create Quote: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.create}`);
+    console.log(`TEST-ONLY original Share: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.share}`);
+    console.log(`TEST-ONLY original Invoice: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.invoice}`);
+  }
   if (adminConfigured() && process.env.NODE_ENV !== 'test') {
     syncMonthlyFinance().catch(error => console.error('Initial finance sync failed:', error));
     setInterval(() => {
@@ -7025,4 +7198,7 @@ app.listen(PORT, () => {
   } else if (!adminConfigured()) {
     console.warn('Owner login configuration is incomplete; all owner routes are fail-closed.');
   }
-});
+};
+
+if (LOCAL_QUOTE_FIXTURE) app.listen(Number(PORT), '127.0.0.1', onServerListening);
+else app.listen(PORT, onServerListening);
