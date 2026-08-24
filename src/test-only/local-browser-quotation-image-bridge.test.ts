@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import type { RenderRequestV1 } from '../quotation-image';
+import { quotationRenderRequestIdentity } from '../browser-quotation-image';
 import {
   LocalBrowserQuotationImageBridge,
   localBrowserQuotationImageClientHtml,
@@ -27,7 +28,7 @@ const request: RenderRequestV1 = {
 };
 
 const idempotencyKey = `sha256:${'a'.repeat(64)}`;
-const requestIdentity = `3d-render-v1:sha256:${'b'.repeat(64)}`;
+const requestIdentity = quotationRenderRequestIdentity(request);
 const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
 
 test('local browser bridge carries the exact 3D protocol and accepts only a 1280 PNG', async () => {
@@ -81,6 +82,26 @@ test('local browser bridge propagates renderer failure as a temporary fail-open 
   await assert.rejects(rendered, /renderer-temporary-failure/);
 });
 
+test('local browser bridge rejects an artifact identity that is not the exact request hash', async () => {
+  const bridge = new LocalBrowserQuotationImageBridge();
+  const rendered = bridge.render(request, {
+    idempotencyKey: `sha256:${'d'.repeat(64)}`,
+    signal: new AbortController().signal,
+  });
+  const job = bridge.takeNext()!;
+  assert.throws(() => bridge.complete({
+    requestId: job.request_id,
+    contract: '3d-render-v1',
+    mimeType: 'image/png',
+    width: 1280,
+    height: 1280,
+    requestIdentity: `3d-render-v1:sha256:${'e'.repeat(64)}`,
+    bytes: png,
+  }));
+  bridge.fail(job.request_id, 'request-identity-mismatch');
+  await assert.rejects(rendered, /request-identity-mismatch/);
+});
+
 test('local browser client is loopback-only and never uses wildcard postMessage', () => {
   const html = localBrowserQuotationImageClientHtml('http://127.0.0.1:5175');
   assert.match(html, /lks-quotation-image-local-v1/);
@@ -90,4 +111,18 @@ test('local browser client is loopback-only and never uses wildcard postMessage'
   assert.doesNotMatch(html, /postMessage\([^)]*,\s*['"]\*['"]\)/);
   assert.throws(() => localBrowserQuotationImageClientHtml('https://example.invalid'));
   assert.throws(() => localBrowserQuotationImageClientHtml('*'));
+});
+
+test('local browser client permits one exact HTTPS renderer only for explicit public preview', () => {
+  const rendererOrigin = 'https://renderer-preview.example.test';
+  const html = localBrowserQuotationImageClientHtml(rendererOrigin, {
+    allowExactHttpsPreview: true,
+  });
+  assert.match(html, new RegExp(rendererOrigin));
+  assert.match(html, /postMessage\(job, rendererOrigin\)/);
+  assert.doesNotMatch(html, /postMessage\([^)]*,\s*['"]\*['"]\)/);
+  assert.throws(() => localBrowserQuotationImageClientHtml(
+    'https://renderer-preview.example.test/path',
+    { allowExactHttpsPreview: true },
+  ));
 });

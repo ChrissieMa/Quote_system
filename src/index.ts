@@ -70,6 +70,7 @@ import {
   linkQuoteItemsToOrderItemRecords,
   overlayConfirmedOrderItemsByIdentity,
   prepareNewQuoteItemsForQuotationImageJobs,
+  QuotationImageCoordinator,
   quotationImageEnabled,
   quotationImageRuntime,
   resolveQuotationImagePresentations,
@@ -84,6 +85,16 @@ import {
   createGoogleDriveQuotationImageProviderFromEnvironment,
   installGoogleDriveQuotationImageProvider,
 } from './google-drive-quotation-image';
+import {
+  BrowserQuotationImageBridge,
+  browserQuotationImageClientHtml,
+  normalizeQuotationImageRendererUrl,
+  quotationImageBridgeCsp,
+} from './browser-quotation-image';
+import {
+  AirtableQuotationImageMetadataWriter,
+  InProcessQuoteItemsLock,
+} from './airtable-quotation-image-metadata';
 
 dotenv.config();
 
@@ -106,12 +117,20 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
 const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
-const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = LOCAL_QUOTE_FIXTURE || !QUOTATION_IMAGE_ENABLED
+const LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE = Boolean(
+  LOCAL_QUOTE_FIXTURE && process.env.LKS_LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE === '1',
+);
+const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = !QUOTATION_IMAGE_ENABLED
+  || (LOCAL_QUOTE_FIXTURE && !LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE)
   ? null
   : createGoogleDriveQuotationImageProviderFromEnvironment(process.env);
-// Phase 2B-1 deliberately provides no Production adapter. A later approved
-// composition step may supply these provider-neutral interfaces without
-// changing Quote item persistence or public presentation call sites.
+const QUOTATION_IMAGE_RENDERER_URL = GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER
+  && !LOCAL_QUOTE_FIXTURE
+  ? normalizeQuotationImageRendererUrl(process.env.QUOTATION_IMAGE_RENDERER_URL)
+  : null;
+const BROWSER_QUOTATION_IMAGE_BRIDGE = QUOTATION_IMAGE_RENDERER_URL
+  ? new BrowserQuotationImageBridge()
+  : null;
 const PILOT_INTERNAL_TOKEN = crypto.randomBytes(32).toString('hex');
 const pilotCreateInFlight = new Map<string, Promise<Record<string, unknown>>>();
 const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown>>>();
@@ -290,7 +309,55 @@ const tableBusinessExpenses = base(process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES 
 const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST || 'Expense Checklist');
 const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
 const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
-if (LOCAL_QUOTE_FIXTURE) LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
+const quoteItemsMutationLock = new InProcessQuoteItemsLock();
+if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER && BROWSER_QUOTATION_IMAGE_BRIDGE) {
+  quotationImageRuntime.coordinator = new QuotationImageCoordinator(
+    BROWSER_QUOTATION_IMAGE_BRIDGE,
+    GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER.storage,
+    {
+      timeoutMs: 60_000,
+      maxAttempts: 2,
+      retryDelay: async () => undefined,
+    },
+  );
+  quotationImageRuntime.jobScheduler = {
+    enqueue(task) {
+      void task().catch(error => console.warn('Quotation-image background job failed:', error));
+    },
+  };
+  const airtableMetadataWriter = new AirtableQuotationImageMetadataWriter(tableQuotes as any, quoteItemsMutationLock);
+  quotationImageRuntime.metadataWriter = {
+    async update(input) {
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await airtableMetadataWriter.update(input);
+          BROWSER_QUOTATION_IMAGE_BRIDGE.markMetadataPersisted(input.metadata);
+          return;
+        } catch (error) {
+          lastError = error;
+          if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 500));
+        }
+      }
+      throw lastError;
+    },
+  };
+}
+if (LOCAL_QUOTE_FIXTURE) {
+  if (LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE) {
+    if (!LOCAL_QUOTE_FIXTURE.browserBridge
+      || !quotationImageRuntime.storage
+      || !quotationImageRuntime.presentationResolver) {
+      throw new Error('Local Google Drive E2E requires the loopback 3D browser transport and Drive provider.');
+    }
+    LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime, {
+      storage: quotationImageRuntime.storage,
+      presentationResolver: quotationImageRuntime.presentationResolver,
+    });
+  } else {
+    LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
+  }
+}
 if (LOCAL_QUOTE_FIXTURE) {
   app.get(`${LOCAL_QUOTE_FIXTURE.assetStore.pathPrefix}:digest.png`, (req: Request, res: Response) => {
     const bytes = LOCAL_QUOTE_FIXTURE.assetStore.resolve(String(req.params.digest || ''));
@@ -299,9 +366,21 @@ if (LOCAL_QUOTE_FIXTURE) {
   });
   const browserBridge = LOCAL_QUOTE_FIXTURE.browserBridge;
   if (browserBridge) {
+    const localFixtureOrigins = new Set([new URL(PUBLIC_BASE_URL).origin]);
+    if (process.env.LKS_LOCAL_PUBLIC_PREVIEW === '1') {
+      const previewOrigin = new URL(String(process.env.LKS_LOCAL_PUBLIC_PREVIEW_ORIGIN || '').trim());
+      if (previewOrigin.protocol !== 'https:'
+        || previewOrigin.pathname !== '/'
+        || previewOrigin.search
+        || previewOrigin.hash
+        || previewOrigin.username
+        || previewOrigin.password) {
+        throw new Error('Local public preview must use one exact HTTPS origin.');
+      }
+      localFixtureOrigins.add(previewOrigin.origin);
+    }
     const requireLocalFixtureOrigin = (req: Request, res: Response, next: () => void) => {
-      const expectedOrigin = new URL(PUBLIC_BASE_URL).origin;
-      if (String(req.get('Origin') || '') !== expectedOrigin) {
+      if (!localFixtureOrigins.has(String(req.get('Origin') || ''))) {
         return res.status(403).type('text/plain').send('Local test origin rejected.');
       }
       return next();
@@ -351,6 +430,11 @@ if (LOCAL_QUOTE_FIXTURE) {
     });
   }
 }
+const QUOTATION_IMAGE_BROWSER_WORKER_PATH = BROWSER_QUOTATION_IMAGE_BRIDGE
+  ? '/quotation-image/browser-bridge'
+  : LOCAL_QUOTE_FIXTURE?.browserBridge
+    ? '/__test-only/quotation-image-bridge.html'
+    : null;
 
 const getAdminCredentials = () => {
   const configuredSessionSecret = String(process.env.SESSION_SECRET || '').trim();
@@ -517,6 +601,57 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
   }
   return next();
 };
+
+if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
+  app.get('/quotation-image/browser-bridge', requireAdmin, (_req: Request, res: Response) => {
+    res.setHeader('Content-Security-Policy', quotationImageBridgeCsp(QUOTATION_IMAGE_RENDERER_URL));
+    res.type('html').send(browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL));
+  });
+  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, (_req: Request, res: Response) => {
+    const job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+    return job ? res.json(job) : res.status(204).end();
+  });
+  app.get('/quotation-image/browser-bridge/status/:requestId', requireAdmin, requireSameOrigin, (req: Request, res: Response) => {
+    const status = BROWSER_QUOTATION_IMAGE_BRIDGE.status(String(req.params.requestId || ''));
+    return status ? res.json(status) : res.status(404).json({ state: 'unknown' });
+  });
+  app.post(
+    '/quotation-image/browser-bridge/complete/:requestId',
+    requireAdmin,
+    requireSameOrigin,
+    express.raw({ type: 'application/octet-stream', limit: '8mb' }),
+    (req: Request, res: Response) => {
+      try {
+        const bytes = Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0);
+        BROWSER_QUOTATION_IMAGE_BRIDGE.complete({
+          requestId: String(req.params.requestId || ''),
+          contract: String(req.get('X-LKS-Contract') || ''),
+          mimeType: String(req.get('X-LKS-Mime-Type') || ''),
+          width: Number(req.get('X-LKS-Width')),
+          height: Number(req.get('X-LKS-Height')),
+          requestIdentity: String(req.get('X-LKS-Request-Identity') || ''),
+          bytes,
+        });
+        return res.status(202).json({ state: 'processing' });
+      } catch (error) {
+        console.warn('Browser quotation-image completion rejected:', error);
+        return res.status(400).type('text/plain').send('Quotation image artifact rejected.');
+      }
+    },
+  );
+  app.post(
+    '/quotation-image/browser-bridge/fail',
+    requireAdmin,
+    requireSameOrigin,
+    (req: Request, res: Response) => {
+      BROWSER_QUOTATION_IMAGE_BRIDGE.fail(
+        String(req.body?.request_id || ''),
+        String(req.body?.error_code || 'quotation-image-browser-transport-render-failed'),
+      );
+      return res.status(204).end();
+    },
+  );
+}
 
 type AirtableMetadataField = {
   name: string;
@@ -3861,6 +3996,9 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
       <div class="filter-tabs" style="margin-bottom:16px;">${tabsHtml}</div>
 
       <div class="dash-grid">${cardsHtml}</div>
+      ${QUOTATION_IMAGE_BROWSER_WORKER_PATH
+        ? `<iframe src="${QUOTATION_IMAGE_BROWSER_WORKER_PATH}" title="3D quotation image worker" style="position:absolute;width:1px;height:1px;border:0;left:-9999px" aria-hidden="true"></iframe>`
+        : ''}
     `;
 
     const extraHead = `<script>
@@ -5419,6 +5557,12 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
               <a href="${customerInfoLink}" target="_blank">${customerInfoLink}</a>
             </p>
           </div>
+          ${preparedQuotationImages.jobs.length > 0 && QUOTATION_IMAGE_BROWSER_WORKER_PATH
+            ? `<div class="section" aria-label="3D quotation image status">
+                <div class="section-title">3D Quotation Image</div>
+                <iframe src="${QUOTATION_IMAGE_BROWSER_WORKER_PATH}" title="3D quotation image status" style="display:block;width:100%;height:48px;border:0;"></iframe>
+              </div>`
+            : ''}
           <div style="margin-top:20px;display:flex;gap:10px;">
             <a href="/quotes" class="btn btn-secondary">Back to Dashboard</a>
             <a href="/quote/create" class="btn btn-outline">Create Another</a>
@@ -6084,20 +6228,35 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
     }
 
-    // D. Update Quote
-    await tableQuotes.update([{
-      id: quote.id,
-      fields: {
-        'Converted Order No': internalOrderNo,
-        'Converted Invoice No': invoiceNumber,
-        'Order Ref': orderRecordId,
-        'Customer': [customerRecordId],
-        'Converted At': new Date().toISOString(),
-        'Invoice Public Token': invoicePublicToken,
-        'Quote Items JSON': JSON.stringify(itemsWithOrderItemIdentity),
-        'Status': 'Mark as Paid',
-      }
-    }]);
+    // D. Update Quote. Serialize this Quote Items JSON write with image metadata
+    // persistence and re-read the latest items so a just-finished image cannot
+    // overwrite order identity (or vice versa).
+    await quoteItemsMutationLock.run(quote.id, async () => {
+      const latestQuote = await tableQuotes.find(quote.id);
+      const latestItems = parseQuoteItems(latestQuote.fields['Quote Items JSON']);
+      const linkedByItemId = new Map(itemsWithOrderItemIdentity
+        .filter(item => isImmutableItemId(item.item_id))
+        .map(item => [String(item.item_id).toLowerCase(), item.order_item_identity]));
+      const mergedItems = latestItems.map((latestItem, index) => {
+        const linkedIdentity = isImmutableItemId(latestItem.item_id)
+          ? linkedByItemId.get(String(latestItem.item_id).toLowerCase())
+          : itemsWithOrderItemIdentity[index]?.order_item_identity;
+        return linkedIdentity ? { ...latestItem, order_item_identity: linkedIdentity } : latestItem;
+      });
+      await tableQuotes.update([{
+        id: quote.id,
+        fields: {
+          'Converted Order No': internalOrderNo,
+          'Converted Invoice No': invoiceNumber,
+          'Order Ref': orderRecordId,
+          'Customer': [customerRecordId],
+          'Converted At': new Date().toISOString(),
+          'Invoice Public Token': invoicePublicToken,
+          'Quote Items JSON': JSON.stringify(mergedItems),
+          'Status': 'Mark as Paid',
+        }
+      }]);
+    });
 
     res.redirect(`/quotes?converted=${invoiceNumber}`);
   } catch (error: any) {

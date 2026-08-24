@@ -70,7 +70,7 @@ This project is ready to be deployed on Railway.
 - **Private-by-default responses**: the complete Quote subdomain sends `X-Robots-Tag: noindex, nofollow, noarchive, nosnippet` and `Cache-Control: private, no-store`.
 - **Secret document links**: Quote, Invoice, Receipt, and Customer Information pages accept only expiring v2 256-bit tokens. Legacy 32-character tokens are rejected.
 - **Quote Creation**: Signed-in internal users can generate quotes with items, discounts, and terms.
-- **Optional quotation images**: The feature is off by default. A private, dedicated-folder Google Drive storage adapter and item-bound, short-lived same-origin image proxy are available only after explicit provider configuration and verified human OAuth authorization; no Drive URL or permission is made public.
+- **Optional quotation images**: The feature is off by default. A private, dedicated-folder Google Drive storage adapter, exact-origin browser renderer bridge and item-bound, short-lived same-origin image proxy are available only after explicit provider configuration and verified human OAuth authorization; no Drive URL or permission is made public. The Quote is written first and image failure remains fail-open.
 - **Public Quote Page**: Customers can view quotes and submit their details to confirm the order.
 - **Invoice Generation**: Convert confirmed quotes into official orders (invoices) in Airtable.
 - **Public Invoice Page**: Customers can view their invoices.
@@ -79,4 +79,4 @@ This project is ready to be deployed on Railway.
 
 ## Google Drive quotation-image storage
 
-See [`docs/quotation-image-google-drive.md`](docs/quotation-image-google-drive.md). This storage component does not provide a renderer and does not enable quotation images by itself. Never use a service account for a personal My Drive: service accounts have no storage quota and cannot own files. Use the least-privilege `drive.file` scope with an explicitly authorized human account instead.
+See [`docs/quotation-image-google-drive.md`](docs/quotation-image-google-drive.md). Storage does not enable quotation images by itself: the configured HTTPS 3D origin must also expose the approved strict-origin browser transport. Never use a service account for a personal My Drive: service accounts have no storage quota and cannot own files. Use the least-privilege `drive.file` scope with an explicitly authorized human account instead.
