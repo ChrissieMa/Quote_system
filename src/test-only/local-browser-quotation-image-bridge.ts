@@ -145,11 +145,17 @@ export class LocalBrowserQuotationImageBridge implements QuotationImageRenderer 
   }
 }
 
-const normalizeLoopbackRendererOrigin = (value: unknown): string => {
+const normalizeTestRendererOrigin = (
+  value: unknown,
+  allowExactHttpsPreview = false,
+): string => {
   const raw = String(value || '').trim();
   if (!raw || raw === '*') throw new Error('Local 3D renderer origin is required.');
   const parsed = new URL(raw);
-  if (parsed.protocol !== 'http:' || !['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname)) {
+  const loopback = parsed.protocol === 'http:'
+    && ['127.0.0.1', 'localhost', '[::1]'].includes(parsed.hostname);
+  const exactHttpsPreview = allowExactHttpsPreview && parsed.protocol === 'https:';
+  if (!loopback && !exactHttpsPreview) {
     throw new Error('Local 3D renderer must use an HTTP loopback origin.');
   }
   if (parsed.pathname !== '/' || parsed.search || parsed.hash || parsed.username || parsed.password) {
@@ -158,8 +164,14 @@ const normalizeLoopbackRendererOrigin = (value: unknown): string => {
   return parsed.origin;
 };
 
-export const localBrowserQuotationImageClientHtml = (rendererOriginValue: unknown): string => {
-  const rendererOrigin = normalizeLoopbackRendererOrigin(rendererOriginValue);
+export const localBrowserQuotationImageClientHtml = (
+  rendererOriginValue: unknown,
+  options: { allowExactHttpsPreview?: boolean } = {},
+): string => {
+  const rendererOrigin = normalizeTestRendererOrigin(
+    rendererOriginValue,
+    options.allowExactHttpsPreview === true,
+  );
   return `<!doctype html>
 <meta charset="utf-8">
 <meta name="robots" content="noindex,nofollow">
@@ -246,7 +258,8 @@ window.addEventListener('message', async event => {
     document.documentElement.dataset.lastCompletedRequest = requestId;
   } catch (error) {
     await fail(requestId, error instanceof Error ? error.message : 'bridge-client-failed');
-    status.textContent = 'client failed ' + requestId;
+    status.textContent = 'client failed ' + requestId + ' ('
+      + (error instanceof Error ? error.message : 'bridge-client-failed') + ')';
   } finally {
     schedulePoll();
   }

@@ -176,13 +176,16 @@ export const createLocalQuoteFixture = (): {
   const idempotencyKey = quotationImageIdempotencyKey(LOCAL_ITEM_ID, request);
   const assetKey = quotationImageAssetKey(idempotencyKey);
   const browserTransportEnabled = process.env.LKS_LOCAL_3D_BROWSER_TRANSPORT === '1';
+  const publicPreviewEnabled = process.env.LKS_LOCAL_PUBLIC_PREVIEW === '1';
   const rendererOrigin = String(process.env.LKS_LOCAL_3D_RENDERER_ORIGIN || '').trim();
   const browserRenderer = browserTransportEnabled
     ? new LocalBrowserQuotationImageBridge()
     : undefined;
   const browserBridge = browserRenderer ? {
     rendererOrigin: new URL(rendererOrigin).origin,
-    clientHtml: localBrowserQuotationImageClientHtml(rendererOrigin),
+    clientHtml: localBrowserQuotationImageClientHtml(rendererOrigin, {
+      allowExactHttpsPreview: publicPreviewEnabled,
+    }),
     renderer: browserRenderer,
   } : undefined;
   let localStorage: LocalTestQuotationImageStorage | undefined;

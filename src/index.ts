@@ -366,9 +366,21 @@ if (LOCAL_QUOTE_FIXTURE) {
   });
   const browserBridge = LOCAL_QUOTE_FIXTURE.browserBridge;
   if (browserBridge) {
+    const localFixtureOrigins = new Set([new URL(PUBLIC_BASE_URL).origin]);
+    if (process.env.LKS_LOCAL_PUBLIC_PREVIEW === '1') {
+      const previewOrigin = new URL(String(process.env.LKS_LOCAL_PUBLIC_PREVIEW_ORIGIN || '').trim());
+      if (previewOrigin.protocol !== 'https:'
+        || previewOrigin.pathname !== '/'
+        || previewOrigin.search
+        || previewOrigin.hash
+        || previewOrigin.username
+        || previewOrigin.password) {
+        throw new Error('Local public preview must use one exact HTTPS origin.');
+      }
+      localFixtureOrigins.add(previewOrigin.origin);
+    }
     const requireLocalFixtureOrigin = (req: Request, res: Response, next: () => void) => {
-      const expectedOrigin = new URL(PUBLIC_BASE_URL).origin;
-      if (String(req.get('Origin') || '') !== expectedOrigin) {
+      if (!localFixtureOrigins.has(String(req.get('Origin') || ''))) {
         return res.status(403).type('text/plain').send('Local test origin rejected.');
       }
       return next();

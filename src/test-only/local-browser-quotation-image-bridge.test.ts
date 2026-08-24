@@ -112,3 +112,17 @@ test('local browser client is loopback-only and never uses wildcard postMessage'
   assert.throws(() => localBrowserQuotationImageClientHtml('https://example.invalid'));
   assert.throws(() => localBrowserQuotationImageClientHtml('*'));
 });
+
+test('local browser client permits one exact HTTPS renderer only for explicit public preview', () => {
+  const rendererOrigin = 'https://renderer-preview.example.test';
+  const html = localBrowserQuotationImageClientHtml(rendererOrigin, {
+    allowExactHttpsPreview: true,
+  });
+  assert.match(html, new RegExp(rendererOrigin));
+  assert.match(html, /postMessage\(job, rendererOrigin\)/);
+  assert.doesNotMatch(html, /postMessage\([^)]*,\s*['"]\*['"]\)/);
+  assert.throws(() => localBrowserQuotationImageClientHtml(
+    'https://renderer-preview.example.test/path',
+    { allowExactHttpsPreview: true },
+  ));
+});
