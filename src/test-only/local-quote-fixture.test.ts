@@ -35,6 +35,18 @@ test('local Quote fixture requires test mode, explicit opt-in and loopback URL',
   ]) {
     withFixtureEnvironment(unsafe, () => assert.equal(localQuoteFixtureEnabled(), false));
   }
+
+  for (const nonLoopback of [
+    'https://fictional-quote-preview.trycloudflare.com',
+    'https://quote.lksdisplaybox.online',
+    'http://192.168.1.20:3011',
+  ]) {
+    withFixtureEnvironment({
+      NODE_ENV: 'test',
+      LKS_LOCAL_QUOTE_FIXTURE: '1',
+      PUBLIC_BASE_URL: nonLoopback,
+    }, () => assert.equal(localQuoteFixtureEnabled(), false));
+  }
 });
 
 test('local original-route fixture keeps every conditional bottom section populated', async () => {
@@ -67,6 +79,7 @@ test('local original-route fixture keeps every conditional bottom section popula
   }));
   const previousPng = process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG;
   const previousJson = process.env.LKS_QUOTATION_IMAGE_FIXTURE_JSON;
+  const previousAutoImage = process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE;
   try {
     process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG = pngPath;
     process.env.LKS_QUOTATION_IMAGE_FIXTURE_JSON = metadataPath;
@@ -94,11 +107,19 @@ test('local original-route fixture keeps every conditional bottom section popula
       },
     }]))[0];
     assert.equal(createdOrder.fields['Final Amount'], createdQuote.fields['Total']);
+
+    process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE = '1';
+    const automaticFixture = createLocalQuoteFixture();
+    const automaticQuote = (await automaticFixture.base('Quotes').select().firstPage())[0];
+    const automaticItems = JSON.parse(String(automaticQuote.fields['Quote Items JSON'])) as Array<Record<string, unknown>>;
+    assert.equal(automaticItems[0].quotation_image, undefined);
   } finally {
     if (previousPng === undefined) delete process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG;
     else process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG = previousPng;
     if (previousJson === undefined) delete process.env.LKS_QUOTATION_IMAGE_FIXTURE_JSON;
     else process.env.LKS_QUOTATION_IMAGE_FIXTURE_JSON = previousJson;
+    if (previousAutoImage === undefined) delete process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE;
+    else process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE = previousAutoImage;
     fs.rmSync(fixtureDir, { recursive: true, force: true });
   }
 });

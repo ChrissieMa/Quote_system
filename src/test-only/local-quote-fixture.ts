@@ -9,7 +9,9 @@ import {
   quotationImageAssetKey,
   quotationImageIdempotencyKey,
   sanitizeQuotationRenderRequest,
+  type QuotationImagePresentationResolver,
   type QuotationImageRuntimeAdapters,
+  type QuotationImageStorage,
 } from '../quotation-image';
 import {
   LocalBrowserQuotationImageBridge,
@@ -154,7 +156,10 @@ const requireFixtureFiles = (): { png: Buffer; request: unknown } => {
 export const createLocalQuoteFixture = (): {
   base: ((tableName: string) => FixtureTable) & { _tables: Map<string, FixtureTable> };
   metadataTables: Array<Record<string, unknown>>;
-  installQuotationImageRuntime(runtime: QuotationImageRuntimeAdapters): void;
+  installQuotationImageRuntime(runtime: QuotationImageRuntimeAdapters, options?: {
+    storage?: QuotationImageStorage;
+    presentationResolver?: QuotationImagePresentationResolver;
+  }): void;
   assetStore: {
     pathPrefix: string;
     resolve(digest: string): Uint8Array | undefined;
@@ -167,6 +172,7 @@ export const createLocalQuoteFixture = (): {
   urls: { create: string; share: string; invoice: string };
 } => {
   const { png, request } = requireFixtureFiles();
+  const automaticQuotationImage = process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE === '1';
   const idempotencyKey = quotationImageIdempotencyKey(LOCAL_ITEM_ID, request);
   const assetKey = quotationImageAssetKey(idempotencyKey);
   const browserTransportEnabled = process.env.LKS_LOCAL_3D_BROWSER_TRANSPORT === '1';
@@ -179,7 +185,7 @@ export const createLocalQuoteFixture = (): {
     clientHtml: localBrowserQuotationImageClientHtml(rendererOrigin),
     renderer: browserRenderer,
   } : undefined;
-  let storage: LocalTestQuotationImageStorage | undefined;
+  let localStorage: LocalTestQuotationImageStorage | undefined;
   const item = {
     item_id: LOCAL_ITEM_ID,
     itemType: 'Display box 展示盒',
@@ -192,14 +198,16 @@ export const createLocalQuoteFixture = (): {
     description: 'TEST-ONLY quotation image acceptance fixture',
     qty: 1,
     amount: 1280,
-    quotation_image: {
-      contract: 'quotation-image-v1',
-      state: 'ready',
-      idempotency_key: idempotencyKey,
-      asset_key: assetKey,
-      attempts: 1,
-      updated_at: '2026-08-22T07:09:36.022Z',
-    },
+    ...(automaticQuotationImage ? {} : {
+      quotation_image: {
+        contract: 'quotation-image-v1',
+        state: 'ready',
+        idempotency_key: idempotencyKey,
+        asset_key: assetKey,
+        attempts: 1,
+        updated_at: '2026-08-22T07:09:36.022Z',
+      },
+    }),
     order_item_identity: { item_id: LOCAL_ITEM_ID, record_id: 'rec_local_order_item_1' },
   };
   const quoteFields: FieldSet = {
@@ -333,15 +341,16 @@ export const createLocalQuoteFixture = (): {
   return {
     base,
     metadataTables,
-    installQuotationImageRuntime(runtime) {
-      storage = new LocalTestQuotationImageStorage();
+    installQuotationImageRuntime(runtime, options = {}) {
+      localStorage = options.storage ? undefined : new LocalTestQuotationImageStorage();
+      const selectedStorage = options.storage || localStorage!;
       const renderer = browserRenderer || new FixtureQuotationImageRenderer({
         bytes: png,
         mimeType: 'image/png',
         width: 1280,
         height: 1280,
       });
-      runtime.coordinator = new QuotationImageCoordinator(renderer, storage, {
+      runtime.coordinator = new QuotationImageCoordinator(renderer, selectedStorage, {
         timeoutMs: browserRenderer ? 30_000 : 2_000,
         maxAttempts: 2,
       });
@@ -362,7 +371,7 @@ export const createLocalQuoteFixture = (): {
           await quoteTable.update([{ id: quote.id, fields: { 'Quote Items JSON': JSON.stringify(updated) } }]);
         },
       };
-      runtime.presentationResolver = {
+      runtime.presentationResolver = options.presentationResolver || {
         async resolve(resolvedAssetKey) {
           const match = resolvedAssetKey.match(/^quotation-images\/([a-f0-9]{64})\.png$/);
           if (!match) throw new Error('Unexpected local fixture asset key.');
@@ -378,7 +387,7 @@ export const createLocalQuoteFixture = (): {
       resolve(digest) {
         if (!/^[a-f0-9]{64}$/.test(digest)) return undefined;
         const resolvedAssetKey = `quotation-images/${digest}.png`;
-        const dynamic = storage?.get(resolvedAssetKey);
+        const dynamic = localStorage?.get(resolvedAssetKey);
         if (dynamic) return dynamic;
         return resolvedAssetKey === assetKey ? new Uint8Array(png) : undefined;
       },

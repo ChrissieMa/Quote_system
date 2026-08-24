@@ -117,10 +117,15 @@ const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}
 const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
 const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
 const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
-const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = LOCAL_QUOTE_FIXTURE || !QUOTATION_IMAGE_ENABLED
+const LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE = Boolean(
+  LOCAL_QUOTE_FIXTURE && process.env.LKS_LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE === '1',
+);
+const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = !QUOTATION_IMAGE_ENABLED
+  || (LOCAL_QUOTE_FIXTURE && !LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE)
   ? null
   : createGoogleDriveQuotationImageProviderFromEnvironment(process.env);
 const QUOTATION_IMAGE_RENDERER_URL = GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER
+  && !LOCAL_QUOTE_FIXTURE
   ? normalizeQuotationImageRendererUrl(process.env.QUOTATION_IMAGE_RENDERER_URL)
   : null;
 const BROWSER_QUOTATION_IMAGE_BRIDGE = QUOTATION_IMAGE_RENDERER_URL
@@ -338,7 +343,21 @@ if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER && BROWSER_QUOTATION_IMAGE_BRIDGE) {
     },
   };
 }
-if (LOCAL_QUOTE_FIXTURE) LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
+if (LOCAL_QUOTE_FIXTURE) {
+  if (LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE) {
+    if (!LOCAL_QUOTE_FIXTURE.browserBridge
+      || !quotationImageRuntime.storage
+      || !quotationImageRuntime.presentationResolver) {
+      throw new Error('Local Google Drive E2E requires the loopback 3D browser transport and Drive provider.');
+    }
+    LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime, {
+      storage: quotationImageRuntime.storage,
+      presentationResolver: quotationImageRuntime.presentationResolver,
+    });
+  } else {
+    LOCAL_QUOTE_FIXTURE.installQuotationImageRuntime(quotationImageRuntime);
+  }
+}
 if (LOCAL_QUOTE_FIXTURE) {
   app.get(`${LOCAL_QUOTE_FIXTURE.assetStore.pathPrefix}:digest.png`, (req: Request, res: Response) => {
     const bytes = LOCAL_QUOTE_FIXTURE.assetStore.resolve(String(req.params.digest || ''));
@@ -399,6 +418,11 @@ if (LOCAL_QUOTE_FIXTURE) {
     });
   }
 }
+const QUOTATION_IMAGE_BROWSER_WORKER_PATH = BROWSER_QUOTATION_IMAGE_BRIDGE
+  ? '/quotation-image/browser-bridge'
+  : LOCAL_QUOTE_FIXTURE?.browserBridge
+    ? '/__test-only/quotation-image-bridge.html'
+    : null;
 
 const getAdminCredentials = () => {
   const configuredSessionSecret = String(process.env.SESSION_SECRET || '').trim();
@@ -3960,8 +3984,8 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
       <div class="filter-tabs" style="margin-bottom:16px;">${tabsHtml}</div>
 
       <div class="dash-grid">${cardsHtml}</div>
-      ${BROWSER_QUOTATION_IMAGE_BRIDGE
-        ? '<iframe src="/quotation-image/browser-bridge" title="3D quotation image worker" style="position:absolute;width:1px;height:1px;border:0;left:-9999px" aria-hidden="true"></iframe>'
+      ${QUOTATION_IMAGE_BROWSER_WORKER_PATH
+        ? `<iframe src="${QUOTATION_IMAGE_BROWSER_WORKER_PATH}" title="3D quotation image worker" style="position:absolute;width:1px;height:1px;border:0;left:-9999px" aria-hidden="true"></iframe>`
         : ''}
     `;
 
@@ -5521,10 +5545,10 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
               <a href="${customerInfoLink}" target="_blank">${customerInfoLink}</a>
             </p>
           </div>
-          ${preparedQuotationImages.jobs.length > 0 && BROWSER_QUOTATION_IMAGE_BRIDGE
+          ${preparedQuotationImages.jobs.length > 0 && QUOTATION_IMAGE_BROWSER_WORKER_PATH
             ? `<div class="section" aria-label="3D quotation image status">
                 <div class="section-title">3D Quotation Image</div>
-                <iframe src="/quotation-image/browser-bridge" title="3D quotation image status" style="display:block;width:100%;height:48px;border:0;"></iframe>
+                <iframe src="${QUOTATION_IMAGE_BROWSER_WORKER_PATH}" title="3D quotation image status" style="display:block;width:100%;height:48px;border:0;"></iframe>
               </div>`
             : ''}
           <div style="margin-top:20px;display:flex;gap:10px;">

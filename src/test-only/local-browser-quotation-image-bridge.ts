@@ -5,6 +5,7 @@ import {
   type RenderedQuotationImage,
   type RenderRequestV1,
 } from '../quotation-image';
+import { quotationRenderRequestIdentity } from '../browser-quotation-image';
 
 const REQUEST_ID_PATTERN = /^quote-[a-f0-9]{64}$/;
 const REQUEST_IDENTITY_PATTERN = /^3d-render-v1:sha256:[a-f0-9]{64}$/;
@@ -98,6 +99,7 @@ export class LocalBrowserQuotationImageBridge implements QuotationImageRenderer 
       || input.width !== 1280
       || input.height !== 1280
       || !REQUEST_IDENTITY_PATTERN.test(input.requestIdentity)
+      || input.requestIdentity !== quotationRenderRequestIdentity(pending.request)
       || input.bytes.length < PNG_SIGNATURE.length
       || !Buffer.from(input.bytes.subarray(0, PNG_SIGNATURE.length)).equals(PNG_SIGNATURE)) {
       throw new Error('Local browser bridge artifact is invalid.');
