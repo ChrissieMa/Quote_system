@@ -715,7 +715,8 @@ test('real create, public Quote and invoice routes use the shared integration co
   assert.match(source, /scheduleQuotationImageJobsAfterWrite\(/);
   assert.match(source, /'Quote Items JSON': itemsJson/);
   assert.match(source, /linkQuoteItemsToOrderItemRecords\(items, createdOrderItems\)/);
-  assert.match(source, /'Quote Items JSON': JSON\.stringify\(itemsWithOrderItemIdentity\)/);
+  assert.match(source, /quoteItemsMutationLock\.run\(quote\.id,/);
+  assert.match(source, /'Quote Items JSON': JSON\.stringify\(mergedItems\)/);
   assert.equal((source.match(/items = await getConfirmedOrderItems\(/g) || []).length, 2);
   assert.equal((source.match(/await resolveQuotationImagePresentations\(items,/g) || []).length, 2);
   assert.equal((source.match(/renderOptionalQuotationImageRow\(quotationImagePresentations\.get/g) || []).length, 2);

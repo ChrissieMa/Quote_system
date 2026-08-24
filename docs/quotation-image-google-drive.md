@@ -1,6 +1,6 @@
 # Private Google Drive quotation-image storage
 
-This optional provider stores quotation PNGs as private files in one explicitly authorized human user's My Drive. It is development-ready but remains disabled by default and has not been connected to a real Google account.
+This optional provider stores quotation PNGs as private files in one explicitly authorized human user's My Drive. It remains disabled by default.
 
 ## Authorization model
 
@@ -24,6 +24,10 @@ It must also configure, as environment values rather than file metadata:
 - `GOOGLE_DRIVE_QUOTATION_IMAGE_FOLDER_ID` — a dedicated, private folder owned by that account
 
 Configuration also requires `QUOTATION_IMAGE_STORAGE_PROVIDER=google_drive`. `QUOTATION_IMAGE_ENABLED` remains `false` until the complete renderer, storage and approval gates are separately satisfied.
+
+The browser-mediated renderer additionally requires `QUOTATION_IMAGE_RENDERER_URL` as one exact HTTPS configurator URL without a query, fragment, credentials or wildcard. Its origin is derived and pinned for every browser message. After the authoritative Quote write succeeds, the owner confirmation page loads that URL in a hidden iframe, sends only the server-built sanitized `3d-render-v1` request, and returns the 1280 x 1280 PNG to an authenticated same-origin endpoint. The metadata writer rereads the latest Quote Items JSON and replaces only the exact item's `quotation_image` object; it does not rewrite the item description, prices, Notes, Terms or any other Quote field.
+
+The owner Quote dashboard also hosts the same hidden renderer so a browser-created or internal Quote can be consumed while an authenticated owner page is open. Jobs and locks are in-process and the current Railway service must remain at one replica; this has been verified for the initial rollout. Scaling to multiple replicas requires a durable shared queue and compare-and-set storage before this transport may remain enabled. Closing every owner page or restarting the service can delay or fail a pending image, but never blocks or changes the Quote.
 
 ## Privacy and identity
 
@@ -49,4 +53,4 @@ Drive calls have bounded timeout and retry handling for temporary errors. Storag
 - <https://developers.google.com/workspace/drive/api/guides/limits>
 - <https://developers.google.com/workspace/workspace-api-user-data-developer-policy>
 
-When `QUOTATION_IMAGE_ENABLED=false`, the application does not construct the Google Drive provider and does not register its proxy route. This provider does not choose or implement the Production 3D renderer transport. It must not be enabled until that separate adapter, credentials, CI and Production approval are complete.
+When `QUOTATION_IMAGE_ENABLED=false`, the application does not construct the Google Drive provider, renderer bridge or proxy route. Enabling fails closed unless Drive and an exact HTTPS renderer origin are configured. The 3D host must independently enable its strict-origin transport and allow the Quote site to frame it; those deployment and browser-header checks remain separate gates.
