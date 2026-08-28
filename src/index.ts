@@ -97,6 +97,8 @@ import {
 } from './airtable-quotation-image-metadata';
 import {
   appendLinkedRecordId,
+  firstTouchValue,
+  resolveInquiryCycleInactivityDays,
   selectCanonicalInquiry,
 } from './inquiry-attribution';
 
@@ -961,24 +963,80 @@ const getLinkedRecordId = (value: unknown): string | null => {
   return null;
 };
 
-const findCanonicalInquiryForQuote = async (phone: unknown, customerId = ''): Promise<any | null> => {
+const findCanonicalInquiryForQuote = async (
+  phone: unknown,
+  customerId: string,
+  quoteDate: string,
+  preferredInquiryId = '',
+): Promise<any | null> => {
   const normalized = normalizePhone(phone);
   if (!normalized && !customerId) return null;
-  const inquiries = await tableInquiries.select({
-    fields: [
-      'Inquiry Date', 'Phone', 'Customer', 'Channel', 'Campaign / Source Detail',
-      'Monthly Performance', 'Inquiry Status', 'Quote', 'Quotes',
-    ],
-  }).all();
+  const [inquiries, quotes] = await Promise.all([
+    tableInquiries.select({
+      fields: [
+        'Inquiry Date', 'Phone', 'Customer', 'Channel', 'Campaign / Source Detail',
+        'Monthly Performance', 'Inquiry Status', 'Quote', 'Quotes', 'Order',
+      ],
+    }).all(),
+    tableQuotes.select({ fields: ['Quote Date', 'Inquiry', 'Order Ref'] }).all(),
+  ]);
+  const quotesById = new Map(quotes.map(quote => [quote.id, quote]));
+  const quoteActivityByInquiry = new Map<string, { dates: string[]; orderIds: string[] }>();
+  for (const quote of quotes) {
+    for (const inquiryId of linkedRecordIds(quote.fields['Inquiry'])) {
+      const activity = quoteActivityByInquiry.get(inquiryId) || { dates: [], orderIds: [] };
+      const quoteDateValue = String(quote.fields['Quote Date'] || '').trim();
+      if (quoteDateValue) activity.dates.push(quoteDateValue);
+      const orderId = getAirtableRecordId(quote.fields['Order Ref']);
+      if (orderId) activity.orderIds.push(orderId);
+      quoteActivityByInquiry.set(inquiryId, activity);
+    }
+  }
   const selected = selectCanonicalInquiry(
-    inquiries.map(record => ({
-      id: record.id,
-      inquiryDate: String(record.fields['Inquiry Date'] || ''),
-      phone: normalizePhone(record.fields['Phone']),
-      customerIds: linkedRecordIds(record.fields['Customer']),
-    })),
+    inquiries.map(record => {
+      const linkedQuoteIds = Array.from(new Set([
+        ...linkedRecordIds(record.fields['Quote']),
+        ...linkedRecordIds(record.fields['Quotes']),
+      ]));
+      const linkedQuoteDates = linkedQuoteIds
+        .map(quoteId => quotesById.get(quoteId))
+        .filter(Boolean)
+        .map(quote => String(quote?.fields['Quote Date'] || '').trim())
+        .filter(Boolean);
+      const linkedQuoteOrderIds = linkedQuoteIds
+        .map(quoteId => quotesById.get(quoteId))
+        .filter(Boolean)
+        .flatMap(quote => {
+          const orderId = getAirtableRecordId(quote?.fields['Order Ref']);
+          return orderId ? [orderId] : [];
+        });
+      const activity = quoteActivityByInquiry.get(record.id) || { dates: [], orderIds: [] };
+      const inquiryDate = String(record.fields['Inquiry Date'] || '');
+      return {
+        id: record.id,
+        inquiryDate,
+        createdTime: String((record as any)?._rawJson?.createdTime || ''),
+        lastActivityDate: [inquiryDate, ...linkedQuoteDates, ...activity.dates]
+          .filter(Boolean)
+          .sort()
+          .at(-1) || inquiryDate,
+        phone: normalizePhone(record.fields['Phone']),
+        customerIds: linkedRecordIds(record.fields['Customer']),
+        status: String(record.fields['Inquiry Status'] || ''),
+        orderIds: Array.from(new Set([
+          ...linkedRecordIds(record.fields['Order']),
+          ...linkedQuoteOrderIds,
+          ...activity.orderIds,
+        ])),
+      };
+    }),
     normalized,
     customerId,
+    {
+      asOfDate: quoteDate,
+      inactivityDays: resolveInquiryCycleInactivityDays(process.env.INQUIRY_CYCLE_INACTIVITY_DAYS),
+      preferredInquiryId,
+    },
   );
   return selected ? inquiries.find(record => record.id === selected.id) || null : null;
 };
@@ -3145,6 +3203,7 @@ type PhoneMatch = {
   title: string;
   detail: string;
   url?: string;
+  blocksNewInquiry?: boolean;
 };
 
 const phoneValueMatches = (value: unknown, normalizedPhone: string): boolean => {
@@ -3278,7 +3337,7 @@ const renderQuickInquiryForm = (
     `<option value="${escapeHtml(option)}"${option === selected ? ' selected' : ''}>${escapeHtml(option)}</option>`
   ).join('');
   const displayedChannels = Array.from(new Set([...channelOptions, 'Threads Organic']));
-  const hasBlockingMatch = matches.some(match => match.type !== 'Customer');
+  const hasBlockingMatch = matches.some(match => match.blocksNewInquiry === true);
   return `
     <div class="doc-card">
       ${docHeader('快速新增查詢', 'Quick Inquiry')}
@@ -3744,8 +3803,15 @@ app.get('/api/inquiries/check-phone', requireAdmin, async (req: Request, res: Re
     const phone = String(req.query.phone || '').trim();
     const normalized = normalizePhone(phone);
     if (!normalized) return res.json({ normalized: '', matches: [], blocking: false });
-    const matches = await findPhoneMatches(phone);
-    return res.json({ normalized, matches, blocking: matches.some(match => match.type !== 'Customer') });
+    const [matches, activeInquiry] = await Promise.all([
+      findPhoneMatches(phone),
+      findCanonicalInquiryForQuote(phone, '', getHongKongDate()),
+    ]);
+    const cycleAwareMatches = matches.map(match => ({
+      ...match,
+      blocksNewInquiry: match.type === 'Inquiry' && match.id === activeInquiry?.id,
+    }));
+    return res.json({ normalized, matches: cycleAwareMatches, blocking: Boolean(activeInquiry) });
   } catch (error: any) {
     console.error('Inquiry phone check failed:', error);
     return res.status(500).json({ error: error.message || 'Phone check failed' });
@@ -3817,10 +3883,17 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
       return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請選擇查詢來源。', channels, products)));
     }
 
-    const matches = await findPhoneMatches(values.phone);
-    const blockingMatches = matches.filter(match => match.type !== 'Customer');
+    const [matches, activeInquiry] = await Promise.all([
+      findPhoneMatches(values.phone),
+      findCanonicalInquiryForQuote(values.phone, '', getHongKongDate()),
+    ]);
+    const cycleAwareMatches = matches.map(match => ({
+      ...match,
+      blocksNewInquiry: match.type === 'Inquiry' && match.id === activeInquiry?.id,
+    }));
+    const blockingMatches = cycleAwareMatches.filter(match => match.blocksNewInquiry);
     if (blockingMatches.length > 0 && String(req.body.forceNew || '') !== '1') {
-      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, matches, '', channels, products)));
+      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, cycleAwareMatches, '', channels, products)));
     }
 
     const existingCustomer = await findCustomerByPhone(values.phone);
@@ -5475,14 +5548,19 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     const canonicalInquiry = await findCanonicalInquiryForQuote(
       quoteCustomerPhone || b.phone || selectedInquiryFields['Phone'],
       selectedCustomerId || getLinkedRecordId(selectedInquiryFields['Customer']) || '',
-    ) || selectedInquiry;
-    const canonicalInquiryRecordId = canonicalInquiry?.id || inquiryRecordId;
+      quoteDate,
+      inquiryRecordId,
+    );
+    const canonicalInquiryRecordId = canonicalInquiry?.id || '';
     const canonicalInquiryFields: FieldSet = canonicalInquiry?.fields || {};
-    const attributionSourceChannel = String(canonicalInquiryFields['Channel'] || '').trim()
-      ? mapInquiryChannelToQuoteChannel(String(canonicalInquiryFields['Channel']).trim())
-      : quoteSourceChannel;
-    const attributionCampaignSourceDetail = String(canonicalInquiryFields['Campaign / Source Detail'] || '').trim()
-      || campaignSourceDetail;
+    const canonicalChannel = firstTouchValue(canonicalInquiryFields['Channel'], '');
+    const attributionSourceChannel = canonicalChannel
+      ? mapInquiryChannelToQuoteChannel(canonicalChannel)
+      : firstTouchValue('', quoteSourceChannel);
+    const attributionCampaignSourceDetail = firstTouchValue(
+      canonicalInquiryFields['Campaign / Source Detail'],
+      campaignSourceDetail,
+    );
 
     const quoteFields: FieldSet = {
         'Quote Number': quoteNumber,
@@ -5578,7 +5656,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
             : {}),
         };
         await tableInquiries.update([{ id: canonicalInquiryRecordId, fields: inquiryUpdateFields }]);
-      } else if (quoteSourceChannel || performanceMonthRecordId || campaignSourceDetail) {
+      } else {
         const firstItem = items[0] || {};
         const autoInquiryFields: FieldSet = {
           'Inquiry Date': quoteDate,
