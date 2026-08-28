@@ -104,19 +104,27 @@ test('login limiter blocks repeated failures and clears on success', () => {
   assert.equal(limiter.check('ip', 1004).allowed, true);
 });
 
-test('v2 public tokens use 256 random bits and reject legacy, wrong, future, and expired formats', () => {
+test('new public tokens are shorter with 128 random bits and reject wrong, future, and expired formats', () => {
   const now = 1_800_000_000_000;
   const token = generatePublicToken(now);
   assert.equal(isValidPublicToken(token, now + 1000), true);
   assert.equal(isValidPublicToken('7c7ecbe0bebc808a6d9780e94c3ae4a0', now), false);
-  assert.equal(isValidPublicToken('v2_invalidtoken', now), false);
+  assert.equal(isValidPublicToken('v3_invalidtoken', now), false);
   assert.equal(isValidPublicToken(generatePublicToken(now + 10 * 60 * 1000), now), false);
   assert.equal(isValidPublicToken(token, now + 2000, 1000), false);
-  const randomPart = token.match(/^v2_[0-9a-z]+_(.+)$/)?.[1] || '';
-  assert.equal(Buffer.from(randomPart, 'base64url').length, 32);
+  const randomPart = token.match(/^v3_[0-9a-z]+_(.+)$/)?.[1] || '';
+  assert.equal(Buffer.from(randomPart, 'base64url').length, 16);
+  assert.ok(token.length < 40);
 });
 
-test('deterministic v2 tokens remain stable for internal idempotent quote creation', () => {
+test('existing v2 links remain valid during the v3 migration', () => {
+  const now = 1_800_000_000_000;
+  const issuedAtSeconds = Math.floor(now / 1000).toString(36);
+  const oldToken = `v2_${issuedAtSeconds}_${crypto.randomBytes(32).toString('base64url')}`;
+  assert.equal(isValidPublicToken(oldToken, now + 1000), true);
+});
+
+test('deterministic v3 tokens remain stable for internal idempotent quote creation', () => {
   const issuedAt = 1_800_000_000_000;
   const digest = crypto.createHash('sha256').update('same-confirmation').digest();
   const first = formatDeterministicPublicToken(issuedAt, digest);

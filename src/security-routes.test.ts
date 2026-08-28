@@ -38,9 +38,21 @@ test('service APIs remain bearer-protected and confirmed', () => {
   }
 });
 
-test('public document routes validate v2 tokens before Airtable lookup', () => {
+test('public document routes validate v2/v3 tokens before Airtable lookup', () => {
   assert.equal((source.match(/if \(!acceptedPublicToken\(token\)\) return publicDocumentNotFound\(res\);/g) || []).length, 7);
   assert.ok(!source.includes('/^[a-f0-9]{32}$/'));
+});
+
+test('short customer paths are native aliases and long paths remain backward compatible', () => {
+  for (const route of [
+    "app.get(['/quote/:token', '/q/:token']",
+    "app.get(['/invoice/:token', '/i/:token']",
+    "app.get(['/receipt/:token', '/r/:token']",
+    "app.get(['/quote/:token/customer-info', '/q/:token/info']",
+    "app.post(['/quote/:token/customer-info', '/q/:token/info']",
+  ]) assert.ok(source.includes(route), `missing short path alias: ${route}`);
+  assert.ok(source.includes('`${PUBLIC_BASE_URL}${publicQuotePath(publicToken)}`'));
+  assert.ok(source.includes('`${PUBLIC_BASE_URL}${publicCustomerInfoPath(publicToken)}`'));
 });
 
 test('server-wide privacy headers, HTML noindex, crawlable robots, and dead sitemaps are present', () => {
