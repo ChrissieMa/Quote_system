@@ -19,6 +19,7 @@ import {
   prepareNewQuoteItemsWithQuotationImages,
   quotationImageEnabled,
   quotationImageIdempotencyKey,
+  quotationImageDisclaimer,
   quotationImagePresentation,
   resolveQuotationImagePresentation,
   resolveQuotationImagePresentations,
@@ -264,11 +265,9 @@ test('unsupported accessories and ambiguous combinations skip scheduling without
     { '右板圖片': 1 },
     { '底板圖片': 1 },
     { '頂板圖片': 1 },
-    { '背板圖片': 1 },
     { '未來配件': 1 },
     { '背燈': 2 },
     { '趟門': 1, '磁石門': 1 },
-    { '黑底板': 1, '透明底板': 1 },
     { '獨立燈板 - 上燈': 1, '上下燈': 1 },
   ];
   const runtime = {
@@ -286,6 +285,67 @@ test('unsupported accessories and ambiguous combinations skip scheduling without
     assert.equal(prepared.jobs.length, 0);
     assert.equal(prepared.items[0].quotation_image, undefined);
   }
+});
+
+test('back-panel artwork and clear-plus-black base use an accurate render-only subset', () => {
+  const item = {
+    ...storedQuoteItem(),
+    accessories: ['趟門', '透明底板', '黑底板', '獨立燈板 - 上燈', '背板圖片'],
+    accessoryQty: {
+      '趟門': 1,
+      '透明底板': 1,
+      '黑底板': 1,
+      '獨立燈板 - 上燈': 1,
+      '背板圖片': 1,
+    },
+  };
+  const original = JSON.parse(JSON.stringify(item));
+  const request = buildQuotationRenderRequestFromQuoteItem(item);
+  assert.ok(request);
+  assert.deepEqual(request?.accessories, [
+    { accessory_type: 'door_sliding', quantity: 1 },
+    { accessory_type: 'bottom_base_black', quantity: 1 },
+    { accessory_type: 'light_board_top_independent', quantity: 1 },
+    { accessory_type: 'light_top_outer_ring', quantity: 1, colour: 'white' },
+    { accessory_type: 'light_top_middle_ring', quantity: 1, colour: 'white' },
+    { accessory_type: 'light_top_inner_ring', quantity: 1, colour: 'white' },
+  ]);
+  assert.equal(request?.accessories.some(accessory => accessory.accessory_type === 'bottom_base_clear'), false);
+  assert.equal(request?.accessories.some(accessory => accessory.accessory_type.startsWith('background_')), false);
+  assert.equal(JSON.stringify(request).includes('asset'), false);
+  assert.deepEqual(item, original);
+
+  const runtime = {
+    coordinator: new QuotationImageCoordinator(
+      new FixtureQuotationImageRenderer(renderedFixture()),
+      new LocalTestQuotationImageStorage(),
+    ),
+    jobScheduler: new InMemoryQuotationImageJobScheduler(),
+    metadataWriter: { async update() {} },
+  };
+  const prepared = prepareNewQuoteItemsForQuotationImageJobs([item], {
+    enabled: true,
+    runtime,
+    now: '2026-08-29T00:00:00.000Z',
+  });
+  assert.equal(prepared.jobs.length, 1);
+  assert.equal(prepared.items[0].quotation_image?.state, 'pending');
+  assert.deepEqual(prepared.items[0].accessories, original.accessories);
+  assert.equal(prepared.items[0].amount, original.amount);
+  assert.equal(
+    prepared.items[0].quotation_image?.idempotency_key,
+    quotationImageIdempotencyKey(ITEM_ID, request),
+  );
+  assert.equal(
+    quotationImageDisclaimer(item, false, true),
+    '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。',
+  );
+  assert.equal(
+    quotationImageDisclaimer(item, true, true),
+    'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.',
+  );
+  assert.equal(quotationImageDisclaimer(item, false, false), '');
+  assert.equal(quotationImageDisclaimer(storedQuoteItem(), false, true), '');
 });
 
 test('Quote item type mapping matches 3D applicator canonical fixtures and rejects unsupported types', () => {
@@ -719,7 +779,8 @@ test('real create, public Quote and invoice routes use the shared integration co
   assert.match(source, /'Quote Items JSON': JSON\.stringify\(mergedItems\)/);
   assert.equal((source.match(/items = await getConfirmedOrderItems\(/g) || []).length, 2);
   assert.equal((source.match(/await resolveQuotationImagePresentations\(items,/g) || []).length, 2);
-  assert.equal((source.match(/renderOptionalQuotationImageRow\(quotationImagePresentations\.get/g) || []).length, 2);
+  assert.equal((source.match(/return renderOptionalQuotationImageRow\(/g) || []).length, 2);
+  assert.equal((source.match(/quotationImageDisclaimer\(item, isEnglish, Boolean\(presentation\)\)/g) || []).length, 2);
   assert.match(source, /LOCAL_QUOTE_FIXTURE\?\.browserBridge\s*\? '\/__test-only\/quotation-image-bridge\.html'/);
   assert.equal((source.match(/QUOTATION_IMAGE_BROWSER_WORKER_PATH/g) || []).length, 5);
 });

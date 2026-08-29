@@ -74,6 +74,7 @@ import {
   quotationImageEnabled,
   quotationImageRuntime,
   resolveQuotationImagePresentations,
+  quotationImageDisclaimer,
   scheduleQuotationImageJobsAfterWrite,
   type QuotationImagePresentation,
 } from './quotation-image';
@@ -843,9 +844,14 @@ const renderOptionalQuotationImage = (
 const renderOptionalQuotationImageRow = (
   presentation: QuotationImagePresentation | undefined,
   columnCount: number,
+  disclaimer = '',
 ): string => {
   const content = renderOptionalQuotationImage(presentation);
-  return content ? `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}</td></tr>` : '';
+  if (!content) return '';
+  const caption = disclaimer
+    ? `<div class="quotation-image-caption">${escapeHtml(disclaimer)}</div>`
+    : '';
+  return `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}${caption}</td></tr>`;
 };
 
 const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
@@ -2915,6 +2921,7 @@ const SHARED_CSS = `
   .items-table .quotation-image-row td { background:#fff !important; text-align:center; }
   .quotation-image { display:flex; justify-content:center; padding:8px 0; }
   .quotation-image img { display:block; width:min(100%, 420px); height:auto; aspect-ratio:1; object-fit:contain; }
+  .quotation-image-caption { margin:0 auto 8px; max-width:520px; color:#6b7280; font-size:12px; line-height:1.5; text-align:center; }
   .mini-label { font-size: 11px; font-weight: 700; color: #d8833b; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
   .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
   .offer-preview { background:#fffaf6; border:1px solid #f0e0d0; border-radius:6px; padding:12px; font-size:13px; }
@@ -5858,7 +5865,14 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
-          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), itemColumnCount)}`;
+          </tr>${(() => {
+            const presentation = quotationImagePresentations.get(String(item.item_id || ''));
+            return renderOptionalQuotationImageRow(
+              presentation,
+              itemColumnCount,
+              quotationImageDisclaimer(item, isEnglish, Boolean(presentation)),
+            );
+          })()}`;
         }).join('');
 
     // Contact info block (always shown from Quotes table)
@@ -6518,7 +6532,14 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>
-          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), invoiceItemColumnCount)}`;
+          </tr>${(() => {
+            const presentation = quotationImagePresentations.get(String(item.item_id || ''));
+            return renderOptionalQuotationImageRow(
+              presentation,
+              invoiceItemColumnCount,
+              quotationImageDisclaimer(item, isEnglish, Boolean(presentation)),
+            );
+          })()}`;
         }).join('');
 
     const subtotal = (of['Product Amount'] as number) || 0;

@@ -459,18 +459,50 @@ const parseStoredAccessories = (item: QuoteItemWithQuotationImage): StoredAccess
 const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['accessories'] | null => {
   const stored = parseStoredAccessories(item);
   if (!stored) return null;
-  if (stored.some(entry => !entry.name || entry.quantity !== 1 || !QUOTE_TO_3D_ACCESSORIES[entry.name])) {
+  if (stored.some(entry => !entry.name || entry.quantity !== 1)) {
     return null;
   }
   if (new Set(stored.map(entry => entry.name)).size !== stored.length) return null;
 
-  const canonical = stored.flatMap(entry => QUOTE_TO_3D_ACCESSORIES[entry.name].map(accessory => ({ ...accessory })));
+  // Back-panel artwork is authoritative Quote data, but the browser renderer
+  // cannot reproduce it without the approved asset provider. Omit only this
+  // exact provider-dependent visual from the render request; do not weaken
+  // the unknown-accessory or quantity checks below.
+  const renderOnlyOmissions = new Set(['背板圖片']);
+  if (stored.some(entry => !QUOTE_TO_3D_ACCESSORIES[entry.name] && !renderOnlyOmissions.has(entry.name))) {
+    return null;
+  }
+
+  let canonical = stored
+    .filter(entry => !renderOnlyOmissions.has(entry.name))
+    .flatMap(entry => QUOTE_TO_3D_ACCESSORIES[entry.name].map(accessory => ({ ...accessory })));
+
+  // Quote may preserve both the clear construction panel and a paid black
+  // bottom-base selection. The 3D applicator has one visual base slot, so the
+  // black base is the accurate render-only override. Authoritative Quote
+  // accessories and pricing remain untouched.
+  if (stored.some(entry => entry.name === '黑底板') && stored.some(entry => entry.name === '透明底板')) {
+    canonical = canonical.filter(entry => entry.accessory_type !== 'bottom_base_clear');
+  }
   const categoryCount = (prefix: string): number => canonical.filter(entry => entry.accessory_type.startsWith(prefix)).length;
   if (categoryCount('door_') > 1 || categoryCount('bottom_base_') > 1 || categoryCount('light_board_') > 1) {
     return null;
   }
   if (new Set(canonical.map(entry => entry.accessory_type)).size !== canonical.length) return null;
   return canonical;
+};
+
+export const quotationImageDisclaimer = (
+  item: QuoteItemWithQuotationImage,
+  isEnglish: boolean,
+  hasPresentation: boolean,
+): string => {
+  if (!hasPresentation) return '';
+  const stored = parseStoredAccessories(item);
+  if (!stored?.some(entry => entry.name === '背板圖片' && entry.quantity === 1)) return '';
+  return isEnglish
+    ? 'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.'
+    : '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。';
 };
 
 const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1['cabinet_layers'] => {
