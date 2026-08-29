@@ -166,20 +166,19 @@ export class LoginRateLimiter {
   }
 }
 
-const publicTokenPatterns = [
+const shortPublicTokenPattern = /^[A-Za-z0-9_-]{12}$/;
+const timestampedPublicTokenPatterns = [
+  // Existing customer links remain valid after the native 12-character alias launches.
   { pattern: /^v3_([0-9a-z]{6,12})_([A-Za-z0-9_-]{22})$/, randomBytes: 16 },
-  // Existing customer links remain valid after the shorter v3 format launches.
   { pattern: /^v2_([0-9a-z]{6,12})_([A-Za-z0-9_-]{43})$/, randomBytes: 32 },
 ] as const;
 
-export const generatePublicToken = (now = Date.now()): string => {
-  const issuedAtSeconds = Math.floor(now / 1000).toString(36);
-  return `v3_${issuedAtSeconds}_${crypto.randomBytes(16).toString('base64url')}`;
-};
+export const generatePublicToken = (_now = Date.now()): string =>
+  crypto.randomBytes(9).toString('base64url');
 
 export const formatDeterministicPublicToken = (issuedAt: number, digest: Buffer): string => {
-  if (!Number.isFinite(issuedAt) || digest.length < 16) throw new Error('Unable to issue public token.');
-  return `v3_${Math.floor(issuedAt / 1000).toString(36)}_${digest.subarray(0, 16).toString('base64url')}`;
+  if (!Number.isFinite(issuedAt) || digest.length < 9) throw new Error('Unable to issue public token.');
+  return digest.subarray(0, 9).toString('base64url');
 };
 
 export const publicTokenTtlMs = (rawDays: unknown): number => {
@@ -192,7 +191,14 @@ export const publicTokenTtlMs = (rawDays: unknown): number => {
 
 export const isValidPublicToken = (token: unknown, now = Date.now(), ttlMs = publicTokenTtlMs(undefined)): boolean => {
   const raw = String(token || '');
-  const tokenFormat = publicTokenPatterns.find(({ pattern }) => pattern.test(raw));
+  if (shortPublicTokenPattern.test(raw)) {
+    try {
+      return Buffer.from(raw, 'base64url').length === 9;
+    } catch {
+      return false;
+    }
+  }
+  const tokenFormat = timestampedPublicTokenPatterns.find(({ pattern }) => pattern.test(raw));
   if (!tokenFormat) return false;
   const match = raw.match(tokenFormat.pattern);
   if (!match) return false;

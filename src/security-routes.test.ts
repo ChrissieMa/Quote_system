@@ -38,7 +38,7 @@ test('service APIs remain bearer-protected and confirmed', () => {
   }
 });
 
-test('public document routes validate v2/v3 tokens before Airtable lookup', () => {
+test('public document routes validate native aliases and legacy tokens before Airtable lookup', () => {
   assert.equal((source.match(/if \(!acceptedPublicToken\(token\)\) return publicDocumentNotFound\(res\);/g) || []).length, 7);
   assert.ok(!source.includes('/^[a-f0-9]{32}$/'));
 });
