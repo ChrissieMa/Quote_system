@@ -74,6 +74,7 @@ import {
   quotationImageEnabled,
   quotationImageRuntime,
   resolveQuotationImagePresentations,
+  quotationImageDisclaimer,
   scheduleQuotationImageJobsAfterWrite,
   type QuotationImagePresentation,
 } from './quotation-image';
@@ -95,6 +96,12 @@ import {
   AirtableQuotationImageMetadataWriter,
   InProcessQuoteItemsLock,
 } from './airtable-quotation-image-metadata';
+import {
+  appendLinkedRecordId,
+  firstTouchValue,
+  resolveInquiryCycleInactivityDays,
+  selectCanonicalInquiry,
+} from './inquiry-attribution';
 
 dotenv.config();
 
@@ -837,9 +844,14 @@ const renderOptionalQuotationImage = (
 const renderOptionalQuotationImageRow = (
   presentation: QuotationImagePresentation | undefined,
   columnCount: number,
+  disclaimer = '',
 ): string => {
   const content = renderOptionalQuotationImage(presentation);
-  return content ? `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}</td></tr>` : '';
+  if (!content) return '';
+  const caption = disclaimer
+    ? `<div class="quotation-image-caption">${escapeHtml(disclaimer)}</div>`
+    : '';
+  return `<tr class="quotation-image-row"><td colspan="${columnCount}">${content}${caption}</td></tr>`;
 };
 
 const itemInternalDimensionLines = (item: any): { l: string[]; d: string[]; h: string[] } => {
@@ -955,6 +967,84 @@ const getLinkedRecordId = (value: unknown): string | null => {
   if (typeof first === 'string') return first;
   if (first && typeof first.id === 'string') return first.id;
   return null;
+};
+
+const findCanonicalInquiryForQuote = async (
+  phone: unknown,
+  customerId: string,
+  quoteDate: string,
+  preferredInquiryId = '',
+): Promise<any | null> => {
+  const normalized = normalizePhone(phone);
+  if (!normalized && !customerId) return null;
+  const [inquiries, quotes] = await Promise.all([
+    tableInquiries.select({
+      fields: [
+        'Inquiry Date', 'Phone', 'Customer', 'Channel', 'Campaign / Source Detail',
+        'Monthly Performance', 'Inquiry Status', 'Quote', 'Quotes', 'Order',
+      ],
+    }).all(),
+    tableQuotes.select({ fields: ['Quote Date', 'Inquiry', 'Order Ref'] }).all(),
+  ]);
+  const quotesById = new Map(quotes.map(quote => [quote.id, quote]));
+  const quoteActivityByInquiry = new Map<string, { dates: string[]; orderIds: string[] }>();
+  for (const quote of quotes) {
+    for (const inquiryId of linkedRecordIds(quote.fields['Inquiry'])) {
+      const activity = quoteActivityByInquiry.get(inquiryId) || { dates: [], orderIds: [] };
+      const quoteDateValue = String(quote.fields['Quote Date'] || '').trim();
+      if (quoteDateValue) activity.dates.push(quoteDateValue);
+      const orderId = getAirtableRecordId(quote.fields['Order Ref']);
+      if (orderId) activity.orderIds.push(orderId);
+      quoteActivityByInquiry.set(inquiryId, activity);
+    }
+  }
+  const selected = selectCanonicalInquiry(
+    inquiries.map(record => {
+      const linkedQuoteIds = Array.from(new Set([
+        ...linkedRecordIds(record.fields['Quote']),
+        ...linkedRecordIds(record.fields['Quotes']),
+      ]));
+      const linkedQuoteDates = linkedQuoteIds
+        .map(quoteId => quotesById.get(quoteId))
+        .filter(Boolean)
+        .map(quote => String(quote?.fields['Quote Date'] || '').trim())
+        .filter(Boolean);
+      const linkedQuoteOrderIds = linkedQuoteIds
+        .map(quoteId => quotesById.get(quoteId))
+        .filter(Boolean)
+        .flatMap(quote => {
+          const orderId = getAirtableRecordId(quote?.fields['Order Ref']);
+          return orderId ? [orderId] : [];
+        });
+      const activity = quoteActivityByInquiry.get(record.id) || { dates: [], orderIds: [] };
+      const inquiryDate = String(record.fields['Inquiry Date'] || '');
+      return {
+        id: record.id,
+        inquiryDate,
+        createdTime: String((record as any)?._rawJson?.createdTime || ''),
+        lastActivityDate: [inquiryDate, ...linkedQuoteDates, ...activity.dates]
+          .filter(Boolean)
+          .sort()
+          .at(-1) || inquiryDate,
+        phone: normalizePhone(record.fields['Phone']),
+        customerIds: linkedRecordIds(record.fields['Customer']),
+        status: String(record.fields['Inquiry Status'] || ''),
+        orderIds: Array.from(new Set([
+          ...linkedRecordIds(record.fields['Order']),
+          ...linkedQuoteOrderIds,
+          ...activity.orderIds,
+        ])),
+      };
+    }),
+    normalized,
+    customerId,
+    {
+      asOfDate: quoteDate,
+      inactivityDays: resolveInquiryCycleInactivityDays(process.env.INQUIRY_CYCLE_INACTIVITY_DAYS),
+      preferredInquiryId,
+    },
+  );
+  return selected ? inquiries.find(record => record.id === selected.id) || null : null;
 };
 
 const getAirtableRecordId = (value: unknown): string | null => {
@@ -2831,6 +2921,7 @@ const SHARED_CSS = `
   .items-table .quotation-image-row td { background:#fff !important; text-align:center; }
   .quotation-image { display:flex; justify-content:center; padding:8px 0; }
   .quotation-image img { display:block; width:min(100%, 420px); height:auto; aspect-ratio:1; object-fit:contain; }
+  .quotation-image-caption { margin:0 auto 8px; max-width:520px; color:#6b7280; font-size:12px; line-height:1.5; text-align:center; }
   .mini-label { font-size: 11px; font-weight: 700; color: #d8833b; text-transform: uppercase; letter-spacing: 0.3px; margin-bottom: 4px; }
   .free-delivery-offer { font-weight: 700; color: #d8833b; font-size: 14px; }
   .offer-preview { background:#fffaf6; border:1px solid #f0e0d0; border-radius:6px; padding:12px; font-size:13px; }
@@ -3055,6 +3146,11 @@ const publicDocumentNotFound = (res: Response): Response => res.status(404).send
 const acceptedPublicToken = (token: unknown): token is string =>
   isValidPublicToken(token, Date.now(), PUBLIC_TOKEN_TTL_MS);
 
+const publicQuotePath = (token: string): string => `/q/${encodeURIComponent(token)}`;
+const publicCustomerInfoPath = (token: string): string => `/q/${encodeURIComponent(token)}/info`;
+const publicInvoicePath = (token: string): string => `/i/${encodeURIComponent(token)}`;
+const publicReceiptPath = (token: string): string => `/r/${encodeURIComponent(token)}`;
+
 const logSafeError = (context: string, error: any): void => {
   console.error(context, {
     name: String(error?.name || 'Error'),
@@ -3114,6 +3210,7 @@ type PhoneMatch = {
   title: string;
   detail: string;
   url?: string;
+  blocksNewInquiry?: boolean;
 };
 
 const phoneValueMatches = (value: unknown, normalizedPhone: string): boolean => {
@@ -3152,7 +3249,7 @@ const findPhoneMatches = async (phone: unknown): Promise<PhoneMatch[]> => {
       id: record.id,
       title: String(fields['Quote Number'] || 'Existing Quote'),
       detail: [fields['Quote Date'], fields['Status']].filter(Boolean).map(String).join(' · '),
-      ...(token ? { url: `/quote/${encodeURIComponent(token)}` } : {}),
+      ...(token ? { url: publicQuotePath(token) } : {}),
     });
   });
   orders.forEach(record => {
@@ -3164,7 +3261,7 @@ const findPhoneMatches = async (phone: unknown): Promise<PhoneMatch[]> => {
       id: record.id,
       title: String(fields['Internal 1 Order No'] || fields['Invoice Number'] || 'Existing Order'),
       detail: [fields['Invoice Number'], fields['Invoice Date'], fields['Status']].filter(Boolean).map(String).join(' · '),
-      ...(token ? { url: `/invoice/${encodeURIComponent(token)}` } : {}),
+      ...(token ? { url: publicInvoicePath(token) } : {}),
     });
   });
   customers.forEach(record => {
@@ -3225,6 +3322,9 @@ const rememberManualCampaignOption = async (
 const mapQuoteChannelToInquiryChannel = (channel: string): string =>
   channel === 'KOL' ? 'KOL / ToyTV' : channel;
 
+const mapInquiryChannelToQuoteChannel = (channel: string): string =>
+  channel === 'KOL / ToyTV' ? 'KOL' : channel;
+
 const renderPhoneMatches = (matches: PhoneMatch[]): string => {
   if (!matches.length) return '';
   return `<div class="alert alert-danger"><strong>呢個電話已有記錄，系統未有重複新增。</strong><div style="margin-top:8px;display:grid;gap:7px;">${matches.map(match => {
@@ -3244,7 +3344,7 @@ const renderQuickInquiryForm = (
     `<option value="${escapeHtml(option)}"${option === selected ? ' selected' : ''}>${escapeHtml(option)}</option>`
   ).join('');
   const displayedChannels = Array.from(new Set([...channelOptions, 'Threads Organic']));
-  const hasBlockingMatch = matches.some(match => match.type !== 'Customer');
+  const hasBlockingMatch = matches.some(match => match.blocksNewInquiry === true);
   return `
     <div class="doc-card">
       ${docHeader('快速新增查詢', 'Quick Inquiry')}
@@ -3436,7 +3536,7 @@ app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, r
         quoteNumber: String(fields['Quote Number'] || ''),
         customer: String(fields['Customer Name'] || fields['Contact Name'] || preview.customer),
         total: Number(fields['Total'] || preview.finalTotal),
-        shareView: `${PUBLIC_BASE_URL}/quote/${publicToken}`,
+        shareView: `${PUBLIC_BASE_URL}${publicQuotePath(publicToken)}`,
         idempotentReplay: true,
       });
     }
@@ -3710,8 +3810,15 @@ app.get('/api/inquiries/check-phone', requireAdmin, async (req: Request, res: Re
     const phone = String(req.query.phone || '').trim();
     const normalized = normalizePhone(phone);
     if (!normalized) return res.json({ normalized: '', matches: [], blocking: false });
-    const matches = await findPhoneMatches(phone);
-    return res.json({ normalized, matches, blocking: matches.some(match => match.type !== 'Customer') });
+    const [matches, activeInquiry] = await Promise.all([
+      findPhoneMatches(phone),
+      findCanonicalInquiryForQuote(phone, '', getHongKongDate()),
+    ]);
+    const cycleAwareMatches = matches.map(match => ({
+      ...match,
+      blocksNewInquiry: match.type === 'Inquiry' && match.id === activeInquiry?.id,
+    }));
+    return res.json({ normalized, matches: cycleAwareMatches, blocking: Boolean(activeInquiry) });
   } catch (error: any) {
     console.error('Inquiry phone check failed:', error);
     return res.status(500).json({ error: error.message || 'Phone check failed' });
@@ -3783,10 +3890,17 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
       return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請選擇查詢來源。', channels, products)));
     }
 
-    const matches = await findPhoneMatches(values.phone);
-    const blockingMatches = matches.filter(match => match.type !== 'Customer');
+    const [matches, activeInquiry] = await Promise.all([
+      findPhoneMatches(values.phone),
+      findCanonicalInquiryForQuote(values.phone, '', getHongKongDate()),
+    ]);
+    const cycleAwareMatches = matches.map(match => ({
+      ...match,
+      blocksNewInquiry: match.type === 'Inquiry' && match.id === activeInquiry?.id,
+    }));
+    const blockingMatches = cycleAwareMatches.filter(match => match.blocksNewInquiry);
     if (blockingMatches.length > 0 && String(req.body.forceNew || '') !== '1') {
-      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, matches, '', channels, products)));
+      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, cycleAwareMatches, '', channels, products)));
     }
 
     const existingCustomer = await findCustomerByPhone(values.phone);
@@ -3924,11 +4038,11 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
           const receiptToken = receiptTokenMap[r.id] || undefined;
 
           // Build action buttons — ALL always shown
-          const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${token}/customer-info`;
+          const customerInfoLink = `${PUBLIC_BASE_URL}${publicCustomerInfoPath(token)}`;
           let actions = '';
 
           // 1. View Quote
-          actions += `<a href="/quote/${token}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
+          actions += `<a href="${publicQuotePath(token)}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
 
           // 2. Copy Customer Info Link
           actions += ` <button type="button" class="btn btn-secondary btn-sm" onclick="copyLink('${customerInfoLink}', this)">Copy Customer Info Form Link</button>`;
@@ -3941,7 +4055,7 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
 
           // 4. View Invoice (only if token exists)
           if (invoiceToken) {
-            actions += ` <a href="/invoice/${invoiceToken}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
+            actions += ` <a href="${publicInvoicePath(invoiceToken)}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
           }
 
           // 5. Mark as Paid (only if invoice token exists)
@@ -3954,7 +4068,7 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
 
           // 6. View Receipt (only if receipt token exists)
           if (receiptToken) {
-            actions += ` <a href="/receipt/${receiptToken}" class="btn btn-success btn-sm" target="_blank">View Receipt</a>`;
+            actions += ` <a href="${publicReceiptPath(receiptToken)}" class="btn btn-success btn-sm" target="_blank">View Receipt</a>`;
           }
 
           return `
@@ -5426,14 +5540,45 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     const quoteCustomerEmail = selectedCustomerFields ? getCustomerText(selectedCustomerFields, 'Email') : '';
     const quoteCustomerAddress = selectedCustomerFields ? getCustomerText(selectedCustomerFields, 'Address') : '';
 
+    // Attribution belongs to the first customer inquiry, not to every Quote.
+    // A repeat Quote reuses the earliest Inquiry for the same linked Customer
+    // or normalized phone, preserving that first-touch channel and campaign.
+    let selectedInquiry: any | null = null;
+    if (inquiryRecordId) {
+      try {
+        selectedInquiry = await tableInquiries.find(inquiryRecordId);
+      } catch {
+        selectedInquiry = null;
+      }
+    }
+    const selectedInquiryFields: FieldSet = selectedInquiry?.fields || {};
+    const canonicalInquiry = await findCanonicalInquiryForQuote(
+      quoteCustomerPhone || b.phone || selectedInquiryFields['Phone'],
+      selectedCustomerId || getLinkedRecordId(selectedInquiryFields['Customer']) || '',
+      quoteDate,
+      inquiryRecordId,
+    );
+    const canonicalInquiryRecordId = canonicalInquiry?.id || '';
+    const canonicalInquiryFields: FieldSet = canonicalInquiry?.fields || {};
+    const canonicalChannel = firstTouchValue(canonicalInquiryFields['Channel'], '');
+    const attributionSourceChannel = canonicalChannel
+      ? mapInquiryChannelToQuoteChannel(canonicalChannel)
+      : firstTouchValue('', quoteSourceChannel);
+    const attributionCampaignSourceDetail = firstTouchValue(
+      canonicalInquiryFields['Campaign / Source Detail'],
+      campaignSourceDetail,
+    );
+
     const quoteFields: FieldSet = {
         'Quote Number': quoteNumber,
         'Quote Date': quoteDate,
         'Public Token': publicToken,
         'Quote Language': quoteLanguage,
-        ...(quoteSourceChannel ? { 'Quote Source / Channel': quoteSourceChannel } : {}),
-        ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
-        ...(inquiryRecordId ? { 'Inquiry': [inquiryRecordId] } : {}),
+        ...(attributionSourceChannel ? { 'Quote Source / Channel': attributionSourceChannel } : {}),
+        ...(attributionCampaignSourceDetail ? { 'Campaign / Source Detail': attributionCampaignSourceDetail } : {}),
+        ...(canonicalInquiryRecordId ? { 'Inquiry': [canonicalInquiryRecordId] } : {}),
+        // Quote activity stays in the month when this Quote was made. The
+        // canonical Inquiry keeps the separate first-touch acquisition month.
         ...(performanceMonthRecordId ? { 'Performance Month': [performanceMonthRecordId] } : {}),
         'Valid Until': b.validUntil && b.validUntil.trim() ? b.validUntil.trim() : null,
         'Contact Name': b.contactName,
@@ -5477,7 +5622,11 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       quotationImageRuntime,
     );
 
-    if (campaignSourceDetailWasManual && campaignSourceDetail) {
+    if (
+      campaignSourceDetailWasManual
+      && campaignSourceDetail
+      && !String(canonicalInquiryFields['Campaign / Source Detail'] || '').trim()
+    ) {
       try {
         await rememberManualCampaignOption(campaignSourceDetail, quoteSourceChannel, quoteNumber);
       } catch (campaignError) {
@@ -5487,21 +5636,34 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       }
     }
 
-    // V13: Auto-create / update Inquiry from Create Quote so daily workflow does not require double entry.
-    // If an Inquiry is manually selected, link this Quote back to it and mark it as Quoted.
-    // If no Inquiry is selected, create a new Inquiry record from the Quote source fields, then link it back to the Quote.
+    // One first-touch Inquiry may own many Quotes. Repeated quotations append
+    // their link without replacing earlier Quotes or creating extra ad leads.
     try {
-      if (inquiryRecordId) {
+      if (canonicalInquiryRecordId) {
+        const existingInquiry = canonicalInquiry || await tableInquiries.find(canonicalInquiryRecordId);
+        const existingInquiryFields = existingInquiry.fields as FieldSet;
+        const existingInquiryStatus = String(existingInquiryFields['Inquiry Status'] || '');
         const inquiryUpdateFields: FieldSet = {
-          'Inquiry Status': 'Quoted',
-          'Quote': [createdQuoteRecordId],
-          ...(performanceMonthRecordId ? { 'Monthly Performance': [performanceMonthRecordId] } : {}),
-          ...(quoteSourceChannel ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) } : {}),
-          ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
-          ...(selectedCustomerId ? { 'Customer': [selectedCustomerId] } : {}),
+          'Inquiry Status': existingInquiryStatus === 'Converted' ? 'Converted' : 'Quoted',
+          'Quotes': appendLinkedRecordId(existingInquiryFields['Quotes'], createdQuoteRecordId),
+          ...(!getLinkedRecordId(existingInquiryFields['Quote'])
+            ? { 'Quote': [createdQuoteRecordId] }
+            : {}),
+          ...(!getLinkedRecordId(existingInquiryFields['Monthly Performance']) && performanceMonthRecordId
+            ? { 'Monthly Performance': [performanceMonthRecordId] }
+            : {}),
+          ...(!String(existingInquiryFields['Channel'] || '').trim() && quoteSourceChannel
+            ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) }
+            : {}),
+          ...(!String(existingInquiryFields['Campaign / Source Detail'] || '').trim() && campaignSourceDetail
+            ? { 'Campaign / Source Detail': campaignSourceDetail }
+            : {}),
+          ...(!getLinkedRecordId(existingInquiryFields['Customer']) && selectedCustomerId
+            ? { 'Customer': [selectedCustomerId] }
+            : {}),
         };
-        await tableInquiries.update([{ id: inquiryRecordId, fields: inquiryUpdateFields }]);
-      } else if (quoteSourceChannel || performanceMonthRecordId || campaignSourceDetail) {
+        await tableInquiries.update([{ id: canonicalInquiryRecordId, fields: inquiryUpdateFields }]);
+      } else {
         const firstItem = items[0] || {};
         const autoInquiryFields: FieldSet = {
           'Inquiry Date': quoteDate,
@@ -5527,8 +5689,8 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       // Do not block quote creation if Inquiry automation fails.
     }
 
-    const publicLink = `${PUBLIC_BASE_URL}/quote/${publicToken}`;
-    const customerInfoLink = `${PUBLIC_BASE_URL}/quote/${publicToken}/customer-info`;
+    const publicLink = `${PUBLIC_BASE_URL}${publicQuotePath(publicToken)}`;
+    const customerInfoLink = `${PUBLIC_BASE_URL}${publicCustomerInfoPath(publicToken)}`;
 
     if (isPilotInternal) {
       return res.json({
@@ -5579,7 +5741,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quote/:token  — Public Quote View
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/quote/:token', async (req: Request, res: Response) => {
+app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
@@ -5703,7 +5865,14 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
             <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
-          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), itemColumnCount)}`;
+          </tr>${(() => {
+            const presentation = quotationImagePresentations.get(String(item.item_id || ''));
+            return renderOptionalQuotationImageRow(
+              presentation,
+              itemColumnCount,
+              quotationImageDisclaimer(item, isEnglish, Boolean(presentation)),
+            );
+          })()}`;
         }).join('');
 
     // Contact info block (always shown from Quotes table)
@@ -5798,7 +5967,7 @@ app.get('/quote/:token', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /quote/:token/customer-info  — Customer fills in details
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
+app.get(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
@@ -5869,7 +6038,7 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
             </div>
             <div style="margin-top:20px;display:flex;gap:10px;">
               <a href="/quotes" class="btn btn-secondary">${C.backDashboard}</a>
-              <a href="/quote/${token}" class="btn btn-outline" target="_blank">${C.viewQuote}</a>
+              <a href="${publicQuotePath(token)}" class="btn btn-outline" target="_blank">${C.viewQuote}</a>
             </div>
           </div>
         </div>`;
@@ -5899,7 +6068,7 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
 
 <div class="alert alert-info">${C.orderConfirmAlert}</div>
 
-          <form action="/quote/${token}/customer-info" method="POST">
+          <form action="${publicCustomerInfoPath(token)}" method="POST">
             <div class="section">
               <div class="section-title">${C.yourInfo}</div>
               <div class="form-row form-row-2">
@@ -5951,7 +6120,7 @@ app.get('/quote/:token/customer-info', async (req: Request, res: Response) => {
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /quote/:token/customer-info
 // ═══════════════════════════════════════════════════════════════════════════
-app.post('/quote/:token/customer-info', async (req: Request, res: Response) => {
+app.post(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
@@ -6268,7 +6437,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /invoice/:token
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/invoice/:token', async (req: Request, res: Response) => {
+app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
@@ -6363,7 +6532,14 @@ app.get('/invoice/:token', async (req: Request, res: Response) => {
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>
-          </tr>${renderOptionalQuotationImageRow(quotationImagePresentations.get(String(item.item_id || '')), invoiceItemColumnCount)}`;
+          </tr>${(() => {
+            const presentation = quotationImagePresentations.get(String(item.item_id || ''));
+            return renderOptionalQuotationImageRow(
+              presentation,
+              invoiceItemColumnCount,
+              quotationImageDisclaimer(item, isEnglish, Boolean(presentation)),
+            );
+          })()}`;
         }).join('');
 
     const subtotal = (of['Product Amount'] as number) || 0;
@@ -6513,7 +6689,7 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: GET /receipt/:token
 // ═══════════════════════════════════════════════════════════════════════════
-app.get('/receipt/:token', async (req: Request, res: Response) => {
+app.get(['/receipt/:token', '/r/:token'], async (req: Request, res: Response) => {
   try {
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);

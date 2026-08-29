@@ -166,16 +166,19 @@ export class LoginRateLimiter {
   }
 }
 
-const publicTokenPattern = /^v2_([0-9a-z]{6,12})_([A-Za-z0-9_-]{43})$/;
+const shortPublicTokenPattern = /^[A-Za-z0-9_-]{12}$/;
+const timestampedPublicTokenPatterns = [
+  // Existing customer links remain valid after the native 12-character alias launches.
+  { pattern: /^v3_([0-9a-z]{6,12})_([A-Za-z0-9_-]{22})$/, randomBytes: 16 },
+  { pattern: /^v2_([0-9a-z]{6,12})_([A-Za-z0-9_-]{43})$/, randomBytes: 32 },
+] as const;
 
-export const generatePublicToken = (now = Date.now()): string => {
-  const issuedAtSeconds = Math.floor(now / 1000).toString(36);
-  return `v2_${issuedAtSeconds}_${crypto.randomBytes(32).toString('base64url')}`;
-};
+export const generatePublicToken = (_now = Date.now()): string =>
+  crypto.randomBytes(9).toString('base64url');
 
 export const formatDeterministicPublicToken = (issuedAt: number, digest: Buffer): string => {
-  if (!Number.isFinite(issuedAt) || digest.length < 32) throw new Error('Unable to issue public token.');
-  return `v2_${Math.floor(issuedAt / 1000).toString(36)}_${digest.subarray(0, 32).toString('base64url')}`;
+  if (!Number.isFinite(issuedAt) || digest.length < 9) throw new Error('Unable to issue public token.');
+  return digest.subarray(0, 9).toString('base64url');
 };
 
 export const publicTokenTtlMs = (rawDays: unknown): number => {
@@ -187,14 +190,24 @@ export const publicTokenTtlMs = (rawDays: unknown): number => {
 };
 
 export const isValidPublicToken = (token: unknown, now = Date.now(), ttlMs = publicTokenTtlMs(undefined)): boolean => {
-  const match = String(token || '').match(publicTokenPattern);
+  const raw = String(token || '');
+  if (shortPublicTokenPattern.test(raw)) {
+    try {
+      return Buffer.from(raw, 'base64url').length === 9;
+    } catch {
+      return false;
+    }
+  }
+  const tokenFormat = timestampedPublicTokenPatterns.find(({ pattern }) => pattern.test(raw));
+  if (!tokenFormat) return false;
+  const match = raw.match(tokenFormat.pattern);
   if (!match) return false;
   const issuedAtSeconds = parseInt(match[1], 36);
   if (!Number.isFinite(issuedAtSeconds)) return false;
   const issuedAt = issuedAtSeconds * 1000;
   if (issuedAt > now + 5 * 60 * 1000 || now - issuedAt > ttlMs) return false;
   try {
-    return Buffer.from(match[2], 'base64url').length === 32;
+    return Buffer.from(match[2], 'base64url').length === tokenFormat.randomBytes;
   } catch {
     return false;
   }
