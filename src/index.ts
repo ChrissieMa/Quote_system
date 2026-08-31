@@ -2663,12 +2663,18 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
   const { start, end } = monthBounds(month);
   await ensureRecurringExpenses(month);
 
-  const [orders, marketing, expenses, monthlyRows] = await Promise.all([
+  const [orders, marketing, expenses, monthlyRows, orderItems, chinaShipments] = await Promise.all([
     tableOrders.select().all(),
     tableMarketingSpend.select().all(),
     tableBusinessExpenses.select().all(),
     tableMonthlyFinance.select().all(),
+    tableOrderItems.select().all(),
+    tableChinaShipments.select().all(),
   ]);
+
+  const ordersById = new Map<string, FinanceRecord>(orders.map(record => [record.id, { id: record.id, fields: record.fields }]));
+  const orderItemsById = new Map<string, FinanceRecord>(orderItems.map(record => [record.id, { id: record.id, fields: record.fields }]));
+  const driverPaidByOrderId = buildDriverPaidByOrderId(chinaShipments, orderItemsById, ordersById);
 
   const finance = calculateOwnerFinanceSummary({
     month,
@@ -2679,6 +2685,7 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
       fields['Internal 1 Order No'] || fields['Internal Order No']
     ),
     getDriverPayable: fields => getDriverPayable(fields as FieldSet),
+    getDriverPaid: record => driverPaidByOrderId.get(record.id) || 0,
     getOutstandingFinanceStatus: fields => getOutstandingFinanceStatus(fields as FieldSet),
   });
   const missingExpenseItems = '';
@@ -2699,9 +2706,9 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     'Total Revenue HKD': finance.revenue,
     'Supplier Cost HKD': finance.supplier,
     'China Freight HKD': finance.china,
-    'Local Delivery Cost HKD': finance.deliveryPayable,
+    'Local Delivery Cost HKD': finance.deliveryPaid,
     'Reissue Cost HKD': finance.reissue,
-    'Order Gross Profit HKD': finance.orderGrossProfit,
+    'Order Gross Profit HKD': finance.cashOrderGrossProfit,
     'Marketing Spend HKD': finance.marketingSpend,
     'Business Expenses HKD': finance.businessExpenses,
     'Capital Items HKD': finance.capitalItemsTotal,
@@ -2741,7 +2748,7 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     capitalItems: finance.capitalItemsTotal,
     unallocatedMarketingSpend: finance.unallocatedMarketingSpend,
     pendingCostOrders: finance.pendingCostOrders,
-    netProfit: finance.netProfit,
+    netProfit: finance.cashNetProfit,
   };
 };
 
@@ -6958,6 +6965,43 @@ const getShipmentDriverOrders = (
 const getDriverBatchPayableCents = (orders: FinanceRecord[]): number =>
   orders.reduce((sum, order) => sum + toHkdCents(getDriverPayable(order.fields)), 0);
 
+const buildDriverPaidByOrderId = (
+  shipments: readonly { id: string; fields: FieldSet }[],
+  orderItemsById: Map<string, FinanceRecord>,
+  ordersById: Map<string, FinanceRecord>,
+): Map<string, number> => {
+  const result = new Map<string, number>();
+  for (const shipment of shipments) {
+    const linkedOrders = getShipmentDriverOrders(
+      { id: shipment.id, fields: shipment.fields }, orderItemsById, ordersById,
+    ).sort((a, b) => a.id.localeCompare(b.id));
+    const totalPayableCents = getDriverBatchPayableCents(linkedOrders);
+    const paidCents = Math.min(Math.max(0, toHkdCents(shipment.fields[DRIVER_PAID_FIELD])), totalPayableCents);
+    if (paidCents <= 0 || totalPayableCents <= 0) continue;
+
+    const allocations = linkedOrders.map(order => {
+      const payableCents = toHkdCents(getDriverPayable(order.fields));
+      return {
+        order,
+        payableCents,
+        allocatedCents: Math.floor((paidCents * payableCents) / totalPayableCents),
+      };
+    });
+    let remainder = paidCents - allocations.reduce((sum, item) => sum + item.allocatedCents, 0);
+    for (const item of allocations) {
+      if (remainder <= 0) break;
+      if (item.allocatedCents < item.payableCents) {
+        item.allocatedCents += 1;
+        remainder -= 1;
+      }
+    }
+    for (const item of allocations) {
+      result.set(item.order.id, (result.get(item.order.id) || 0) + (item.allocatedCents / 100));
+    }
+  }
+  return result;
+};
+
 app.get('/admin/analytics/purchase-cycles', requireAdmin, async (req: Request, res: Response) => {
   try {
     const { from, to } = validateAggregateDateRange(req.query.from, req.query.to);
@@ -6993,6 +7037,10 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       tableChinaShipments.select().all(),
     ]);
 
+    const ordersById = new Map<string, FinanceRecord>(orders.map(record => [record.id, { id: record.id, fields: record.fields }]));
+    const orderItemsById = new Map<string, FinanceRecord>(orderItems.map(record => [record.id, { id: record.id, fields: record.fields }]));
+    const driverPaidByOrderId = buildDriverPaidByOrderId(chinaShipments, orderItemsById, ordersById);
+
     const finance = calculateOwnerFinanceSummary({
       month: selectedMonth,
       orders,
@@ -7002,6 +7050,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         fields['Internal 1 Order No'] || fields['Internal Order No']
       ),
       getDriverPayable: fields => getDriverPayable(fields as FieldSet),
+      getDriverPaid: record => driverPaidByOrderId.get(record.id) || 0,
       getOutstandingFinanceStatus: fields => getOutstandingFinanceStatus(fields as FieldSet),
     });
 
@@ -7013,16 +7062,19 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       revenue: finance.revenue,
       supplier: finance.supplier,
       china: finance.china,
-      delivery: finance.deliveryPayable,
+      deliveryPayable: finance.deliveryPayable,
+      deliveryPaid: finance.deliveryPaid,
       reissue: finance.reissue,
       pending: finance.pendingCostOrders,
       adOrders: finance.adOrders,
     };
     const marketingSpend = finance.marketingSpend;
     const businessExpenses = finance.businessExpenses;
-    const orderCosts = finance.orderCosts;
-    const grossProfit = finance.orderGrossProfit;
-    const netProfit = finance.netProfit;
+    const orderCosts = finance.cashOrderCosts;
+    const grossProfit = finance.cashOrderGrossProfit;
+    const netProfit = finance.cashNetProfit;
+    const accrualGrossProfit = finance.orderGrossProfit;
+    const accrualNetProfit = finance.netProfit;
     const margin = finance.margin;
 
     const orderItemsByOrderId = new Map<string, FinanceRecord[]>();
@@ -7042,15 +7094,14 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         order: record,
         items: orderItemsByOrderId.get(record.id) || [],
         driverPayable: getDriverPayable(record.fields as FieldSet),
+        driverPaid: driverPaidByOrderId.get(record.id) || 0,
         outstandingFinanceStatus: getOutstandingFinanceStatus(record.fields as FieldSet),
       }));
     const costCoverage = summarizeOwnerOrderCostCoverage(costBreakdowns);
     const costBreakdownRows = costBreakdowns.map(breakdown => {
-      const profitLabel = breakdown.provisionalActualProfit === null
+      const profitLabel = breakdown.cashProfit === null
         ? '未收款，不計入盈利'
-        : breakdown.final
-          ? `實際盈利 ${formatOwnerMoney(breakdown.provisionalActualProfit)}`
-          : `暫計實際盈利（上限）${formatOwnerMoney(breakdown.provisionalActualProfit)}`;
+        : `截至目前現金毛利 ${formatOwnerMoney(breakdown.cashProfit)}`;
       const warningHtml = breakdown.warnings.length
         ? `<div class="owner-cost-warning">${breakdown.warnings.map(escapeHtml).join('｜')}</div>`
         : '<div class="owner-cost-complete">成本資料已齊</div>';
@@ -7065,11 +7116,13 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
           <div><span>報價中國運費預留</span><strong>${formatOwnerMoney(breakdown.quotedChinaFreight)}</strong></div>
           <div><span>報價香港送貨預留</span><strong>${formatOwnerMoney(breakdown.quotedLocalDelivery)}</strong></div>
           <div><span>實收收入</span><strong>${formatOwnerMoney(breakdown.received)}</strong></div>
-          <div><span>實際小糖成本</span><strong>${breakdown.supplierEntered ? formatOwnerMoney(breakdown.actualSupplier) : '— 待補'}</strong></div>
-          <div><span>實際中國運費</span><strong>${breakdown.chinaFreightEntered ? formatOwnerMoney(breakdown.actualChinaFreight) : '— 待補'}</strong></div>
-          <div><span>司機應付成本</span><strong>${formatOwnerMoney(breakdown.driverPayable)}</strong></div>
+          <div><span>實付小糖貨款</span><strong>${breakdown.supplierEntered ? formatOwnerMoney(breakdown.actualSupplier) : '— 未付款'}</strong><small>blank／0不扣現金淨利</small></div>
+          <div><span>實付中國運費</span><strong>${breakdown.chinaFreightEntered ? formatOwnerMoney(breakdown.actualChinaFreight) : '— 未付款'}</strong><small>報價預留不當實付</small></div>
+          <div><span>香港運費應付</span><strong>${formatOwnerMoney(breakdown.driverPayable)}</strong><small>未付部分不扣現金淨利</small></div>
+          <div><span>實付香港運費</span><strong>${breakdown.driverPaid > 0 ? formatOwnerMoney(breakdown.driverPaid) : '— 未付款'}</strong></div>
           <div><span>補寄成本</span><strong>${formatOwnerMoney(breakdown.reissue)}</strong></div>
-          <div class="owner-cost-profit"><span>${breakdown.final ? '實際盈利' : '暫計實際盈利（上限）'}</span><strong>${breakdown.provisionalActualProfit === null ? '—' : formatOwnerMoney(breakdown.provisionalActualProfit)}</strong></div>
+          <div class="owner-cost-profit"><span>截至目前現金毛利</span><strong>${breakdown.cashProfit === null ? '—' : formatOwnerMoney(breakdown.cashProfit)}</strong></div>
+          <div><span>預計／權責毛利（上限）</span><strong>${breakdown.provisionalActualProfit === null ? '—' : formatOwnerMoney(breakdown.provisionalActualProfit)}</strong><small>包括應付，唔等於已付現金</small></div>
           ${reserveReference}
         </div>
         ${warningHtml}
@@ -7145,8 +7198,6 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(getOutstandingFinanceStatus(record.fields as FieldSet) || '尚欠成本')}</li>`)
       .join('');
 
-    const ordersById = new Map<string, FinanceRecord>(orders.map(record => [record.id, { id: record.id, fields: record.fields }]));
-    const orderItemsById = new Map<string, FinanceRecord>(orderItems.map(record => [record.id, { id: record.id, fields: record.fields }]));
     const driverBatchRows = chinaShipments.flatMap(shipment => {
       const shipmentRecord: FinanceRecord = { id: shipment.id, fields: shipment.fields };
       const linkedOrders = getShipmentDriverOrders(shipmentRecord, orderItemsById, ordersById);
@@ -7218,14 +7269,16 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         <form method="GET" action="/admin/dashboard"><label>月份<input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label><button class="btn btn-primary" type="submit">查看／重新整理</button></form>
         <div class="${statusClass}">${statusText}</div>
       </div>
-      ${req.query.driverPayment === 'saved' ? '<div class="owner-ok">司機付款已記錄；只更新現金settlement，冇再次扣淨利。</div>' : ''}
+      ${req.query.driverPayment === 'saved' ? '<div class="owner-ok">司機實付已記錄；應付成本不變，現金淨利只按實付更新。</div>' : ''}
       ${req.query.driverPayment === 'duplicate' ? '<div class="owner-ok">呢次付款要求已處理，冇重複累加。</div>' : ''}
       ${req.query.driverPayment === 'error' ? '<div class="owner-alert">付款未有記錄；請重新整理後按尚欠金額再試。</div>' : ''}
       <div class="owner-kpis">
         <div class="owner-kpi"><span>本月已收收入</span><strong>${formatOwnerMoney(totals.revenue)}</strong><small>${monthOrders.length} 張已收款 Order</small></div>
         <div class="owner-kpi"><span>未收Invoice／應收</span><strong>${formatOwnerMoney(finance.outstandingRevenue)}</strong><small>${finance.receivableOrders.length} 張未全數收款</small></div>
-        <div class="owner-kpi"><span>${totals.pending > 0 ? '確認交易暫計毛利（上限）' : '確認交易毛利'}</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>只計實收收入及已確認Order成本</small></div>
-        <div class="owner-kpi owner-kpi-highlight"><span>${isProvisional ? '本月暫計淨利（上限）' : '本月淨利'}</span><strong>${formatOwnerMoney(netProfit)}</strong><small>${totals.pending > 0 ? `尚欠${totals.pending}張Order成本｜` : ''}${googleAdsStatementPending ? '8月Google Ads月結待到｜' : ''}淨利率 ${margin.toFixed(1)}%</small></div>
+        <div class="owner-kpi"><span>截至目前現金毛利</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>實收收入 − 已輸入實付訂單成本</small></div>
+        <div class="owner-kpi owner-kpi-highlight"><span>本月暫計現金淨利</span><strong>${formatOwnerMoney(netProfit)}</strong><small>${googleAdsStatementPending ? '8月Google Ads月結待到｜' : ''}現金淨利率 ${margin.toFixed(1)}%</small></div>
+        <div class="owner-kpi"><span>預計／權責毛利（上限）</span><strong>${formatOwnerMoney(accrualGrossProfit)}</strong><small>包括已知應付，唔等於實付現金</small></div>
+        <div class="owner-kpi"><span>預計／權責淨利（上限）</span><strong>${formatOwnerMoney(accrualNetProfit)}</strong><small>${totals.pending > 0 ? `尚欠${totals.pending}張Order成本｜` : ''}只供預計</small></div>
       </div>
       <div class="owner-grid">
         <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>收款狀態分開睇</h2><strong>開Invoice ≠ 收入 ≠ 成交</strong></div>
@@ -7237,11 +7290,12 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       </div>
       <div class="owner-grid">
         <section class="owner-panel"><h2>成本分拆</h2><div class="owner-lines">
-          <div><span>已輸入小糖成本 <small>（${costCoverage.supplierEntered}/${costCoverage.orderCount}張；${costCoverage.supplierPending}張待補）</small></span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
-          <div><span>中國運費</span><strong>${formatOwnerMoney(totals.china)}</strong></div>
-          <div><span>司機應付成本</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
+          <div><span>實付小糖貨款 <small>（${costCoverage.supplierEntered}/${costCoverage.orderCount}張有輸入；${costCoverage.supplierPending}張未付款／未輸入）</small></span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
+          <div><span>實付中國運費</span><strong>${formatOwnerMoney(totals.china)}</strong></div>
+          <div><span>實付香港運費</span><strong>${formatOwnerMoney(totals.deliveryPaid)}</strong></div>
+          <div><span>香港運費應付 <small>（不扣現金淨利）</small></span><strong>${formatOwnerMoney(totals.deliveryPayable)}</strong></div>
           <div><span>補寄成本</span><strong>${formatOwnerMoney(totals.reissue)}</strong></div>
-          <div class="owner-line-total"><span>訂單成本合計</span><strong>${formatOwnerMoney(orderCosts)}</strong></div>
+          <div class="owner-line-total"><span>實付訂單成本合計</span><strong>${formatOwnerMoney(orderCosts)}</strong></div>
           <div><span>Meta／Marketing</span><strong>${formatOwnerMoney(marketingSpend)}</strong></div>
           <div><span>公司每月／現金支出</span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
           ${finance.unallocatedMarketingSpend > 0 ? `<div><span>Marketing待分配（不計入淨利）</span><strong>${formatOwnerMoney(finance.unallocatedMarketingSpend)}</strong></div>` : ''}
@@ -7252,14 +7306,14 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       </div>
       <div class="owner-grid">
         <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>每張 Order 成本及盈利明細</h2><strong>按入展開</strong></div>
-          <p class="owner-note">報價預留同實際成本分開顯示；缺實際中國運費或其他成本時，盈利只會標「暫計／上限」，唔會當最終數。</p>
+          <p class="owner-note">實付欄有金額先扣現金淨利；blank／0顯示未付款。報價預留、應付同實付分開，唔會混數。</p>
           ${costBreakdownRows || '<div class="owner-empty">本月未有 Order 成本資料。</div>'}
         </section>
       </div>
       <div class="owner-grid">
         <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>司機付款（按到港批次）</h2><strong>現金settlement</strong></div>
           ${driverBatchRows ? `<div class="owner-table-wrap"><table><thead><tr><th>批次／包括訂單</th><th>成本月份分拆</th><th>應付總額</th><th>累計已付</th><th>尚欠／超付差額</th><th>狀態</th><th>記錄付款</th></tr></thead><tbody>${driverBatchRows}</tbody></table></div>` : '<div class="owner-empty">本月未有已連接 China Shipment 嘅司機付款批次。</div>'}
-          <p class="owner-note">由 JUN2602 起，司機應付成本＝報價香港運費 × 90%，按Order月份只計一次。付款按鈕只更新現金settlement，唔會再扣淨利或建立Business Expense。</p>
+          <p class="owner-note">由 JUN2602 起，司機應付成本＝報價香港運費 × 90%（或Owner override）；應付唔扣現金淨利。付款按鈕只記實付，下一次重算先按實付扣現金淨利，亦唔會另建Business Expense造成雙計。</p>
         </section>
       </div>
       <div class="owner-grid">
@@ -7270,7 +7324,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         </section>
         <section class="owner-panel"><div class="owner-panel-head"><h2>尚欠資料提醒</h2><a href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">前往補資料 →</a></div>
           ${pendingRows ? `<ul class="owner-pending">${pendingRows}</ul>` : '<div class="owner-ok">所有 Order 成本資料已齊。</div>'}
-          <p class="owner-note">財務月份跟 Order Month & Year；即使下月先付款，司機應付成本仍只會計回原本落單月份一次。</p>
+          <p class="owner-note">現金口徑按實付發生；應付只作預計／權責參考，唔會未付款先扣現金淨利。</p>
         </section>
       </div>
       <div class="owner-footer-nav"><a href="/admin/dashboard?month=${previousMonth(selectedMonth)}">← 上一個月</a><a href="/admin/dashboard?month=${getHongKongMonth()}">返回今個月</a></div>
@@ -7299,7 +7353,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
           '今次實付 HK$' + amount.toFixed(2) + '\\n' +
           '付款後累計 HK$' + nextPaid.toFixed(2) + '\\n' +
           balanceText + '\\n\\n' +
-          '呢次只更新現金付款紀錄，唔會改兩張Order成本或再扣淨利。'
+          '呢次只記實付現金；唔會改兩張Order應付成本，亦唔會建立重複Business Expense。'
         );
       }
     </script>`;

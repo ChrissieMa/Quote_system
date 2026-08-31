@@ -20,16 +20,20 @@ export type OwnerFinanceSummary = {
   supplier: number;
   china: number;
   deliveryPayable: number;
+  deliveryPaid: number;
   reissue: number;
   pendingCostOrders: number;
   adOrders: number;
   orderCosts: number;
   orderGrossProfit: number;
+  cashOrderCosts: number;
+  cashOrderGrossProfit: number;
   marketingSpend: number;
   unallocatedMarketingSpend: number;
   businessExpenses: number;
   capitalItemsTotal: number;
   netProfit: number;
+  cashNetProfit: number;
   margin: number;
   provisional: boolean;
 };
@@ -46,7 +50,9 @@ export type OwnerOrderCostBreakdown = {
   actualSupplier: number;
   actualChinaFreight: number;
   driverPayable: number;
+  driverPaid: number;
   reissue: number;
+  cashProfit: number | null;
   provisionalActualProfit: number | null;
   quotedReserveProfit: number | null;
   supplierEntered: boolean;
@@ -70,6 +76,7 @@ type SummaryOptions = {
   expenses: readonly OwnerFinanceRecord[];
   getOrderMonth: (fields: OwnerFinanceFields) => string | null;
   getDriverPayable: (fields: OwnerFinanceFields) => number;
+  getDriverPaid?: (record: OwnerFinanceRecord) => number;
   getOutstandingFinanceStatus: (fields: OwnerFinanceFields) => string | null;
 };
 
@@ -153,6 +160,7 @@ export const calculateOwnerOrderCostBreakdown = (input: {
   order: OwnerFinanceRecord;
   items: readonly OwnerFinanceRecord[];
   driverPayable: number;
+  driverPaid?: number;
   outstandingFinanceStatus?: string | null;
 }): OwnerOrderCostBreakdown => {
   const fields = input.order.fields;
@@ -173,14 +181,19 @@ export const calculateOwnerOrderCostBreakdown = (input: {
   const supplierEntered = actualSupplier > 0;
   const chinaFreightEntered = actualChinaFreight > 0;
   const outstandingFinanceStatus = String(input.outstandingFinanceStatus || '').trim();
+  const driverPaid = Math.max(0, Number(input.driverPaid || 0));
   const warnings: string[] = [];
   if (!supplierEntered) warnings.push('未有小糖成本');
   if (!chinaFreightEntered) warnings.push('未有實際中國運費，暫計盈利只係上限');
+  if (input.driverPayable > driverPaid) warnings.push('香港運費未全數實付，應付部分唔扣現金淨利');
   if (outstandingFinanceStatus) warnings.push(outstandingFinanceStatus);
   if (received <= 0) warnings.push('未收款，唔計入收入、毛利或淨利');
 
   const provisionalActualProfit = received > 0
     ? received - actualSupplier - actualChinaFreight - input.driverPayable - reissue
+    : null;
+  const cashProfit = received > 0
+    ? received - actualSupplier - actualChinaFreight - driverPaid - reissue
     : null;
   const quotedReserveProfit = provisionalActualProfit !== null
     && !chinaFreightEntered
@@ -201,12 +214,18 @@ export const calculateOwnerOrderCostBreakdown = (input: {
     actualSupplier,
     actualChinaFreight,
     driverPayable: input.driverPayable,
+    driverPaid,
     reissue,
+    cashProfit,
     provisionalActualProfit,
     quotedReserveProfit,
     supplierEntered,
     chinaFreightEntered,
-    final: received > 0 && supplierEntered && chinaFreightEntered && !outstandingFinanceStatus,
+    final: received > 0
+      && supplierEntered
+      && chinaFreightEntered
+      && driverPaid >= input.driverPayable
+      && !outstandingFinanceStatus,
     warnings: Array.from(new Set(warnings)),
   };
 };
@@ -282,6 +301,7 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
       || numberField(fields, 'Actual China Freight HKD')
       || numberField(fields, 'China Freight Cost HKD');
     sum.deliveryPayable += options.getDriverPayable(fields);
+    sum.deliveryPaid += Math.max(0, Number(options.getDriverPaid?.(record) || 0));
     sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
     if (fields['Is Ad Attributed Order'] || String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
     return sum;
@@ -290,6 +310,7 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     supplier: 0,
     china: 0,
     deliveryPayable: 0,
+    deliveryPaid: 0,
     reissue: 0,
     pendingCostOrders: 0,
     adOrders: 0,
@@ -319,7 +340,13 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
   );
   const orderCosts = orderTotals.supplier + orderTotals.china + orderTotals.deliveryPayable + orderTotals.reissue;
   const orderGrossProfit = orderTotals.revenue - orderCosts;
+  // Owner cash rule: amounts entered in the actual supplier / China fields are
+  // payments. Driver payable remains a separate accrual and only the recorded
+  // driver-paid amount affects the cash result.
+  const cashOrderCosts = orderTotals.supplier + orderTotals.china + orderTotals.deliveryPaid + orderTotals.reissue;
+  const cashOrderGrossProfit = orderTotals.revenue - cashOrderCosts;
   const netProfit = orderGrossProfit - marketingSpend - businessExpenses;
+  const cashNetProfit = cashOrderGrossProfit - marketingSpend - businessExpenses;
 
   return {
     monthOrders,
@@ -335,12 +362,15 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     outstandingRevenue,
     orderCosts,
     orderGrossProfit,
+    cashOrderCosts,
+    cashOrderGrossProfit,
     marketingSpend,
     unallocatedMarketingSpend,
     businessExpenses,
     capitalItemsTotal,
     netProfit,
-    margin: orderTotals.revenue > 0 ? (netProfit / orderTotals.revenue) * 100 : 0,
+    cashNetProfit,
+    margin: orderTotals.revenue > 0 ? (cashNetProfit / orderTotals.revenue) * 100 : 0,
     provisional: orderTotals.pendingCostOrders > 0,
   };
 };

@@ -24,6 +24,7 @@ const baseOptions = {
   month: '2026-08',
   getOrderMonth: () => '2026-08',
   getDriverPayable: (fields: Record<string, unknown>) => Number(fields.driverPayable || 0),
+  getDriverPaid: (order: { fields: Record<string, unknown> }) => Number(order.fields.driverPaid || 0),
   getOutstandingFinanceStatus: () => '⏳ 尚欠成本',
 };
 
@@ -77,6 +78,8 @@ test('capital equipment and allocation-pending marketing are excluded from Augus
   assert.equal(summary.capitalItemsTotal, 27374);
   assert.ok(Math.abs(summary.orderGrossProfit - 19362.243774) < 1e-9);
   assert.ok(Math.abs(summary.netProfit - 13220.803774) < 1e-9);
+  assert.ok(Math.abs(summary.cashOrderGrossProfit - 19848.243774) < 1e-9);
+  assert.ok(Math.abs(summary.cashNetProfit - 13706.803774) < 1e-9);
   assert.equal(summary.pendingCostOrders, 6);
   assert.equal(summary.provisional, true);
 });
@@ -200,7 +203,7 @@ test('official Google activity is allocated to cost month, never later payment m
 
 test('August revenue and costs include six received Orders and exclude the unpaid Invoice', () => {
   const augustOrders = [
-    { no: 'AUG2601', final: 13150.36, supplier: 5152, china: 0, driver: 1800, profit: 6198.36 },
+    { no: 'AUG2601', final: 13150.36, supplier: 5152, china: 0, driver: 1000, profit: 6998.36 },
     { no: 'AUG2602', final: 1645.8, supplier: 700, china: 135.42, driver: 216, profit: 594.38 },
     { no: 'AUG2603', final: 1299.959655, supplier: 516, china: 0, driver: 144, profit: 639.959655 },
     { no: 'AUG2604', final: 413.98689, supplier: 48, china: 0, driver: 90, profit: 275.98689 },
@@ -222,17 +225,26 @@ test('August revenue and costs include six received Orders and exclude the unpai
       'China Freight Used HKD': order.china,
       driverPayable: order.driver,
     })),
-    marketing: [],
-    expenses: [],
+    marketing: [record('meta-august', {
+      'Month': '2026-08', 'Spend Amount HKD': 461.88, 'Payment Status': 'Paid',
+    })],
+    expenses: [record('august-operating', {
+      'Month': '2026-08', 'Amount HKD': 5679.56, 'Category': 'Operating',
+    })],
   });
   assert.equal(summary.confirmedOrders.length, 6);
   assert.equal(summary.receivableOrders.length, 1);
   assert.equal(summary.pendingCostOrders, 6);
   assert.ok(Math.abs(summary.revenue - 21027.486545) < 1e-9);
   assert.equal(summary.outstandingRevenue, 8873.18);
-  assert.ok(Math.abs(summary.deliveryPayable - 2727) < 1e-9);
-  assert.ok(Math.abs(summary.orderCosts - 9278.42) < 1e-9);
-  assert.ok(Math.abs(summary.orderGrossProfit - 11749.066545) < 1e-9);
+  assert.ok(Math.abs(summary.deliveryPayable - 1927) < 1e-9);
+  assert.equal(summary.deliveryPaid, 0);
+  assert.ok(Math.abs(summary.orderCosts - 8478.42) < 1e-9);
+  assert.ok(Math.abs(summary.orderGrossProfit - 12549.066545) < 1e-9);
+  assert.ok(Math.abs(summary.cashOrderCosts - 6551.42) < 1e-9);
+  assert.ok(Math.abs(summary.cashOrderGrossProfit - 14476.066545) < 1e-9);
+  assert.ok(Math.abs(summary.cashNetProfit - 8334.626545) < 1e-9);
+  assert.ok(Math.abs(summary.netProfit - 6407.626545) < 1e-9);
 });
 
 test('AUG2601 breakdown keeps quoted reserves separate and marks missing China freight as provisional', () => {
@@ -254,7 +266,8 @@ test('AUG2601 breakdown keeps quoted reserves separate and marks missing China f
   const breakdown = calculateOwnerOrderCostBreakdown({
     order,
     items,
-    driverPayable: 1800,
+    driverPayable: 1000,
+    driverPaid: 0,
     outstandingFinanceStatus: '⏳ 未有中國運費',
   });
 
@@ -266,9 +279,11 @@ test('AUG2601 breakdown keeps quoted reserves separate and marks missing China f
   assert.equal(breakdown.quotedLocalDelivery, 2000);
   assert.equal(breakdown.actualSupplier, 5152);
   assert.equal(breakdown.actualChinaFreight, 0);
-  assert.equal(breakdown.driverPayable, 1800);
-  assert.ok(Math.abs((breakdown.provisionalActualProfit || 0) - 6198.36) < 1e-9);
-  assert.ok(Math.abs((breakdown.quotedReserveProfit || 0) - 4998.36) < 1e-9);
+  assert.equal(breakdown.driverPayable, 1000);
+  assert.equal(breakdown.driverPaid, 0);
+  assert.ok(Math.abs((breakdown.cashProfit || 0) - 7998.36) < 1e-9);
+  assert.ok(Math.abs((breakdown.provisionalActualProfit || 0) - 6998.36) < 1e-9);
+  assert.ok(Math.abs((breakdown.quotedReserveProfit || 0) - 5798.36) < 1e-9);
   assert.equal(breakdown.final, false);
   assert.equal(breakdown.chinaFreightEntered, false);
   assert.ok(breakdown.warnings.some(value => value.includes('只係上限')));
