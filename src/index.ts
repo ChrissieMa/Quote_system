@@ -6962,7 +6962,7 @@ app.get('/admin/analytics/purchase-cycles', requireAdmin, async (req: Request, r
   try {
     const { from, to } = validateAggregateDateRange(req.query.from, req.query.to);
     const [inquiries, quotes, orders] = await Promise.all([
-      tableInquiries.select({ fields: ['Inquiry Date'] }).all(),
+      tableInquiries.select({ fields: ['Inquiry Date', 'Channel'] }).all(),
       tableQuotes.select({ fields: ['Quote Date', 'Inquiry'] }).all(),
       tableOrders.select({ fields: ['Pay Date', 'Status'] }).all(),
     ]);

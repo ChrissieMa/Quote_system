@@ -6,6 +6,7 @@ export type AggregateRecord = {
 export type PurchaseCycleAggregateInput = {
   from: string;
   to: string;
+  generatedAt?: Date | string;
   inquiries: readonly AggregateRecord[];
   quotes: readonly AggregateRecord[];
   orders: readonly AggregateRecord[];
@@ -16,6 +17,7 @@ export type PurchaseCycleAggregate = {
   from: string;
   to: string;
   timezone: 'Asia/Hong_Kong';
+  generated_at_hkt: string;
   inquiries_new_cycle_captured: number;
   quoted_cycles: number | null;
   linked_quoted_cycles: number;
@@ -23,10 +25,13 @@ export type PurchaseCycleAggregate = {
   unlinked_quotes: number;
   deduped_quotes: number;
   error_count: number;
+  source_counts: Record<AttributionCategory, number>;
   measurement_state: 'connected' | 'incomplete_linkage';
   coverage_note: string;
   source_system: 'Quote/Delivery aggregate';
 };
+
+export type AttributionCategory = 'paid' | 'organic' | 'direct' | '3d' | 'other' | 'unknown';
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -73,6 +78,30 @@ const paidStatus = (value: unknown): boolean => {
   return normalized === 'paid' || normalized === '已付款' || normalized === '已收款';
 };
 
+const SOURCE_CATEGORY_ALLOWLIST: Readonly<Record<Exclude<AttributionCategory, 'unknown'>, readonly string[]>> = {
+  paid: ['paid', 'google ads', 'meta ads', 'google/cpc', 'cpc'],
+  organic: ['organic', 'google organic', 'organic search', 'seo'],
+  direct: ['direct', 'walk-in', 'walk in'],
+  '3d': ['3d', 'configurator', '3d configurator'],
+  other: ['other', '其他', 'referral', 'instagram', 'facebook'],
+};
+
+export const classifyTrustedInquirySource = (value: unknown): AttributionCategory => {
+  const normalized = String(value ?? '').trim().toLowerCase();
+  if (!normalized) return 'unknown';
+  for (const [category, choices] of Object.entries(SOURCE_CATEGORY_ALLOWLIST)) {
+    if (choices.includes(normalized)) return category as AttributionCategory;
+  }
+  return 'unknown';
+};
+
+const generatedAtHkt = (value: Date | string | undefined): string => {
+  const date = value instanceof Date ? value : new Date(value || Date.now());
+  if (!Number.isFinite(date.getTime())) throw new Error('invalid-generated-at');
+  const shifted = new Date(date.getTime() + 8 * 60 * 60 * 1000);
+  return `${shifted.toISOString().slice(0, 19)}+08:00`;
+};
+
 export const buildPurchaseCycleAggregate = (
   input: PurchaseCycleAggregateInput,
 ): PurchaseCycleAggregate => {
@@ -84,6 +113,17 @@ export const buildPurchaseCycleAggregate = (
     if (raw && !dateOnly(raw)) errorCount += 1;
     return inRange(raw, from, to);
   });
+  const sourceCounts: Record<AttributionCategory, number> = {
+    paid: 0,
+    organic: 0,
+    direct: 0,
+    '3d': 0,
+    other: 0,
+    unknown: 0,
+  };
+  for (const inquiry of inquiriesInRange) {
+    sourceCounts[classifyTrustedInquirySource(inquiry.fields['Channel'])] += 1;
+  }
 
   const quotesInRange = input.quotes.filter(record => {
     const raw = record.fields['Quote Date'];
@@ -113,6 +153,7 @@ export const buildPurchaseCycleAggregate = (
     from,
     to,
     timezone: 'Asia/Hong_Kong',
+    generated_at_hkt: generatedAtHkt(input.generatedAt),
     inquiries_new_cycle_captured: inquiriesInRange.length,
     quoted_cycles: incomplete ? null : linkedQuotedCycles,
     linked_quoted_cycles: linkedQuotedCycles,
@@ -120,6 +161,7 @@ export const buildPurchaseCycleAggregate = (
     unlinked_quotes: unlinkedQuotes,
     deduped_quotes: dedupedQuotes,
     error_count: errorCount,
+    source_counts: sourceCounts,
     measurement_state: incomplete ? 'incomplete_linkage' : 'connected',
     coverage_note: incomplete
       ? '同一Inquiry多份Quote已去重；存在未連Inquiry的Quote，因此quoted_cycles保持unknown，舊資料不作猜測配對。'

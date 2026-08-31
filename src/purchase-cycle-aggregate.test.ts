@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildPurchaseCycleAggregate,
+  classifyTrustedInquirySource,
   validateAggregateDateRange,
   type AggregateRecord,
 } from './purchase-cycle-aggregate';
@@ -12,7 +13,8 @@ test('three quotes in one inquiry count as one quoted purchase cycle', () => {
   const result = buildPurchaseCycleAggregate({
     from: '2026-08-24',
     to: '2026-08-30',
-    inquiries: [record('inq-1', { 'Inquiry Date': '2026-08-24' })],
+    generatedAt: '2026-08-31T13:45:30.000Z',
+    inquiries: [record('inq-1', { 'Inquiry Date': '2026-08-24', Channel: 'Google Ads' })],
     quotes: [
       record('quote-1', { 'Quote Date': '2026-08-24', Inquiry: ['inq-1'] }),
       record('quote-2', { 'Quote Date': '2026-08-25', Inquiry: [{ id: 'inq-1' }] }),
@@ -26,6 +28,15 @@ test('three quotes in one inquiry count as one quoted purchase cycle', () => {
   assert.equal(result.deduped_quotes, 2);
   assert.equal(result.unlinked_quotes, 0);
   assert.equal(result.measurement_state, 'connected');
+  assert.equal(result.generated_at_hkt, '2026-08-31T21:45:30+08:00');
+  assert.deepEqual(result.source_counts, {
+    paid: 1,
+    organic: 0,
+    direct: 0,
+    '3d': 0,
+    other: 0,
+    unknown: 0,
+  });
 });
 
 test('unlinked quotes make quoted cycles unknown rather than inflating customer counts', () => {
@@ -96,4 +107,15 @@ test('date range is strict, ordered and limited to 366 days', () => {
     ['2026-08-31', '2026-08-30'],
     ['2025-01-01', '2026-08-30'],
   ]) assert.throws(() => validateAggregateDateRange(from, to), /invalid-date-range/);
+});
+
+test('source attribution uses a fixed allowlist and never exposes arbitrary campaign text', () => {
+  assert.equal(classifyTrustedInquirySource('Google Ads'), 'paid');
+  assert.equal(classifyTrustedInquirySource('Organic Search'), 'organic');
+  assert.equal(classifyTrustedInquirySource('Direct'), 'direct');
+  assert.equal(classifyTrustedInquirySource('3D Configurator'), '3d');
+  assert.equal(classifyTrustedInquirySource('Referral'), 'other');
+  assert.equal(classifyTrustedInquirySource('phone@example.com'), 'unknown');
+  assert.equal(classifyTrustedInquirySource('gclid=raw-click-id'), 'unknown');
+  assert.equal(classifyTrustedInquirySource(''), 'unknown');
 });
