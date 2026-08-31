@@ -339,6 +339,16 @@ export const createLocalQuoteFixture = (): {
     { id: 'tbl_local_orders', name: 'Order_2026', fields: sharedFields },
     { id: 'tbl_local_items', name: 'Order Items', fields: [] },
     { id: 'tbl_local_customers', name: 'Customers', fields: [] },
+    {
+      id: 'tbl_local_china_shipments',
+      name: 'China Shipments',
+      fields: [
+        { name: 'Driver Paid Total HKD', type: 'currency' },
+        choices('Driver Payment Status', ['未付款', '部分付款', '已付清']),
+        { name: 'Driver Last Paid At', type: 'dateTime' },
+        { name: 'Driver Payment Log', type: 'multilineText' },
+      ],
+    },
   ];
 
   return {
