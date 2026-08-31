@@ -51,6 +51,23 @@ test('driver settlement route cannot write P&L or Business Expenses', () => {
   }
 });
 
+test('customer payment route is evidence-gated, CSRF-protected and idempotent', () => {
+  const start = source.indexOf("app.post('/admin/invoice/:token/mark-paid'");
+  const end = source.indexOf("app.get(['/receipt/:token'", start);
+  assert.ok(start >= 0 && end > start, 'customer payment route must exist');
+  const route = source.slice(start, end);
+  for (const required of [
+    "safeEqual(String(req.body.csrf || ''), getOwnerFormToken())",
+    'validateOrderPaymentRequestId',
+    'orderPaymentLock.run',
+    'ORDER_PAYMENT_EVIDENCE_FIELD',
+    'planOrderPayment',
+    'paymentLogHasRequest',
+    'syncMonthlyFinance(orderMonth)',
+  ]) assert.ok(route.includes(required), `payment route missing ${required}`);
+  assert.ok(!route.includes("fields['Attachments']"), 'invoice/general attachments cannot be payment evidence');
+});
+
 test('public document routes validate native aliases and legacy tokens before Airtable lookup', () => {
   assert.equal((source.match(/if \(!acceptedPublicToken\(token\)\) return publicDocumentNotFound\(res\);/g) || []).length, 7);
   assert.ok(!source.includes('/^[a-f0-9]{32}$/'));

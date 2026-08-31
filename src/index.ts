@@ -104,15 +104,20 @@ import {
 } from './inquiry-attribution';
 import {
   calculateOwnerFinanceSummary,
+  getOrderAmountReceived,
+  getOrderOutstandingAmount,
   getMacbookInstallmentNumber,
   getDriverSettlement,
+  isCancelledOrder,
   MACBOOK_INSTALLMENT_COUNT,
   MACBOOK_INSTALLMENT_EXPENSE_NAME,
   parseDriverPaymentAmountCents,
   planDriverPayment,
+  planOrderPayment,
   paymentLogHasRequest,
   toHkdCents,
   validateDriverPaymentRequestId,
+  validateOrderPaymentRequestId,
 } from './owner-finance';
 
 dotenv.config();
@@ -2684,7 +2689,7 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     'Month': month,
     'Month Start': start,
     'Month End': end,
-    'Order Count': finance.monthOrders.length,
+    'Order Count': finance.confirmedOrders.length,
     'Total Revenue HKD': finance.revenue,
     'Supplier Cost HKD': finance.supplier,
     'China Freight HKD': finance.china,
@@ -2721,7 +2726,10 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
   }
   return {
     month,
-    orderCount: finance.monthOrders.length,
+    orderCount: finance.confirmedOrders.length,
+    issuedInvoiceCount: finance.monthOrders.length,
+    receivableCount: finance.receivableOrders.length,
+    outstandingRevenue: finance.outstandingRevenue,
     marketingSpend: finance.marketingSpend,
     businessExpenses: finance.businessExpenses,
     capitalItems: finance.capitalItemsTotal,
@@ -4082,9 +4090,13 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
 
           // 5. Mark as Paid (only if invoice token exists)
           if (invoiceToken) {
+            const paymentRequestId = `recv_${crypto.randomBytes(16).toString('hex')}`;
             actions += `
-              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline;" onsubmit="return confirm('Mark this invoice as Paid?')">
-                <button type="submit" class="btn btn-primary btn-sm">Mark as Paid</button>
+              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline-flex;gap:5px;align-items:center;" onsubmit="return confirm('確認已先將付款證明保存到Dropbox並附到Airtable，再記錄今次實收？')">
+                <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
+                <input type="hidden" name="payment_request_id" value="${paymentRequestId}">
+                <input name="amount_received" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="今次實收HK$" aria-label="今次實收金額" required style="width:118px;">
+                <button type="submit" class="btn btn-primary btn-sm">記錄實收</button>
               </form>`;
           }
 
@@ -6675,36 +6687,98 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
 // ═══════════════════════════════════════════════════════════════════════════
 // ROUTE: POST /admin/invoice/:token/mark-paid
 // ═══════════════════════════════════════════════════════════════════════════
+const ORDER_AMOUNT_RECEIVED_FIELD = 'Amount Received HKD';
+const ORDER_OUTSTANDING_FIELD = 'Outstanding HKD';
+const ORDER_PAYMENT_EVIDENCE_FIELD = 'Payment Evidence';
+const ORDER_PAYMENT_AUDIT_FIELD = 'Payment Audit Log';
+const orderPaymentLock = new InProcessQuoteItemsLock();
+
+const requireOrderPaymentSchema = async (): Promise<void> => {
+  const tables = await getAirtableMetadataTables();
+  const table = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+  if (!table) throw new Error('order-payment-schema-missing-table');
+  const expected = new Map<string, string>([
+    [ORDER_AMOUNT_RECEIVED_FIELD, 'currency'],
+    [ORDER_OUTSTANDING_FIELD, 'formula'],
+    [ORDER_PAYMENT_EVIDENCE_FIELD, 'multipleAttachments'],
+    [ORDER_PAYMENT_AUDIT_FIELD, 'multilineText'],
+  ]);
+  for (const [name, type] of expected) {
+    const field = table.fields.find(candidate => candidate.name === name);
+    if (!field || field.type !== type) throw new Error(`order-payment-schema-invalid-${name}`);
+  }
+  const status = table.fields.find(candidate => candidate.name === 'Status');
+  const choices = new Set((status?.options?.choices || []).map((choice: any) => String(choice.name)));
+  if (!status || status.type !== 'singleSelect' || !['Unpaid', 'Partially Paid', 'Paid'].every(choice => choices.has(choice))) {
+    throw new Error('order-payment-status-options-invalid');
+  }
+};
+
 app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
+    if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
+      return res.status(403).type('text/plain').send('Invalid form token.');
+    }
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
     if (records.length === 0) return publicDocumentNotFound(res);
+    const paymentRequestId = validateOrderPaymentRequestId(req.body.payment_request_id);
+    const amountCents = parseDriverPaymentAmountCents(req.body.amount_received);
+    await requireOrderPaymentSchema();
+    const initialOrder = records[0];
+    await orderPaymentLock.run(initialOrder.id, async () => {
+      const order = await tableOrders.find(initialOrder.id);
+      const fields = order.fields as FieldSet;
+      if (isCancelledOrder(fields)) throw new Error('order-payment-cancelled');
+      const evidence = fields[ORDER_PAYMENT_EVIDENCE_FIELD];
+      if (!Array.isArray(evidence) || evidence.length === 0) throw new Error('order-payment-evidence-required');
 
-    const order = records[0];
-    if (order.fields['Status'] === 'Paid') {
-      return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">Invoice is already paid.</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>'));
-    }
+      const currentReceived = fields[ORDER_AMOUNT_RECEIVED_FIELD] === undefined
+        ? getOrderAmountReceived(fields)
+        : numberField(fields, ORDER_AMOUNT_RECEIVED_FIELD);
+      const paidAt = new Date().toISOString();
+      const plan = planOrderPayment({
+        total: fields['Final Amount'],
+        received: currentReceived,
+        log: fields[ORDER_PAYMENT_AUDIT_FIELD],
+        requestId: paymentRequestId,
+        amountCents,
+        paidAt,
+      });
+      if (plan.duplicate) return;
 
-    const receiptNumber = await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
-    const receiptPublicToken = generateToken();
-    const payDate = new Date().toISOString().split('T')[0];
-
-    await tableOrders.update([{
-      id: order.id,
-      fields: {
-        'Pay Date': payDate,
-        'Receipt Number': receiptNumber,
-        'Receipt Public Token': receiptPublicToken,
-        'Status': 'Paid',
+      const updates: FieldSet = {
+        [ORDER_AMOUNT_RECEIVED_FIELD]: plan.receivedCents / 100,
+        [ORDER_PAYMENT_AUDIT_FIELD]: plan.log,
+        'Pay Date': getHongKongDate(),
+        'Status': plan.status,
+      };
+      if (plan.status === 'Paid') {
+        updates['Receipt Number'] = fields['Receipt Number'] || await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
+        updates['Receipt Public Token'] = fields['Receipt Public Token'] || generateToken();
       }
-    }]);
+      await tableOrders.update([{ id: order.id, fields: updates }]);
 
+      const verified = await tableOrders.find(order.id);
+      if (
+        toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== plan.receivedCents
+        || String(verified.fields['Status'] || '') !== plan.status
+        || !paymentLogHasRequest(verified.fields[ORDER_PAYMENT_AUDIT_FIELD], paymentRequestId)
+      ) throw new Error('order-payment-write-verification-failed');
+
+      const orderMonth = getOrderFinanceMonth(
+        verified.fields['Internal 1 Order No'] || verified.fields['Internal Order No']
+      );
+      if (orderMonth) await syncMonthlyFinance(orderMonth);
+    });
     res.redirect('/quotes');
   } catch (error: any) {
-    console.error(error);
-    res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error marking as paid: ${escapeHtml(error.message)}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
+    logSafeError('Order payment update rejected.', error);
+    const message = String(error?.message || '').includes('evidence-required')
+      ? '未有記錄付款：請先將原始付款證明保存到Dropbox，並附到Airtable Order嘅 Payment Evidence。'
+      : '未有記錄付款；請重新整理後核對實收金額、付款證明及尚欠金額。';
+    res.status(400).send(renderPage('Payment not recorded', `<div class="alert alert-danger">${message}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
   }
 });
 
@@ -6869,7 +6943,8 @@ const getShipmentDriverOrders = (
     .filter((record): record is FinanceRecord => Boolean(record))
     .filter(record => usesQuotedDeliveryDriverShare(
       record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
-    ));
+    ))
+    .filter(record => getOrderAmountReceived(record.fields) > 0);
 };
 
 const getDriverBatchPayableCents = (orders: FinanceRecord[]): number =>
@@ -6904,7 +6979,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       getOutstandingFinanceStatus: fields => getOutstandingFinanceStatus(fields as FieldSet),
     });
 
-    const monthOrders = finance.monthOrders
+    const monthOrders = finance.confirmedOrders
       .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
         .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])));
     const monthExpenses = finance.operatingExpenses;
@@ -6967,6 +7042,25 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       }).join('');
     const unallocatedMarketingRows = finance.unallocatedMarketing
       .map(record => `<tr><td>${escapeHtml(record.fields['Campaign Name'] || 'Marketing支出')}</td><td>${formatOwnerMoney(numberField(record.fields as FieldSet, 'Spend Amount HKD'))}</td><td>月份待分配</td></tr>`)
+      .join('');
+
+    const receivableRows = finance.receivableOrders
+      .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
+        .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])))
+      .map(record => {
+        const fields = record.fields as FieldSet;
+        return `<tr>
+          <td><strong>${escapeHtml(fields['Internal 1 Order No'] || fields['Internal Order No'] || record.id)}</strong><small>${escapeHtml(fields['Invoice Number'] || '未有Invoice編號')}</small></td>
+          <td>${formatOwnerMoney(numberField(fields, 'Final Amount'))}</td>
+          <td>${formatOwnerMoney(getOrderAmountReceived(fields))}</td>
+          <td><strong>${formatOwnerMoney(getOrderOutstandingAmount(fields))}</strong></td>
+          <td>${escapeHtml(fields['Status'] || '未收款')}</td>
+        </tr>`;
+      }).join('');
+    const cancelledRows = finance.cancelledOrders
+      .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
+        .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])))
+      .map(record => `<tr><td><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong></td><td>${escapeHtml(record.fields['Status'] || '取消／失效')}</td><td>${formatOwnerMoney(0)}</td></tr>`)
       .join('');
 
     const pendingRows = monthOrders
@@ -7051,10 +7145,18 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       ${req.query.driverPayment === 'duplicate' ? '<div class="owner-ok">呢次付款要求已處理，冇重複累加。</div>' : ''}
       ${req.query.driverPayment === 'error' ? '<div class="owner-alert">付款未有記錄；請重新整理後按尚欠金額再試。</div>' : ''}
       <div class="owner-kpis">
-        <div class="owner-kpi"><span>本月收入</span><strong>${formatOwnerMoney(totals.revenue)}</strong><small>${monthOrders.length} 張 Order</small></div>
-        <div class="owner-kpi"><span>${totals.pending > 0 ? '訂單暫計毛利（上限）' : '訂單毛利'}</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>收入減已知產品及運輸成本</small></div>
+        <div class="owner-kpi"><span>本月已收收入</span><strong>${formatOwnerMoney(totals.revenue)}</strong><small>${monthOrders.length} 張已收款 Order</small></div>
+        <div class="owner-kpi"><span>未收Invoice／應收</span><strong>${formatOwnerMoney(finance.outstandingRevenue)}</strong><small>${finance.receivableOrders.length} 張未全數收款</small></div>
+        <div class="owner-kpi"><span>${totals.pending > 0 ? '確認交易暫計毛利（上限）' : '確認交易毛利'}</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>只計實收收入及已確認Order成本</small></div>
         <div class="owner-kpi owner-kpi-highlight"><span>${isProvisional ? '本月暫計淨利（上限）' : '本月淨利'}</span><strong>${formatOwnerMoney(netProfit)}</strong><small>${totals.pending > 0 ? `尚欠${totals.pending}張Order成本｜` : ''}${googleAdsStatementPending ? '8月Google Ads月結待到｜' : ''}淨利率 ${margin.toFixed(1)}%</small></div>
-        <div class="owner-kpi"><span>廣告帶來訂單</span><strong>${totals.adOrders}</strong><small>共 ${monthOrders.length} 張 Order</small></div>
+      </div>
+      <div class="owner-grid">
+        <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>收款狀態分開睇</h2><strong>開Invoice ≠ 收入 ≠ 成交</strong></div>
+          <div class="owner-payment-summary"><span>已收收入：${monthOrders.length}張</span><span>未收／部分收款：${finance.receivableOrders.length}張</span><span>取消／失效：${finance.cancelledOrders.length}張</span></div>
+          ${receivableRows ? `<h3 class="owner-subhead">未收Invoice／應收</h3><div class="owner-table-wrap"><table><thead><tr><th>Order／Invoice</th><th>Invoice金額</th><th>已收</th><th>尚欠</th><th>狀態</th></tr></thead><tbody>${receivableRows}</tbody></table></div>` : '<div class="owner-ok">本月冇未收Invoice。</div>'}
+          ${cancelledRows ? `<h3 class="owner-subhead">取消／失效</h3><div class="owner-table-wrap"><table><thead><tr><th>Order</th><th>狀態</th><th>計入收入</th></tr></thead><tbody>${cancelledRows}</tbody></table></div>` : ''}
+          <p class="owner-note">收入只按「Amount Received HKD」實收金額；Unpaid／Cancelled一律計HK$0。Invoice、報價或一般附件唔會當付款證明。</p>
+        </section>
       </div>
       <div class="owner-grid">
         <section class="owner-panel"><h2>成本分拆</h2><div class="owner-lines">
@@ -7067,7 +7169,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
           <div><span>公司每月／現金支出</span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
           ${finance.unallocatedMarketingSpend > 0 ? `<div><span>Marketing待分配（不計入淨利）</span><strong>${formatOwnerMoney(finance.unallocatedMarketingSpend)}</strong></div>` : ''}
         </div></section>
-        <section class="owner-panel"><h2>Order 來自邊個 Ads／來源</h2>
+        <section class="owner-panel"><h2>已收款 Order 來自邊個 Ads／來源</h2><p class="owner-note">廣告帶來已收款Order：${totals.adOrders}／${monthOrders.length}</p>
           ${campaignRows ? `<div class="owner-table-wrap"><table><thead><tr><th>Campaign / Source</th><th>Order</th><th>比例</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<div class="owner-empty">本月未有 Order。</div>'}
         </section>
       </div>
@@ -7092,7 +7194,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     </div>`;
 
     const extraHead = `<style>
-      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
+      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
     </style><script>
       function confirmDriverPayment(form) {
         var input = form.querySelector('input[name="payment_amount"]');
