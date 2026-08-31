@@ -88,13 +88,20 @@ test('valid Marketing Month wins and blank Month falls back to Spend Date', () =
 
 test('driver settlement supports unpaid, partial and full without changing P&L cost', () => {
   assert.deepEqual(getDriverSettlement(486, 0), {
-    payableCents: 48600, paidCents: 0, outstandingCents: 48600, status: '未付款',
+    payableCents: 48600, paidCents: 0, outstandingCents: 48600,
+    overpaidCents: 0, differenceCents: -48600, status: '未付款',
   });
   assert.deepEqual(getDriverSettlement(486, 200), {
-    payableCents: 48600, paidCents: 20000, outstandingCents: 28600, status: '部分付款',
+    payableCents: 48600, paidCents: 20000, outstandingCents: 28600,
+    overpaidCents: 0, differenceCents: -28600, status: '部分付款',
   });
   assert.deepEqual(getDriverSettlement(486, 486), {
-    payableCents: 48600, paidCents: 48600, outstandingCents: 0, status: '已付清',
+    payableCents: 48600, paidCents: 48600, outstandingCents: 0,
+    overpaidCents: 0, differenceCents: 0, status: '已付款',
+  });
+  assert.deepEqual(getDriverSettlement(486, 490), {
+    payableCents: 48600, paidCents: 49000, outstandingCents: 0,
+    overpaidCents: 400, differenceCents: 400, status: '超付',
   });
 });
 
@@ -136,11 +143,14 @@ test('partial, full, duplicate and overpayment driver plans have one economic ef
     paidAt: '2026-08-31T11:00:00.000Z',
   });
   assert.equal(full.paidCents, 48600);
-  assert.equal(full.status, '已付清');
-  assert.throws(() => planDriverPayment({
-    payable: 486, paid: 200, log: partial.log, requestId: secondId, amountCents: 28601,
+  assert.equal(full.status, '已付款');
+  const overpaid = planDriverPayment({
+    payable: 486, paid: 200, log: partial.log, requestId: secondId, amountCents: 29000,
     paidAt: '2026-08-31T11:00:00.000Z',
-  }), /overpay/);
+  });
+  assert.equal(overpaid.paidCents, 49000);
+  assert.equal(overpaid.differenceCents, 400);
+  assert.equal(overpaid.status, '超付');
 });
 
 test('official Google activity is allocated to cost month, never later payment month', () => {

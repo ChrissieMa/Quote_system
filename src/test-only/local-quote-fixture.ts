@@ -344,9 +344,10 @@ export const createLocalQuoteFixture = (): {
       name: 'China Shipments',
       fields: [
         { name: 'Driver Paid Total HKD', type: 'currency' },
-        choices('Driver Payment Status', ['未付款', '部分付款', '已付清']),
+        choices('Driver Payment Status', ['未付款', '部分付款', '已付款', '超付']),
         { name: 'Driver Last Paid At', type: 'dateTime' },
         { name: 'Driver Payment Log', type: 'multilineText' },
+        { name: 'Driver Payment Difference HKD', type: 'currency' },
       ],
     },
   ];

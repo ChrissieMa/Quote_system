@@ -171,7 +171,9 @@ export type DriverSettlement = {
   payableCents: number;
   paidCents: number;
   outstandingCents: number;
-  status: '未付款' | '部分付款' | '已付清';
+  overpaidCents: number;
+  differenceCents: number;
+  status: '未付款' | '部分付款' | '已付款' | '超付';
 };
 
 export const toHkdCents = (value: unknown): number => {
@@ -184,8 +186,16 @@ export const getDriverSettlement = (payable: unknown, paid: unknown): DriverSett
   const payableCents = Math.max(0, toHkdCents(payable));
   const paidCents = Math.max(0, toHkdCents(paid));
   const outstandingCents = Math.max(0, payableCents - paidCents);
-  const status = paidCents <= 0 ? '未付款' : outstandingCents > 0 ? '部分付款' : '已付清';
-  return { payableCents, paidCents, outstandingCents, status };
+  const overpaidCents = Math.max(0, paidCents - payableCents);
+  const differenceCents = paidCents - payableCents;
+  const status = paidCents <= 0
+    ? '未付款'
+    : paidCents < payableCents
+      ? '部分付款'
+      : paidCents === payableCents
+        ? '已付款'
+        : '超付';
+  return { payableCents, paidCents, outstandingCents, overpaidCents, differenceCents, status };
 };
 
 export const paymentLogHasRequest = (log: unknown, requestId: string): boolean =>
@@ -232,6 +242,7 @@ export const planDriverPayment = (input: {
 }): {
   duplicate: boolean;
   paidCents: number;
+  differenceCents: number;
   status: DriverSettlement['status'];
   log: string;
 } => {
@@ -240,16 +251,22 @@ export const planDriverPayment = (input: {
       throw new Error('driver-payment-request-conflict');
     }
     const current = getDriverSettlement(input.payable, input.paid);
-    return { duplicate: true, paidCents: current.paidCents, status: current.status, log: String(input.log || '') };
+    return {
+      duplicate: true,
+      paidCents: current.paidCents,
+      differenceCents: current.differenceCents,
+      status: current.status,
+      log: String(input.log || ''),
+    };
   }
   const current = getDriverSettlement(input.payable, input.paid);
   if (current.paidCents > current.payableCents) throw new Error('driver-payment-existing-overpay');
-  if (input.amountCents > current.outstandingCents) throw new Error('driver-payment-overpay');
   const paidCents = current.paidCents + input.amountCents;
   const next = getDriverSettlement(input.payable, paidCents / 100);
   return {
     duplicate: false,
     paidCents,
+    differenceCents: next.differenceCents,
     status: next.status,
     log: appendDriverPaymentLog(input.log, input.requestId, input.paidAt, input.amountCents),
   };

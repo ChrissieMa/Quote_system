@@ -6822,6 +6822,7 @@ const DRIVER_PAID_FIELD = 'Driver Paid Total HKD';
 const DRIVER_STATUS_FIELD = 'Driver Payment Status';
 const DRIVER_LAST_PAID_FIELD = 'Driver Last Paid At';
 const DRIVER_PAYMENT_LOG_FIELD = 'Driver Payment Log';
+const DRIVER_PAYMENT_DIFFERENCE_FIELD = 'Driver Payment Difference HKD';
 const driverPaymentLock = new InProcessQuoteItemsLock();
 
 type FinanceRecord = { id: string; fields: FieldSet };
@@ -6835,13 +6836,14 @@ const requireDriverPaymentSchema = async (): Promise<void> => {
     [DRIVER_STATUS_FIELD, 'singleSelect'],
     [DRIVER_LAST_PAID_FIELD, 'dateTime'],
     [DRIVER_PAYMENT_LOG_FIELD, 'multilineText'],
+    [DRIVER_PAYMENT_DIFFERENCE_FIELD, 'currency'],
   ]);
   for (const [name, type] of expected) {
     const field = table.fields.find(item => item.name === name);
     if (!field || field.type !== type) throw new Error(`driver-payment-schema-invalid:${name}`);
     if (name === DRIVER_STATUS_FIELD) {
       const choices = new Set(field.options?.choices?.map(choice => choice.name) || []);
-      if (!['未付款', '部分付款', '已付清'].every(choice => choices.has(choice))) {
+      if (!['未付款', '部分付款', '已付款', '超付'].every(choice => choices.has(choice))) {
         throw new Error('driver-payment-schema-invalid:status-choices');
       }
     }
@@ -6991,16 +6993,18 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       const batchPayableCents = getDriverBatchPayableCents(linkedOrders);
       const settlement = getDriverSettlement(batchPayableCents / 100, shipment.fields[DRIVER_PAID_FIELD]);
       const storedStatus = String(shipment.fields[DRIVER_STATUS_FIELD] || '').trim();
-      const integrityWarning = settlement.paidCents > settlement.payableCents
-        || (storedStatus && storedStatus !== settlement.status);
+      const storedDifferenceCents = toHkdCents(shipment.fields[DRIVER_PAYMENT_DIFFERENCE_FIELD]);
+      const integrityWarning = (storedStatus && storedStatus !== settlement.status)
+        || (shipment.fields[DRIVER_PAYMENT_DIFFERENCE_FIELD] !== undefined
+          && storedDifferenceCents !== settlement.differenceCents);
       const paymentRequestId = `pay_${crypto.randomBytes(16).toString('hex')}`;
-      const paymentForm = settlement.outstandingCents > 0 ? `<form class="owner-payment-form" method="POST" action="/admin/china-shipments/${encodeURIComponent(shipment.id)}/driver-payments">
+      const paymentForm = settlement.status === '未付款' || settlement.status === '部分付款' ? `<form class="owner-payment-form" method="POST" action="/admin/china-shipments/${encodeURIComponent(shipment.id)}/driver-payments" data-payable="${(settlement.payableCents / 100).toFixed(2)}" data-paid="${(settlement.paidCents / 100).toFixed(2)}" onsubmit="return confirmDriverPayment(this)">
         <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
         <input type="hidden" name="month" value="${escapeHtml(selectedMonth)}">
         <input type="hidden" name="payment_request_id" value="${paymentRequestId}">
-        <label>今次付款HK$<input name="payment_amount" type="number" min="0.01" max="${(settlement.outstandingCents / 100).toFixed(2)}" step="0.01" inputmode="decimal" value="${(settlement.outstandingCents / 100).toFixed(2)}" required></label>
-        <button class="btn btn-primary" type="submit">記錄已付款</button>
-      </form>` : '<span class="owner-paid-chip">已付清</span>';
+        <label>今次實際付款金額HK$<input name="payment_amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如 ${(settlement.outstandingCents / 100).toFixed(2)}" required></label>
+        <button class="btn btn-primary" type="submit">記錄付款／已付款</button>
+      </form>` : `<span class="owner-paid-chip">${escapeHtml(settlement.status)}</span>`;
 
       const monthSplit = Array.from(monthlyTotals.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
@@ -7015,7 +7019,11 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         <td>${monthSplit}</td>
         <td><strong>${formatOwnerMoney(settlement.payableCents / 100)}</strong></td>
         <td><strong>${formatOwnerMoney(settlement.paidCents / 100)}</strong></td>
-        <td><strong>${formatOwnerMoney(settlement.outstandingCents / 100)}</strong></td>
+        <td><strong>${settlement.overpaidCents > 0
+          ? `超付 ${formatOwnerMoney(settlement.overpaidCents / 100)}`
+          : settlement.outstandingCents > 0
+            ? `尚欠 ${formatOwnerMoney(settlement.outstandingCents / 100)}`
+            : formatOwnerMoney(0)}</strong></td>
         <td><span class="owner-payment-status">${escapeHtml(settlement.status)}</span>${integrityWarning ? '<small class="owner-integrity-warning">付款狀態待核對</small>' : ''}</td>
         <td>${paymentForm}</td>
       </tr>`];
@@ -7065,7 +7073,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       </div>
       <div class="owner-grid">
         <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>司機付款（按到港批次）</h2><strong>現金settlement</strong></div>
-          ${driverBatchRows ? `<div class="owner-table-wrap"><table><thead><tr><th>批次／包括訂單</th><th>成本月份分拆</th><th>應付總額</th><th>累計已付</th><th>尚欠</th><th>狀態</th><th>記錄付款</th></tr></thead><tbody>${driverBatchRows}</tbody></table></div>` : '<div class="owner-empty">本月未有已連接 China Shipment 嘅司機付款批次。</div>'}
+          ${driverBatchRows ? `<div class="owner-table-wrap"><table><thead><tr><th>批次／包括訂單</th><th>成本月份分拆</th><th>應付總額</th><th>累計已付</th><th>尚欠／超付差額</th><th>狀態</th><th>記錄付款</th></tr></thead><tbody>${driverBatchRows}</tbody></table></div>` : '<div class="owner-empty">本月未有已連接 China Shipment 嘅司機付款批次。</div>'}
           <p class="owner-note">由 JUN2602 起，司機應付成本＝報價香港運費 × 90%，按Order月份只計一次。付款按鈕只更新現金settlement，唔會再扣淨利或建立Business Expense。</p>
         </section>
       </div>
@@ -7085,7 +7093,31 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
 
     const extraHead = `<style>
       body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
-    </style>`;
+    </style><script>
+      function confirmDriverPayment(form) {
+        var input = form.querySelector('input[name="payment_amount"]');
+        var amount = Number(input && input.value);
+        if (!Number.isFinite(amount) || amount <= 0) return false;
+        var payable = Number(form.getAttribute('data-payable')) || 0;
+        var paid = Number(form.getAttribute('data-paid')) || 0;
+        var nextPaid = paid + amount;
+        var difference = nextPaid - payable;
+        var balanceText = difference > 0
+          ? '超付 HK$' + difference.toFixed(2)
+          : difference < 0
+            ? '尚欠 HK$' + Math.abs(difference).toFixed(2)
+            : '剛好付清';
+        return window.confirm(
+          '請確認司機付款：\\n' +
+          '應付總額 HK$' + payable.toFixed(2) + '\\n' +
+          '目前已付 HK$' + paid.toFixed(2) + '\\n' +
+          '今次實付 HK$' + amount.toFixed(2) + '\\n' +
+          '付款後累計 HK$' + nextPaid.toFixed(2) + '\\n' +
+          balanceText + '\\n\\n' +
+          '呢次只更新現金付款紀錄，唔會改兩張Order成本或再扣淨利。'
+        );
+      }
+    </script>`;
     res.send(renderPage(`老闆 Dashboard ${selectedMonth}`, content, extraHead));
   } catch (error: any) {
     console.error('Unable to render owner dashboard:', error);
@@ -7155,6 +7187,7 @@ app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, req
           [DRIVER_STATUS_FIELD]: plan.status,
           [DRIVER_LAST_PAID_FIELD]: paidAt,
           [DRIVER_PAYMENT_LOG_FIELD]: plan.log,
+          [DRIVER_PAYMENT_DIFFERENCE_FIELD]: plan.differenceCents / 100,
         },
       }]);
 
@@ -7162,6 +7195,7 @@ app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, req
       if (
         toHkdCents(verified.fields[DRIVER_PAID_FIELD]) !== plan.paidCents
         || String(verified.fields[DRIVER_STATUS_FIELD] || '') !== plan.status
+        || toHkdCents(verified.fields[DRIVER_PAYMENT_DIFFERENCE_FIELD]) !== plan.differenceCents
         || !paymentLogHasRequest(verified.fields[DRIVER_PAYMENT_LOG_FIELD], paymentRequestId)
       ) {
         throw new Error('driver-payment-write-verification-failed');
