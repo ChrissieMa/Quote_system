@@ -7,11 +7,16 @@ export type OwnerFinanceRecord = {
 
 export type OwnerFinanceSummary = {
   monthOrders: OwnerFinanceRecord[];
+  confirmedOrders: OwnerFinanceRecord[];
+  receivableOrders: OwnerFinanceRecord[];
+  cancelledOrders: OwnerFinanceRecord[];
   allocatedMarketing: OwnerFinanceRecord[];
   unallocatedMarketing: OwnerFinanceRecord[];
   operatingExpenses: OwnerFinanceRecord[];
   capitalItems: OwnerFinanceRecord[];
   revenue: number;
+  issuedInvoiceTotal: number;
+  outstandingRevenue: number;
   supplier: number;
   china: number;
   deliveryPayable: number;
@@ -64,6 +69,43 @@ const numberField = (fields: OwnerFinanceFields, name: string): number => {
   return Number.isFinite(value) ? value : 0;
 };
 
+const normalizedOrderStatus = (fields: OwnerFinanceFields): string =>
+  String(fields['Status'] || '').trim().toLowerCase();
+
+export const isCancelledOrder = (fields: OwnerFinanceFields): boolean =>
+  /^(?:cancelled|canceled|void|refunded|取消|已取消|作廢)$/.test(normalizedOrderStatus(fields));
+
+export const hasOrderPaymentEvidence = (fields: OwnerFinanceFields): boolean => {
+  const attachments = fields['Payment Evidence'];
+  const hasAttachment = Array.isArray(attachments) && attachments.length > 0;
+  const receiptNumber = String(fields['Receipt Number'] || fields['Receipt No'] || '').trim();
+  return hasAttachment || Boolean(receiptNumber);
+};
+
+export const getOrderAmountReceived = (fields: OwnerFinanceFields): number => {
+  if (isCancelledOrder(fields) || ['unpaid', '未付款'].includes(normalizedOrderStatus(fields))) return 0;
+
+  const explicit = fields['Amount Received HKD'];
+  if (explicit !== undefined && explicit !== null && String(explicit).trim() !== '') {
+    const amount = Number(explicit);
+    return Number.isFinite(amount) && amount > 0 ? amount : 0;
+  }
+
+  // Safe legacy bridge: historic fully-paid Orders can use Final Amount only
+  // when all three independent payment signals exist. An Invoice or a generic
+  // attachment alone is never payment evidence.
+  const paid = ['paid', '已付款'].includes(normalizedOrderStatus(fields));
+  const payDate = String(fields['Pay Date'] || '').trim();
+  return paid && payDate && hasOrderPaymentEvidence(fields)
+    ? numberField(fields, 'Final Amount')
+    : 0;
+};
+
+export const getOrderOutstandingAmount = (fields: OwnerFinanceFields): number => {
+  if (isCancelledOrder(fields)) return 0;
+  return Math.max(0, numberField(fields, 'Final Amount') - getOrderAmountReceived(fields));
+};
+
 const isCountablePayment = (fields: OwnerFinanceFields): boolean => {
   const status = String(fields['Payment Status'] || 'Paid').trim().toLowerCase();
   return !['pending', 'refunded', 'cancelled'].includes(status);
@@ -97,6 +139,9 @@ export const isCapitalBusinessExpense = (fields: OwnerFinanceFields): boolean =>
 
 export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFinanceSummary => {
   const monthOrders = options.orders.filter(record => options.getOrderMonth(record.fields) === options.month);
+  const confirmedOrders = monthOrders.filter(record => getOrderAmountReceived(record.fields) > 0);
+  const receivableOrders = monthOrders.filter(record => getOrderOutstandingAmount(record.fields) > 0);
+  const cancelledOrders = monthOrders.filter(record => isCancelledOrder(record.fields));
   const allocatedMarketing = options.marketing.filter(record =>
     isCountablePayment(record.fields) && resolveMarketingFinanceMonth(record.fields) === options.month,
   );
@@ -108,9 +153,9 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
   const capitalItems = monthExpenses.filter(record => isCapitalBusinessExpense(record.fields));
   const operatingExpenses = monthExpenses.filter(record => !isCapitalBusinessExpense(record.fields));
 
-  const orderTotals = monthOrders.reduce((sum, record) => {
+  const orderTotals = confirmedOrders.reduce((sum, record) => {
     const fields = record.fields;
-    sum.revenue += numberField(fields, 'Final Amount');
+    sum.revenue += getOrderAmountReceived(fields);
     sum.supplier += numberField(fields, 'Supplier Cost Used HKD')
       || numberField(fields, 'Actual Supplier Cost HKD')
       || numberField(fields, 'Cost');
@@ -132,6 +177,12 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     adOrders: 0,
   });
 
+  const issuedInvoiceTotal = monthOrders
+    .filter(record => !isCancelledOrder(record.fields))
+    .reduce((sum, record) => sum + numberField(record.fields, 'Final Amount'), 0);
+  const outstandingRevenue = receivableOrders
+    .reduce((sum, record) => sum + getOrderOutstandingAmount(record.fields), 0);
+
   const marketingSpend = allocatedMarketing.reduce(
     (sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0,
   );
@@ -150,11 +201,16 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
 
   return {
     monthOrders,
+    confirmedOrders,
+    receivableOrders,
+    cancelledOrders,
     allocatedMarketing,
     unallocatedMarketing,
     operatingExpenses,
     capitalItems,
     ...orderTotals,
+    issuedInvoiceTotal,
+    outstandingRevenue,
     orderCosts,
     orderGrossProfit,
     marketingSpend,
@@ -269,5 +325,63 @@ export const planDriverPayment = (input: {
     differenceCents: next.differenceCents,
     status: next.status,
     log: appendDriverPaymentLog(input.log, input.requestId, input.paidAt, input.amountCents),
+  };
+};
+
+export const validateOrderPaymentRequestId = (value: unknown): string => {
+  const requestId = String(value || '').trim();
+  if (!/^recv_[a-f0-9]{32}$/.test(requestId)) throw new Error('order-payment-request-id-invalid');
+  return requestId;
+};
+
+const appendOrderPaymentLog = (
+  log: unknown,
+  requestId: string,
+  paidAt: string,
+  amountCents: number,
+  receivedCents: number,
+): string => {
+  const current = String(log || '').trim();
+  const entry = `RECEIVED|${requestId}|${paidAt}|${(amountCents / 100).toFixed(2)}|${(receivedCents / 100).toFixed(2)}`;
+  return current ? `${current}\n${entry}` : entry;
+};
+
+export const planOrderPayment = (input: {
+  total: unknown;
+  received: unknown;
+  log: unknown;
+  requestId: string;
+  amountCents: number;
+  paidAt: string;
+}): {
+  duplicate: boolean;
+  receivedCents: number;
+  outstandingCents: number;
+  status: 'Partially Paid' | 'Paid';
+  log: string;
+} => {
+  const totalCents = Math.max(0, toHkdCents(input.total));
+  const currentReceivedCents = Math.max(0, toHkdCents(input.received));
+  if (totalCents <= 0 || currentReceivedCents > totalCents) throw new Error('order-payment-state-invalid');
+  if (paymentLogHasRequest(input.log, input.requestId)) {
+    if (paymentLogRequestAmountCents(input.log, input.requestId) !== input.amountCents) {
+      throw new Error('order-payment-request-conflict');
+    }
+    return {
+      duplicate: true,
+      receivedCents: currentReceivedCents,
+      outstandingCents: totalCents - currentReceivedCents,
+      status: currentReceivedCents >= totalCents ? 'Paid' : 'Partially Paid',
+      log: String(input.log || ''),
+    };
+  }
+  const receivedCents = currentReceivedCents + input.amountCents;
+  if (receivedCents > totalCents) throw new Error('order-payment-exceeds-outstanding');
+  return {
+    duplicate: false,
+    receivedCents,
+    outstandingCents: totalCents - receivedCents,
+    status: receivedCents === totalCents ? 'Paid' : 'Partially Paid',
+    log: appendOrderPaymentLog(input.log, input.requestId, input.paidAt, input.amountCents, receivedCents),
   };
 };

@@ -3,13 +3,17 @@ import assert from 'node:assert/strict';
 import {
   appendDriverPaymentLog,
   calculateOwnerFinanceSummary,
+  getOrderAmountReceived,
+  getOrderOutstandingAmount,
   getMacbookInstallmentNumber,
   getDriverSettlement,
   parseDriverPaymentAmountCents,
   planDriverPayment,
+  planOrderPayment,
   paymentLogHasRequest,
   resolveMarketingFinanceMonth,
   validateDriverPaymentRequestId,
+  validateOrderPaymentRequestId,
 } from './owner-finance';
 
 const record = (id: string, fields: Record<string, unknown>) => ({ id, fields });
@@ -27,6 +31,7 @@ test('capital equipment and allocation-pending marketing are excluded from Augus
     orders: [
       record('order', {
         'Final Amount': 29900.663774,
+        'Amount Received HKD': 29900.663774,
         'Supplier Cost Used HKD': 7000,
         'China Freight Used HKD': 2500,
         'Actual Reissue Cost HKD': 552.42,
@@ -70,7 +75,7 @@ test('capital equipment and allocation-pending marketing are excluded from Augus
   assert.equal(summary.capitalItemsTotal, 27374);
   assert.ok(Math.abs(summary.orderGrossProfit - 19362.243774) < 1e-9);
   assert.ok(Math.abs(summary.netProfit - 13220.803774) < 1e-9);
-  assert.equal(summary.pendingCostOrders, 6);
+  assert.equal(summary.pendingCostOrders, 1);
   assert.equal(summary.provisional, true);
 });
 
@@ -153,6 +158,37 @@ test('partial, full, duplicate and overpayment driver plans have one economic ef
   assert.equal(overpaid.status, '超付');
 });
 
+test('customer receipt plans support deposits, full settlement and duplicate protection', () => {
+  const firstId = 'recv_0123456789abcdef0123456789abcdef';
+  const secondId = 'recv_fedcba9876543210fedcba9876543210';
+  assert.equal(validateOrderPaymentRequestId(firstId), firstId);
+  assert.throws(() => validateOrderPaymentRequestId('pay_0123456789abcdef0123456789abcdef'), /request-id-invalid/);
+  const deposit = planOrderPayment({
+    total: 3000, received: 0, log: '', requestId: firstId, amountCents: 100000,
+    paidAt: '2026-08-31T10:00:00.000Z',
+  });
+  assert.equal(deposit.receivedCents, 100000);
+  assert.equal(deposit.outstandingCents, 200000);
+  assert.equal(deposit.status, 'Partially Paid');
+  const duplicate = planOrderPayment({
+    total: 3000, received: 1000, log: deposit.log, requestId: firstId, amountCents: 100000,
+    paidAt: '2026-08-31T10:00:01.000Z',
+  });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.receivedCents, 100000);
+  const full = planOrderPayment({
+    total: 3000, received: 1000, log: deposit.log, requestId: secondId, amountCents: 200000,
+    paidAt: '2026-08-31T11:00:00.000Z',
+  });
+  assert.equal(full.receivedCents, 300000);
+  assert.equal(full.outstandingCents, 0);
+  assert.equal(full.status, 'Paid');
+  assert.throws(() => planOrderPayment({
+    total: 3000, received: 1000, log: deposit.log, requestId: secondId, amountCents: 200001,
+    paidAt: '2026-08-31T11:00:00.000Z',
+  }), /exceeds-outstanding/);
+});
+
 test('official Google activity is allocated to cost month, never later payment month', () => {
   const may = resolveMarketingFinanceMonth({ Month: '2026-05', 'Spend Date': '2026-05-31', 'Spend Amount HKD': 959.48 });
   const june = resolveMarketingFinanceMonth({ Month: '2026-06', 'Spend Date': '2026-08-15', 'Spend Amount HKD': 1213.14 });
@@ -160,7 +196,7 @@ test('official Google activity is allocated to cost month, never later payment m
   assert.deepEqual([may, june, july], ['2026-05', '2026-06', '2026-07']);
 });
 
-test('seven August orders use Driver Payable and sum to the provisional monthly gross profit', () => {
+test('August revenue and costs include six received Orders and exclude the unpaid Invoice', () => {
   const augustOrders = [
     { no: 'AUG2601', final: 13150.36, supplier: 5152, china: 0, driver: 1800, profit: 6198.36 },
     { no: 'AUG2602', final: 1645.8, supplier: 700, china: 135.42, driver: 216, profit: 594.38 },
@@ -175,6 +211,8 @@ test('seven August orders use Driver Payable and sum to the provisional monthly 
     orders: augustOrders.map(order => record(order.no, {
       'Internal 1 Order No': order.no,
       'Final Amount': order.final,
+      'Amount Received HKD': order.no === 'AUG2606' ? 0 : order.final,
+      'Status': order.no === 'AUG2606' ? 'Unpaid' : 'Paid',
       'Supplier Cost Used HKD': order.supplier,
       'China Freight Used HKD': order.china,
       driverPayable: order.driver,
@@ -182,11 +220,35 @@ test('seven August orders use Driver Payable and sum to the provisional monthly 
     marketing: [],
     expenses: [],
   });
-  const actualProfits = augustOrders.map(order =>
-    order.final - order.supplier - order.china - order.driver,
-  );
-  actualProfits.forEach((profit, index) => {
-    assert.ok(Math.abs(profit - augustOrders[index].profit) < 1e-9, augustOrders[index].no);
-  });
-  assert.ok(Math.abs(summary.orderGrossProfit - 19362.243774) < 1e-9);
+  assert.equal(summary.confirmedOrders.length, 6);
+  assert.equal(summary.receivableOrders.length, 1);
+  assert.ok(Math.abs(summary.revenue - 21027.486545) < 1e-9);
+  assert.ok(Math.abs(summary.outstandingRevenue - 8873.177229) < 1e-9);
+  assert.ok(Math.abs(summary.deliveryPayable - 2727) < 1e-9);
+  assert.ok(Math.abs(summary.orderCosts - 9278.42) < 1e-9);
+  assert.ok(Math.abs(summary.orderGrossProfit - 11749.066545) < 1e-9);
+});
+
+test('only explicit actual receipts or fully evidenced legacy payments count as revenue', () => {
+  assert.equal(getOrderAmountReceived({
+    Status: 'Unpaid', 'Final Amount': 8873.177229,
+  }), 0);
+  assert.equal(getOrderOutstandingAmount({
+    Status: 'Unpaid', 'Final Amount': 8873.177229,
+  }), 8873.177229);
+  assert.equal(getOrderAmountReceived({
+    Status: 'Paid', 'Final Amount': 3000, 'Amount Received HKD': 1000,
+  }), 1000);
+  assert.equal(getOrderOutstandingAmount({
+    Status: 'Paid', 'Final Amount': 3000, 'Amount Received HKD': 1000,
+  }), 2000);
+  assert.equal(getOrderAmountReceived({
+    Status: 'Paid', 'Final Amount': 3000, 'Pay Date': '2026-08-31', 'Receipt Number': 'RCPT-1',
+  }), 3000);
+  assert.equal(getOrderAmountReceived({
+    Status: 'Paid', 'Final Amount': 3000, 'Pay Date': '2026-08-31', Attachments: [{ id: 'invoice' }],
+  }), 0, 'generic invoice attachments are not payment evidence');
+  assert.equal(getOrderAmountReceived({
+    Status: 'Cancelled', 'Final Amount': 3000, 'Amount Received HKD': 3000,
+  }), 0);
 });
