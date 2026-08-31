@@ -88,17 +88,18 @@ test('short customer paths are native aliases and long paths remain backward com
 
 test('owner dashboard exposes auditable Order cost breakdown without calling provisional profit final', () => {
   for (const label of [
-    '已輸入小糖成本',
+    '實付小糖貨款',
     '每張 Order 成本及盈利明細',
     '報價手動Profit',
     '全單優惠',
     '報價中國運費預留',
     '報價香港送貨預留',
-    '實際小糖成本',
-    '實際中國運費',
-    '司機應付成本',
-    '暫計實際盈利（上限）',
-    '缺實際中國運費或其他成本時，盈利只會標「暫計／上限」',
+    '實付中國運費',
+    '香港運費應付',
+    '實付香港運費',
+    '截至目前現金毛利',
+    '預計／權責毛利（上限）',
+    'blank／0顯示未付款',
   ]) assert.ok(source.includes(label), `missing cost breakdown label: ${label}`);
 });
 
