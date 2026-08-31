@@ -17,6 +17,7 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin,",
     "app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin,",
     "app.get('/admin/dashboard', requireAdmin,",
+    "app.get('/admin/analytics/purchase-cycles', requireAdmin,",
     "app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, requireSameOrigin,",
     "app.get('/admin/costs', requireAdmin,",
     "app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,",
@@ -99,6 +100,18 @@ test('owner dashboard exposes auditable Order cost breakdown without calling pro
     '暫計實際盈利（上限）',
     '缺實際中國運費或其他成本時，盈利只會標「暫計／上限」',
   ]) assert.ok(source.includes(label), `missing cost breakdown label: ${label}`);
+});
+
+test('new Quote persistence links a purchase-cycle Inquiry on the first write', () => {
+  const start = source.indexOf('// Attribution belongs to the first customer inquiry');
+  const end = source.indexOf('const publicLink =', start);
+  assert.ok(start >= 0 && end > start, 'Quote creation block must exist');
+  const route = source.slice(start, end);
+  const inquiryCreate = route.indexOf('tableInquiries.create');
+  const quoteCreate = route.indexOf('tableQuotes.create');
+  assert.ok(inquiryCreate >= 0 && quoteCreate > inquiryCreate, 'new Inquiry must exist before first Quote write');
+  assert.ok(route.includes("...(canonicalInquiryRecordId ? { 'Inquiry': [canonicalInquiryRecordId] } : {})"));
+  assert.ok(!route.includes("tableQuotes.update([{\n          id: createdQuoteRecordId,\n          fields: { 'Inquiry'"), 'linkage must not depend on a second Quote write');
 });
 
 test('server-wide privacy headers, HTML noindex, crawlable robots, and dead sitemaps are present', () => {

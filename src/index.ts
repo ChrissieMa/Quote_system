@@ -103,6 +103,10 @@ import {
   selectCanonicalInquiry,
 } from './inquiry-attribution';
 import {
+  buildPurchaseCycleAggregate,
+  validateAggregateDateRange,
+} from './purchase-cycle-aggregate';
+import {
   calculateOwnerOrderCostBreakdown,
   calculateOwnerFinanceSummary,
   getOrderAmountReceived,
@@ -5588,14 +5592,14 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       }
     }
     const selectedInquiryFields: FieldSet = selectedInquiry?.fields || {};
-    const canonicalInquiry = await findCanonicalInquiryForQuote(
+    let canonicalInquiry = await findCanonicalInquiryForQuote(
       quoteCustomerPhone || b.phone || selectedInquiryFields['Phone'],
       selectedCustomerId || getLinkedRecordId(selectedInquiryFields['Customer']) || '',
       quoteDate,
       inquiryRecordId,
     );
-    const canonicalInquiryRecordId = canonicalInquiry?.id || '';
-    const canonicalInquiryFields: FieldSet = canonicalInquiry?.fields || {};
+    let canonicalInquiryRecordId = canonicalInquiry?.id || '';
+    let canonicalInquiryFields: FieldSet = canonicalInquiry?.fields || {};
     const canonicalChannel = firstTouchValue(canonicalInquiryFields['Channel'], '');
     const attributionSourceChannel = canonicalChannel
       ? mapInquiryChannelToQuoteChannel(canonicalChannel)
@@ -5604,6 +5608,30 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       canonicalInquiryFields['Campaign / Source Detail'],
       campaignSourceDetail,
     );
+
+    // Create the new purchase-cycle Inquiry before its first Quote. This makes
+    // the Quote->Inquiry link atomic from the Quote's first persisted version.
+    // If Quote creation later fails, the active Inquiry remains a safe cycle
+    // anchor and the next attempt reuses it instead of creating a duplicate.
+    if (!canonicalInquiryRecordId) {
+      const firstItem = items[0] || {};
+      const autoInquiryFields: FieldSet = {
+        'Inquiry Date': quoteDate,
+        'Customer Name': quoteCustomerName || String(b.contactName || '').trim(),
+        'Phone': quoteCustomerPhone || String(b.phone || '').trim(),
+        ...(quoteSourceChannel ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) } : {}),
+        ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
+        ...(firstItem.itemType ? { 'Product Interest': firstItem.itemType } : {}),
+        'Inquiry Status': 'New',
+        ...(performanceMonthRecordId ? { 'Monthly Performance': [performanceMonthRecordId] } : {}),
+        ...(selectedCustomerId ? { 'Customer': [selectedCustomerId] } : {}),
+        'Notes': `Auto-created for Create Quote ${quoteNumber}`,
+      };
+      const createdInquiryRecords = await tableInquiries.create([{ fields: autoInquiryFields }]);
+      canonicalInquiry = createdInquiryRecords[0];
+      canonicalInquiryRecordId = canonicalInquiry.id;
+      canonicalInquiryFields = canonicalInquiry.fields as FieldSet;
+    }
 
     const quoteFields: FieldSet = {
         'Quote Number': quoteNumber,
@@ -5675,51 +5703,29 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     // One first-touch Inquiry may own many Quotes. Repeated quotations append
     // their link without replacing earlier Quotes or creating extra ad leads.
     try {
-      if (canonicalInquiryRecordId) {
-        const existingInquiry = canonicalInquiry || await tableInquiries.find(canonicalInquiryRecordId);
-        const existingInquiryFields = existingInquiry.fields as FieldSet;
-        const existingInquiryStatus = String(existingInquiryFields['Inquiry Status'] || '');
-        const inquiryUpdateFields: FieldSet = {
-          'Inquiry Status': existingInquiryStatus === 'Converted' ? 'Converted' : 'Quoted',
-          'Quotes': appendLinkedRecordId(existingInquiryFields['Quotes'], createdQuoteRecordId),
-          ...(!getLinkedRecordId(existingInquiryFields['Quote'])
-            ? { 'Quote': [createdQuoteRecordId] }
-            : {}),
-          ...(!getLinkedRecordId(existingInquiryFields['Monthly Performance']) && performanceMonthRecordId
-            ? { 'Monthly Performance': [performanceMonthRecordId] }
-            : {}),
-          ...(!String(existingInquiryFields['Channel'] || '').trim() && quoteSourceChannel
-            ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) }
-            : {}),
-          ...(!String(existingInquiryFields['Campaign / Source Detail'] || '').trim() && campaignSourceDetail
-            ? { 'Campaign / Source Detail': campaignSourceDetail }
-            : {}),
-          ...(!getLinkedRecordId(existingInquiryFields['Customer']) && selectedCustomerId
-            ? { 'Customer': [selectedCustomerId] }
-            : {}),
-        };
-        await tableInquiries.update([{ id: canonicalInquiryRecordId, fields: inquiryUpdateFields }]);
-      } else {
-        const firstItem = items[0] || {};
-        const autoInquiryFields: FieldSet = {
-          'Inquiry Date': quoteDate,
-          'Customer Name': quoteCustomerName || String(b.contactName || '').trim(),
-          'Phone': quoteCustomerPhone || String(b.phone || '').trim(),
-          ...(quoteSourceChannel ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) } : {}),
-          ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
-          ...(firstItem.itemType ? { 'Product Interest': firstItem.itemType } : {}),
-          'Inquiry Status': 'Quoted',
-          'Quote': [createdQuoteRecordId],
-          ...(performanceMonthRecordId ? { 'Monthly Performance': [performanceMonthRecordId] } : {}),
-          ...(selectedCustomerId ? { 'Customer': [selectedCustomerId] } : {}),
-          'Notes': `Auto-created from Create Quote ${quoteNumber}`,
-        };
-        const createdInquiryRecords = await tableInquiries.create([{ fields: autoInquiryFields }]);
-        await tableQuotes.update([{
-          id: createdQuoteRecordId,
-          fields: { 'Inquiry': [createdInquiryRecords[0].id] } as FieldSet,
-        }]);
-      }
+      const existingInquiry = canonicalInquiry || await tableInquiries.find(canonicalInquiryRecordId);
+      const existingInquiryFields = existingInquiry.fields as FieldSet;
+      const existingInquiryStatus = String(existingInquiryFields['Inquiry Status'] || '');
+      const inquiryUpdateFields: FieldSet = {
+        'Inquiry Status': existingInquiryStatus === 'Converted' ? 'Converted' : 'Quoted',
+        'Quotes': appendLinkedRecordId(existingInquiryFields['Quotes'], createdQuoteRecordId),
+        ...(!getLinkedRecordId(existingInquiryFields['Quote'])
+          ? { 'Quote': [createdQuoteRecordId] }
+          : {}),
+        ...(!getLinkedRecordId(existingInquiryFields['Monthly Performance']) && performanceMonthRecordId
+          ? { 'Monthly Performance': [performanceMonthRecordId] }
+          : {}),
+        ...(!String(existingInquiryFields['Channel'] || '').trim() && quoteSourceChannel
+          ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) }
+          : {}),
+        ...(!String(existingInquiryFields['Campaign / Source Detail'] || '').trim() && campaignSourceDetail
+          ? { 'Campaign / Source Detail': campaignSourceDetail }
+          : {}),
+        ...(!getLinkedRecordId(existingInquiryFields['Customer']) && selectedCustomerId
+          ? { 'Customer': [selectedCustomerId] }
+          : {}),
+      };
+      await tableInquiries.update([{ id: canonicalInquiryRecordId, fields: inquiryUpdateFields }]);
     } catch (inquiryError) {
       console.error('V13 inquiry auto-link failed:', inquiryError);
       // Do not block quote creation if Inquiry automation fails.
@@ -6951,6 +6957,24 @@ const getShipmentDriverOrders = (
 
 const getDriverBatchPayableCents = (orders: FinanceRecord[]): number =>
   orders.reduce((sum, order) => sum + toHkdCents(getDriverPayable(order.fields)), 0);
+
+app.get('/admin/analytics/purchase-cycles', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const { from, to } = validateAggregateDateRange(req.query.from, req.query.to);
+    const [inquiries, quotes, orders] = await Promise.all([
+      tableInquiries.select({ fields: ['Inquiry Date'] }).all(),
+      tableQuotes.select({ fields: ['Quote Date', 'Inquiry'] }).all(),
+      tableOrders.select({ fields: ['Pay Date', 'Status'] }).all(),
+    ]);
+    return res.json(buildPurchaseCycleAggregate({ from, to, inquiries, quotes, orders }));
+  } catch (error) {
+    if (error instanceof Error && error.message === 'invalid-date-range') {
+      return res.status(400).json({ error: 'Use a valid YYYY-MM-DD range of at most 366 days.' });
+    }
+    logSafeError('Purchase-cycle aggregate failed.', error);
+    return res.status(500).json({ error: 'Unable to calculate the aggregate.' });
+  }
+});
 
 app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) => {
   try {
