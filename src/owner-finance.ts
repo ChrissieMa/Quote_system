@@ -41,7 +41,7 @@ type SummaryOptions = {
   expenses: readonly OwnerFinanceRecord[];
   getOrderMonth: (fields: OwnerFinanceFields) => string | null;
   getDriverPayable: (fields: OwnerFinanceFields) => number;
-  getOutstandingFinanceStatus: (fields: OwnerFinanceFields) => string;
+  getOutstandingFinanceStatus: (fields: OwnerFinanceFields) => string | null;
 };
 
 const VALID_MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/;
@@ -103,7 +103,10 @@ export const getOrderAmountReceived = (fields: OwnerFinanceFields): number => {
 
 export const getOrderOutstandingAmount = (fields: OwnerFinanceFields): number => {
   if (isCancelledOrder(fields)) return 0;
-  return Math.max(0, numberField(fields, 'Final Amount') - getOrderAmountReceived(fields));
+  return Math.max(
+    0,
+    toHkdCents(numberField(fields, 'Final Amount')) - toHkdCents(getOrderAmountReceived(fields)),
+  ) / 100;
 };
 
 const isCountablePayment = (fields: OwnerFinanceFields): boolean => {
@@ -164,7 +167,6 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
       || numberField(fields, 'China Freight Cost HKD');
     sum.deliveryPayable += options.getDriverPayable(fields);
     sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
-    if (options.getOutstandingFinanceStatus(fields)) sum.pendingCostOrders += 1;
     if (fields['Is Ad Attributed Order'] || String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
     return sum;
   }, {
@@ -176,6 +178,10 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     pendingCostOrders: 0,
     adOrders: 0,
   });
+  orderTotals.pendingCostOrders = monthOrders
+    .filter(record => !isCancelledOrder(record.fields))
+    .filter(record => Boolean(options.getOutstandingFinanceStatus(record.fields)))
+    .length;
 
   const issuedInvoiceTotal = monthOrders
     .filter(record => !isCancelledOrder(record.fields))

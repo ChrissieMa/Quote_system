@@ -75,7 +75,7 @@ test('capital equipment and allocation-pending marketing are excluded from Augus
   assert.equal(summary.capitalItemsTotal, 27374);
   assert.ok(Math.abs(summary.orderGrossProfit - 19362.243774) < 1e-9);
   assert.ok(Math.abs(summary.netProfit - 13220.803774) < 1e-9);
-  assert.equal(summary.pendingCostOrders, 1);
+  assert.equal(summary.pendingCostOrders, 6);
   assert.equal(summary.provisional, true);
 });
 
@@ -208,6 +208,9 @@ test('August revenue and costs include six received Orders and exclude the unpai
   ];
   const summary = calculateOwnerFinanceSummary({
     ...baseOptions,
+    getOutstandingFinanceStatus: fields => fields['Internal 1 Order No'] === 'AUG2602'
+      ? null
+      : '⏳ 尚欠成本',
     orders: augustOrders.map(order => record(order.no, {
       'Internal 1 Order No': order.no,
       'Final Amount': order.final,
@@ -222,8 +225,9 @@ test('August revenue and costs include six received Orders and exclude the unpai
   });
   assert.equal(summary.confirmedOrders.length, 6);
   assert.equal(summary.receivableOrders.length, 1);
+  assert.equal(summary.pendingCostOrders, 6);
   assert.ok(Math.abs(summary.revenue - 21027.486545) < 1e-9);
-  assert.ok(Math.abs(summary.outstandingRevenue - 8873.177229) < 1e-9);
+  assert.equal(summary.outstandingRevenue, 8873.18);
   assert.ok(Math.abs(summary.deliveryPayable - 2727) < 1e-9);
   assert.ok(Math.abs(summary.orderCosts - 9278.42) < 1e-9);
   assert.ok(Math.abs(summary.orderGrossProfit - 11749.066545) < 1e-9);
@@ -235,7 +239,7 @@ test('only explicit actual receipts or fully evidenced legacy payments count as 
   }), 0);
   assert.equal(getOrderOutstandingAmount({
     Status: 'Unpaid', 'Final Amount': 8873.177229,
-  }), 8873.177229);
+  }), 8873.18);
   assert.equal(getOrderAmountReceived({
     Status: 'Paid', 'Final Amount': 3000, 'Amount Received HKD': 1000,
   }), 1000);
