@@ -34,6 +34,35 @@ export type OwnerFinanceSummary = {
   provisional: boolean;
 };
 
+export type OwnerOrderCostBreakdown = {
+  orderNo: string;
+  sourceQuoteRef: string;
+  itemCount: number;
+  received: number;
+  quotedProfit: number;
+  quoteDiscount: number;
+  quotedChinaFreight: number;
+  quotedLocalDelivery: number;
+  actualSupplier: number;
+  actualChinaFreight: number;
+  driverPayable: number;
+  reissue: number;
+  provisionalActualProfit: number | null;
+  quotedReserveProfit: number | null;
+  supplierEntered: boolean;
+  chinaFreightEntered: boolean;
+  final: boolean;
+  warnings: string[];
+};
+
+export type OwnerOrderCostCoverage = {
+  orderCount: number;
+  supplierEntered: number;
+  supplierPending: number;
+  chinaFreightEntered: number;
+  chinaFreightPending: number;
+};
+
 type SummaryOptions = {
   month: string;
   orders: readonly OwnerFinanceRecord[];
@@ -68,6 +97,17 @@ const numberField = (fields: OwnerFinanceFields, name: string): number => {
   const value = Number(fields[name] || 0);
   return Number.isFinite(value) ? value : 0;
 };
+
+const firstPositiveField = (fields: OwnerFinanceFields, names: readonly string[]): number => {
+  for (const name of names) {
+    const value = numberField(fields, name);
+    if (value > 0) return value;
+  }
+  return 0;
+};
+
+const sumItemField = (items: readonly OwnerFinanceRecord[], names: readonly string[]): number =>
+  items.reduce((sum, item) => sum + firstPositiveField(item.fields, names), 0);
 
 const normalizedOrderStatus = (fields: OwnerFinanceFields): string =>
   String(fields['Status'] || '').trim().toLowerCase();
@@ -107,6 +147,82 @@ export const getOrderOutstandingAmount = (fields: OwnerFinanceFields): number =>
     0,
     toHkdCents(numberField(fields, 'Final Amount')) - toHkdCents(getOrderAmountReceived(fields)),
   ) / 100;
+};
+
+export const calculateOwnerOrderCostBreakdown = (input: {
+  order: OwnerFinanceRecord;
+  items: readonly OwnerFinanceRecord[];
+  driverPayable: number;
+  outstandingFinanceStatus?: string | null;
+}): OwnerOrderCostBreakdown => {
+  const fields = input.order.fields;
+  const quotedProfit = sumItemField(input.items, ['Quoted Profit HKD'])
+    || firstPositiveField(fields, ['Quoted Profit Total HKD']);
+  const quotedChinaFreight = sumItemField(input.items, ['Quoted China Freight HKD'])
+    || firstPositiveField(fields, ['Quoted China Freight Total HKD']);
+  const quotedLocalDelivery = sumItemField(input.items, ['Quoted Local Delivery HKD'])
+    || firstPositiveField(fields, ['Quoted Local Delivery Total HKD']);
+  const actualSupplier = firstPositiveField(fields, [
+    'Supplier Cost Used HKD', 'Actual Supplier Cost HKD', 'Cost',
+  ]) || sumItemField(input.items, ['Supplier Cost HKD']);
+  const actualChinaFreight = firstPositiveField(fields, [
+    'China Freight Used HKD', 'Actual China Freight HKD', 'China Freight Cost HKD',
+  ]) || sumItemField(input.items, ['China Freight Cost HKD', 'Actual China Freight HKD']);
+  const reissue = numberField(fields, 'Actual Reissue Cost HKD');
+  const received = getOrderAmountReceived(fields);
+  const supplierEntered = actualSupplier > 0;
+  const chinaFreightEntered = actualChinaFreight > 0;
+  const outstandingFinanceStatus = String(input.outstandingFinanceStatus || '').trim();
+  const warnings: string[] = [];
+  if (!supplierEntered) warnings.push('未有小糖成本');
+  if (!chinaFreightEntered) warnings.push('未有實際中國運費，暫計盈利只係上限');
+  if (outstandingFinanceStatus) warnings.push(outstandingFinanceStatus);
+  if (received <= 0) warnings.push('未收款，唔計入收入、毛利或淨利');
+
+  const provisionalActualProfit = received > 0
+    ? received - actualSupplier - actualChinaFreight - input.driverPayable - reissue
+    : null;
+  const quotedReserveProfit = provisionalActualProfit !== null
+    && !chinaFreightEntered
+    && quotedChinaFreight > 0
+    ? provisionalActualProfit - quotedChinaFreight
+    : null;
+
+  return {
+    orderNo: String(fields['Internal 1 Order No'] || fields['Internal Order No'] || input.order.id),
+    sourceQuoteRef: String(fields['Source Quote Ref'] || ''),
+    itemCount: input.items.length,
+    received,
+    quotedProfit,
+    quoteDiscount: numberField(fields, 'Discount Value HKD')
+      || numberField(fields, 'Discount Amount HKD'),
+    quotedChinaFreight,
+    quotedLocalDelivery,
+    actualSupplier,
+    actualChinaFreight,
+    driverPayable: input.driverPayable,
+    reissue,
+    provisionalActualProfit,
+    quotedReserveProfit,
+    supplierEntered,
+    chinaFreightEntered,
+    final: received > 0 && supplierEntered && chinaFreightEntered && !outstandingFinanceStatus,
+    warnings: Array.from(new Set(warnings)),
+  };
+};
+
+export const summarizeOwnerOrderCostCoverage = (
+  breakdowns: readonly OwnerOrderCostBreakdown[],
+): OwnerOrderCostCoverage => {
+  const supplierEntered = breakdowns.filter(item => item.supplierEntered).length;
+  const chinaFreightEntered = breakdowns.filter(item => item.chinaFreightEntered).length;
+  return {
+    orderCount: breakdowns.length,
+    supplierEntered,
+    supplierPending: breakdowns.length - supplierEntered,
+    chinaFreightEntered,
+    chinaFreightPending: breakdowns.length - chinaFreightEntered,
+  };
 };
 
 const isCountablePayment = (fields: OwnerFinanceFields): boolean => {

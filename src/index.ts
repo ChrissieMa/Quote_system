@@ -103,6 +103,7 @@ import {
   selectCanonicalInquiry,
 } from './inquiry-attribution';
 import {
+  calculateOwnerOrderCostBreakdown,
   calculateOwnerFinanceSummary,
   getOrderAmountReceived,
   getOrderOutstandingAmount,
@@ -115,6 +116,7 @@ import {
   planDriverPayment,
   planOrderPayment,
   paymentLogHasRequest,
+  summarizeOwnerOrderCostCoverage,
   toHkdCents,
   validateDriverPaymentRequestId,
   validateOrderPaymentRequestId,
@@ -6999,6 +7001,57 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     const netProfit = finance.netProfit;
     const margin = finance.margin;
 
+    const orderItemsByOrderId = new Map<string, FinanceRecord[]>();
+    for (const item of orderItems) {
+      const linkedOrderIds = Array.isArray(item.fields['Order']) ? item.fields['Order'] as string[] : [];
+      for (const orderId of linkedOrderIds) {
+        const existing = orderItemsByOrderId.get(orderId) || [];
+        existing.push({ id: item.id, fields: item.fields });
+        orderItemsByOrderId.set(orderId, existing);
+      }
+    }
+    const costBreakdowns = finance.monthOrders
+      .filter(record => !isCancelledOrder(record.fields))
+      .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
+        .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])))
+      .map(record => calculateOwnerOrderCostBreakdown({
+        order: record,
+        items: orderItemsByOrderId.get(record.id) || [],
+        driverPayable: getDriverPayable(record.fields as FieldSet),
+        outstandingFinanceStatus: getOutstandingFinanceStatus(record.fields as FieldSet),
+      }));
+    const costCoverage = summarizeOwnerOrderCostCoverage(costBreakdowns);
+    const costBreakdownRows = costBreakdowns.map(breakdown => {
+      const profitLabel = breakdown.provisionalActualProfit === null
+        ? '未收款，不計入盈利'
+        : breakdown.final
+          ? `實際盈利 ${formatOwnerMoney(breakdown.provisionalActualProfit)}`
+          : `暫計實際盈利（上限）${formatOwnerMoney(breakdown.provisionalActualProfit)}`;
+      const warningHtml = breakdown.warnings.length
+        ? `<div class="owner-cost-warning">${breakdown.warnings.map(escapeHtml).join('｜')}</div>`
+        : '<div class="owner-cost-complete">成本資料已齊</div>';
+      const reserveReference = breakdown.quotedReserveProfit === null
+        ? ''
+        : `<div><span>如按報價中國運費預留</span><strong>${formatOwnerMoney(breakdown.quotedReserveProfit)}</strong><small>只供暫估，唔係實際盈利</small></div>`;
+      return `<details class="owner-cost-detail">
+        <summary><span><strong>${escapeHtml(breakdown.orderNo)}</strong><small>Source Quote ${escapeHtml(breakdown.sourceQuoteRef || '未填')}｜${breakdown.itemCount} items</small></span><span>${profitLabel}</span></summary>
+        <div class="owner-cost-grid">
+          <div><span>報價手動Profit</span><strong>${formatOwnerMoney(breakdown.quotedProfit)}</strong><small>${breakdown.itemCount} items合計</small></div>
+          <div><span>全單優惠</span><strong>−${formatOwnerMoney(breakdown.quoteDiscount)}</strong></div>
+          <div><span>報價中國運費預留</span><strong>${formatOwnerMoney(breakdown.quotedChinaFreight)}</strong></div>
+          <div><span>報價香港送貨預留</span><strong>${formatOwnerMoney(breakdown.quotedLocalDelivery)}</strong></div>
+          <div><span>實收收入</span><strong>${formatOwnerMoney(breakdown.received)}</strong></div>
+          <div><span>實際小糖成本</span><strong>${breakdown.supplierEntered ? formatOwnerMoney(breakdown.actualSupplier) : '— 待補'}</strong></div>
+          <div><span>實際中國運費</span><strong>${breakdown.chinaFreightEntered ? formatOwnerMoney(breakdown.actualChinaFreight) : '— 待補'}</strong></div>
+          <div><span>司機應付成本</span><strong>${formatOwnerMoney(breakdown.driverPayable)}</strong></div>
+          <div><span>補寄成本</span><strong>${formatOwnerMoney(breakdown.reissue)}</strong></div>
+          <div class="owner-cost-profit"><span>${breakdown.final ? '實際盈利' : '暫計實際盈利（上限）'}</span><strong>${breakdown.provisionalActualProfit === null ? '—' : formatOwnerMoney(breakdown.provisionalActualProfit)}</strong></div>
+          ${reserveReference}
+        </div>
+        ${warningHtml}
+      </details>`;
+    }).join('');
+
     const campaignCounts = new Map<string, number>();
     for (const record of monthOrders) {
       const fields = record.fields;
@@ -7160,7 +7213,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       </div>
       <div class="owner-grid">
         <section class="owner-panel"><h2>成本分拆</h2><div class="owner-lines">
-          <div><span>小糖成本</span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
+          <div><span>已輸入小糖成本 <small>（${costCoverage.supplierEntered}/${costCoverage.orderCount}張；${costCoverage.supplierPending}張待補）</small></span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
           <div><span>中國運費</span><strong>${formatOwnerMoney(totals.china)}</strong></div>
           <div><span>司機應付成本</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
           <div><span>補寄成本</span><strong>${formatOwnerMoney(totals.reissue)}</strong></div>
@@ -7171,6 +7224,12 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         </div></section>
         <section class="owner-panel"><h2>已收款 Order 來自邊個 Ads／來源</h2><p class="owner-note">廣告帶來已收款Order：${totals.adOrders}／${monthOrders.length}</p>
           ${campaignRows ? `<div class="owner-table-wrap"><table><thead><tr><th>Campaign / Source</th><th>Order</th><th>比例</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<div class="owner-empty">本月未有 Order。</div>'}
+        </section>
+      </div>
+      <div class="owner-grid">
+        <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>每張 Order 成本及盈利明細</h2><strong>按入展開</strong></div>
+          <p class="owner-note">報價預留同實際成本分開顯示；缺實際中國運費或其他成本時，盈利只會標「暫計／上限」，唔會當最終數。</p>
+          ${costBreakdownRows || '<div class="owner-empty">本月未有 Order 成本資料。</div>'}
         </section>
       </div>
       <div class="owner-grid">
@@ -7194,7 +7253,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     </div>`;
 
     const extraHead = `<style>
-      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
+      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-lines small{color:#64748b}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}.owner-cost-detail{border:1px solid #e5e0d8;border-radius:12px;margin-top:10px;overflow:hidden}.owner-cost-detail summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 15px;background:#f8f6f2;font-size:13px}.owner-cost-detail summary small{display:block;color:#64748b;margin-top:3px}.owner-cost-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#eeeae4;border-top:1px solid #e5e0d8}.owner-cost-grid>div{background:#fff;padding:12px}.owner-cost-grid span,.owner-cost-grid small{display:block;color:#64748b;font-size:11px}.owner-cost-grid strong{display:block;margin-top:5px}.owner-cost-profit{background:#fff7ed!important}.owner-cost-warning,.owner-cost-complete{padding:10px 13px;font-size:12px;font-weight:700}.owner-cost-warning{background:#fff1e7;color:#9a3412}.owner-cost-complete{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-cost-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-cost-detail summary{align-items:flex-start;flex-direction:column}.owner-cost-grid{grid-template-columns:1fr 1fr}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
     </style><script>
       function confirmDriverPayment(form) {
         var input = form.querySelector('input[name="payment_amount"]');

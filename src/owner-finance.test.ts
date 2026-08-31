@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   appendDriverPaymentLog,
   calculateOwnerFinanceSummary,
+  calculateOwnerOrderCostBreakdown,
   getOrderAmountReceived,
   getOrderOutstandingAmount,
   getMacbookInstallmentNumber,
@@ -12,6 +13,7 @@ import {
   planOrderPayment,
   paymentLogHasRequest,
   resolveMarketingFinanceMonth,
+  summarizeOwnerOrderCostCoverage,
   validateDriverPaymentRequestId,
   validateOrderPaymentRequestId,
 } from './owner-finance';
@@ -231,6 +233,66 @@ test('August revenue and costs include six received Orders and exclude the unpai
   assert.ok(Math.abs(summary.deliveryPayable - 2727) < 1e-9);
   assert.ok(Math.abs(summary.orderCosts - 9278.42) < 1e-9);
   assert.ok(Math.abs(summary.orderGrossProfit - 11749.066545) < 1e-9);
+});
+
+test('AUG2601 breakdown keeps quoted reserves separate and marks missing China freight as provisional', () => {
+  const order = record('aug2601', {
+    'Internal 1 Order No': 'AUG2601',
+    'Source Quote Ref': 'QT-2026-0178',
+    'Status': 'Paid',
+    'Amount Received HKD': 13150.36,
+    'Final Amount': 13150.36,
+    'Discount Value HKD': 500,
+    'Actual Supplier Cost HKD': 5152,
+  });
+  const items = [619, 493, 535, 913, 619, 525, 535, 913].map((supplier, index) => record(`item-${index}`, {
+    'Quoted Profit HKD': 500,
+    'Quoted China Freight HKD': 150,
+    'Quoted Local Delivery HKD': 250,
+    'Supplier Cost HKD': supplier,
+  }));
+  const breakdown = calculateOwnerOrderCostBreakdown({
+    order,
+    items,
+    driverPayable: 1800,
+    outstandingFinanceStatus: '⏳ 未有中國運費',
+  });
+
+  assert.equal(breakdown.sourceQuoteRef, 'QT-2026-0178');
+  assert.equal(breakdown.itemCount, 8);
+  assert.equal(breakdown.quotedProfit, 4000);
+  assert.equal(breakdown.quoteDiscount, 500);
+  assert.equal(breakdown.quotedChinaFreight, 1200);
+  assert.equal(breakdown.quotedLocalDelivery, 2000);
+  assert.equal(breakdown.actualSupplier, 5152);
+  assert.equal(breakdown.actualChinaFreight, 0);
+  assert.equal(breakdown.driverPayable, 1800);
+  assert.ok(Math.abs((breakdown.provisionalActualProfit || 0) - 6198.36) < 1e-9);
+  assert.ok(Math.abs((breakdown.quotedReserveProfit || 0) - 4998.36) < 1e-9);
+  assert.equal(breakdown.final, false);
+  assert.equal(breakdown.chinaFreightEntered, false);
+  assert.ok(breakdown.warnings.some(value => value.includes('只係上限')));
+});
+
+test('supplier coverage reports entered records separately from pending records', () => {
+  const breakdowns = Array.from({ length: 7 }, (_, index) => calculateOwnerOrderCostBreakdown({
+    order: record(`order-${index}`, {
+      'Internal 1 Order No': `AUG260${index + 1}`,
+      'Status': index === 5 ? 'Unpaid' : 'Paid',
+      'Amount Received HKD': index === 5 ? 0 : 1000,
+      'Actual Supplier Cost HKD': index < 4 ? 100 : undefined,
+      'Actual China Freight HKD': index === 1 ? 50 : undefined,
+    }),
+    items: [],
+    driverPayable: 0,
+  }));
+  assert.deepEqual(summarizeOwnerOrderCostCoverage(breakdowns), {
+    orderCount: 7,
+    supplierEntered: 4,
+    supplierPending: 3,
+    chinaFreightEntered: 1,
+    chinaFreightPending: 6,
+  });
 });
 
 test('only explicit actual receipts or fully evidenced legacy payments count as revenue', () => {
