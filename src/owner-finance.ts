@@ -1,0 +1,273 @@
+export type OwnerFinanceFields = Record<string, unknown>;
+
+export type OwnerFinanceRecord = {
+  id: string;
+  fields: OwnerFinanceFields;
+};
+
+export type OwnerFinanceSummary = {
+  monthOrders: OwnerFinanceRecord[];
+  allocatedMarketing: OwnerFinanceRecord[];
+  unallocatedMarketing: OwnerFinanceRecord[];
+  operatingExpenses: OwnerFinanceRecord[];
+  capitalItems: OwnerFinanceRecord[];
+  revenue: number;
+  supplier: number;
+  china: number;
+  deliveryPayable: number;
+  reissue: number;
+  pendingCostOrders: number;
+  adOrders: number;
+  orderCosts: number;
+  orderGrossProfit: number;
+  marketingSpend: number;
+  unallocatedMarketingSpend: number;
+  businessExpenses: number;
+  capitalItemsTotal: number;
+  netProfit: number;
+  margin: number;
+  provisional: boolean;
+};
+
+type SummaryOptions = {
+  month: string;
+  orders: readonly OwnerFinanceRecord[];
+  marketing: readonly OwnerFinanceRecord[];
+  expenses: readonly OwnerFinanceRecord[];
+  getOrderMonth: (fields: OwnerFinanceFields) => string | null;
+  getDriverPayable: (fields: OwnerFinanceFields) => number;
+  getOutstandingFinanceStatus: (fields: OwnerFinanceFields) => string;
+};
+
+const VALID_MONTH = /^\d{4}-(?:0[1-9]|1[0-2])$/;
+
+export const MACBOOK_INSTALLMENT_EXPENSE_NAME = 'Apple MacBook Pro — monthly instalment';
+export const MACBOOK_INSTALLMENT_START_MONTH = '2026-08';
+export const MACBOOK_INSTALLMENT_COUNT = 24;
+
+const monthIndex = (month: string): number | null => {
+  if (!VALID_MONTH.test(month)) return null;
+  const [year, monthNumber] = month.split('-').map(Number);
+  return (year * 12) + monthNumber - 1;
+};
+
+export const getMacbookInstallmentNumber = (month: string): number | null => {
+  const current = monthIndex(month);
+  const start = monthIndex(MACBOOK_INSTALLMENT_START_MONTH);
+  if (current === null || start === null) return null;
+  const installment = current - start + 1;
+  return installment >= 1 && installment <= MACBOOK_INSTALLMENT_COUNT ? installment : null;
+};
+
+const numberField = (fields: OwnerFinanceFields, name: string): number => {
+  const value = Number(fields[name] || 0);
+  return Number.isFinite(value) ? value : 0;
+};
+
+const isCountablePayment = (fields: OwnerFinanceFields): boolean => {
+  const status = String(fields['Payment Status'] || 'Paid').trim().toLowerCase();
+  return !['pending', 'refunded', 'cancelled'].includes(status);
+};
+
+export const resolveMarketingFinanceMonth = (fields: OwnerFinanceFields): string | null => {
+  const explicitMonth = String(fields['Month'] || '').trim();
+  if (explicitMonth) return VALID_MONTH.test(explicitMonth) ? explicitMonth : null;
+  const spendDate = String(fields['Spend Date'] || '').trim();
+  const fallbackMonth = spendDate.slice(0, 7);
+  return VALID_MONTH.test(fallbackMonth) ? fallbackMonth : null;
+};
+
+export const isMarketingAllocationPending = (fields: OwnerFinanceFields): boolean => {
+  const explicitMonth = String(fields['Month'] || '').trim();
+  return Boolean(explicitMonth) && !VALID_MONTH.test(explicitMonth);
+};
+
+export const resolveBusinessExpenseMonth = (fields: OwnerFinanceFields): string | null => {
+  const explicitMonth = String(fields['Month'] || '').trim();
+  if (explicitMonth) return VALID_MONTH.test(explicitMonth) ? explicitMonth : null;
+  const expenseDate = String(fields['Expense Date'] || '').trim();
+  const fallbackMonth = expenseDate.slice(0, 7);
+  return VALID_MONTH.test(fallbackMonth) ? fallbackMonth : null;
+};
+
+export const isCapitalBusinessExpense = (fields: OwnerFinanceFields): boolean => {
+  const category = String(fields['Category'] || '').trim().toLowerCase();
+  return /(?:^|[\s/|_-])(capital equipment|capital asset|fixed asset|資本項目|資本設備)(?:$|[\s/|_-])/.test(category);
+};
+
+export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFinanceSummary => {
+  const monthOrders = options.orders.filter(record => options.getOrderMonth(record.fields) === options.month);
+  const allocatedMarketing = options.marketing.filter(record =>
+    isCountablePayment(record.fields) && resolveMarketingFinanceMonth(record.fields) === options.month,
+  );
+  const unallocatedMarketing = options.marketing.filter(record => {
+    if (!isCountablePayment(record.fields) || !isMarketingAllocationPending(record.fields)) return false;
+    return String(record.fields['Spend Date'] || '').startsWith(options.month);
+  });
+  const monthExpenses = options.expenses.filter(record => resolveBusinessExpenseMonth(record.fields) === options.month);
+  const capitalItems = monthExpenses.filter(record => isCapitalBusinessExpense(record.fields));
+  const operatingExpenses = monthExpenses.filter(record => !isCapitalBusinessExpense(record.fields));
+
+  const orderTotals = monthOrders.reduce((sum, record) => {
+    const fields = record.fields;
+    sum.revenue += numberField(fields, 'Final Amount');
+    sum.supplier += numberField(fields, 'Supplier Cost Used HKD')
+      || numberField(fields, 'Actual Supplier Cost HKD')
+      || numberField(fields, 'Cost');
+    sum.china += numberField(fields, 'China Freight Used HKD')
+      || numberField(fields, 'Actual China Freight HKD')
+      || numberField(fields, 'China Freight Cost HKD');
+    sum.deliveryPayable += options.getDriverPayable(fields);
+    sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
+    if (options.getOutstandingFinanceStatus(fields)) sum.pendingCostOrders += 1;
+    if (fields['Is Ad Attributed Order'] || String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
+    return sum;
+  }, {
+    revenue: 0,
+    supplier: 0,
+    china: 0,
+    deliveryPayable: 0,
+    reissue: 0,
+    pendingCostOrders: 0,
+    adOrders: 0,
+  });
+
+  const marketingSpend = allocatedMarketing.reduce(
+    (sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0,
+  );
+  const unallocatedMarketingSpend = unallocatedMarketing.reduce(
+    (sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0,
+  );
+  const businessExpenses = operatingExpenses.reduce(
+    (sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0,
+  );
+  const capitalItemsTotal = capitalItems.reduce(
+    (sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0,
+  );
+  const orderCosts = orderTotals.supplier + orderTotals.china + orderTotals.deliveryPayable + orderTotals.reissue;
+  const orderGrossProfit = orderTotals.revenue - orderCosts;
+  const netProfit = orderGrossProfit - marketingSpend - businessExpenses;
+
+  return {
+    monthOrders,
+    allocatedMarketing,
+    unallocatedMarketing,
+    operatingExpenses,
+    capitalItems,
+    ...orderTotals,
+    orderCosts,
+    orderGrossProfit,
+    marketingSpend,
+    unallocatedMarketingSpend,
+    businessExpenses,
+    capitalItemsTotal,
+    netProfit,
+    margin: orderTotals.revenue > 0 ? (netProfit / orderTotals.revenue) * 100 : 0,
+    provisional: orderTotals.pendingCostOrders > 0,
+  };
+};
+
+export type DriverSettlement = {
+  payableCents: number;
+  paidCents: number;
+  outstandingCents: number;
+  overpaidCents: number;
+  differenceCents: number;
+  status: '未付款' | '部分付款' | '已付款' | '超付';
+};
+
+export const toHkdCents = (value: unknown): number => {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return 0;
+  return Math.round(amount * 100);
+};
+
+export const getDriverSettlement = (payable: unknown, paid: unknown): DriverSettlement => {
+  const payableCents = Math.max(0, toHkdCents(payable));
+  const paidCents = Math.max(0, toHkdCents(paid));
+  const outstandingCents = Math.max(0, payableCents - paidCents);
+  const overpaidCents = Math.max(0, paidCents - payableCents);
+  const differenceCents = paidCents - payableCents;
+  const status = paidCents <= 0
+    ? '未付款'
+    : paidCents < payableCents
+      ? '部分付款'
+      : paidCents === payableCents
+        ? '已付款'
+        : '超付';
+  return { payableCents, paidCents, outstandingCents, overpaidCents, differenceCents, status };
+};
+
+export const paymentLogHasRequest = (log: unknown, requestId: string): boolean =>
+  String(log || '').split(/\r?\n/).some(line => line.split('|')[1] === requestId);
+
+export const paymentLogRequestAmountCents = (log: unknown, requestId: string): number | null => {
+  const line = String(log || '').split(/\r?\n/).find(entry => entry.split('|')[1] === requestId);
+  if (!line) return null;
+  return toHkdCents(line.split('|')[3]);
+};
+
+export const validateDriverPaymentRequestId = (value: unknown): string => {
+  const requestId = String(value || '').trim();
+  if (!/^pay_[a-f0-9]{32}$/.test(requestId)) throw new Error('driver-payment-request-id-invalid');
+  return requestId;
+};
+
+export const parseDriverPaymentAmountCents = (value: unknown): number => {
+  const text = String(value ?? '').trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d{1,2})?$/.test(text)) throw new Error('driver-payment-amount-invalid');
+  const cents = Math.round(Number(text) * 100);
+  if (!Number.isSafeInteger(cents) || cents <= 0) throw new Error('driver-payment-amount-invalid');
+  return cents;
+};
+
+export const appendDriverPaymentLog = (
+  log: unknown,
+  requestId: string,
+  paidAt: string,
+  amountCents: number,
+): string => {
+  const current = String(log || '').trim();
+  const entry = `PAYMENT|${requestId}|${paidAt}|${(amountCents / 100).toFixed(2)}`;
+  return current ? `${current}\n${entry}` : entry;
+};
+
+export const planDriverPayment = (input: {
+  payable: unknown;
+  paid: unknown;
+  log: unknown;
+  requestId: string;
+  amountCents: number;
+  paidAt: string;
+}): {
+  duplicate: boolean;
+  paidCents: number;
+  differenceCents: number;
+  status: DriverSettlement['status'];
+  log: string;
+} => {
+  if (paymentLogHasRequest(input.log, input.requestId)) {
+    if (paymentLogRequestAmountCents(input.log, input.requestId) !== input.amountCents) {
+      throw new Error('driver-payment-request-conflict');
+    }
+    const current = getDriverSettlement(input.payable, input.paid);
+    return {
+      duplicate: true,
+      paidCents: current.paidCents,
+      differenceCents: current.differenceCents,
+      status: current.status,
+      log: String(input.log || ''),
+    };
+  }
+  const current = getDriverSettlement(input.payable, input.paid);
+  if (current.paidCents > current.payableCents) throw new Error('driver-payment-existing-overpay');
+  const paidCents = current.paidCents + input.amountCents;
+  const next = getDriverSettlement(input.payable, paidCents / 100);
+  return {
+    duplicate: false,
+    paidCents,
+    differenceCents: next.differenceCents,
+    status: next.status,
+    log: appendDriverPaymentLog(input.log, input.requestId, input.paidAt, input.amountCents),
+  };
+};

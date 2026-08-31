@@ -102,6 +102,18 @@ import {
   resolveInquiryCycleInactivityDays,
   selectCanonicalInquiry,
 } from './inquiry-attribution';
+import {
+  calculateOwnerFinanceSummary,
+  getMacbookInstallmentNumber,
+  getDriverSettlement,
+  MACBOOK_INSTALLMENT_COUNT,
+  MACBOOK_INSTALLMENT_EXPENSE_NAME,
+  parseDriverPaymentAmountCents,
+  planDriverPayment,
+  paymentLogHasRequest,
+  toHkdCents,
+  validateDriverPaymentRequestId,
+} from './owner-finance';
 
 dotenv.config();
 
@@ -2614,16 +2626,22 @@ const ensureRecurringExpenses = async (month: string): Promise<void> => {
     const amount = numberField(fields, 'Planning Amount HKD');
     const expenseName = String(fields['Expense Name'] || '').trim();
     if (!expenseName || amount <= 0) return [];
+    const macbookInstallment = expenseName === MACBOOK_INSTALLMENT_EXPENSE_NAME
+      ? getMacbookInstallmentNumber(month)
+      : null;
+    if (expenseName === MACBOOK_INSTALLMENT_EXPENSE_NAME && macbookInstallment === null) return [];
     const key = `${month}|${expenseName.toLowerCase()}`;
     if (existingKeys.has(key)) return [];
     return [{ fields: {
       'Expense Name': expenseName,
       'Expense Date': dueDateForMonth(month, fields['Due Pattern']),
       'Month': month,
-      'Category': 'Software Subscription',
+      'Category': macbookInstallment === null ? 'Software Subscription' : 'Computer / Monthly Instalment',
       'Amount HKD': amount,
       'Status': 'Auto-accrued',
-      'Notes': 'Automatically generated from Expense Checklist. Only adjust when the price, payment status or subscription changes.'
+      'Notes': macbookInstallment === null
+        ? 'Automatically generated from Expense Checklist. Only adjust when the price, payment status or subscription changes.'
+        : `MacBook分期（第${macbookInstallment}/${MACBOOK_INSTALLMENT_COUNT}期）。完整資產成本只保留一次；本記錄供每月現金／business view，待Owner核對實際扣款。`
     } as FieldSet }];
   });
   if (creates.length) await tableBusinessExpenses.create(creates);
@@ -2641,49 +2659,44 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
     tableMonthlyFinance.select().all(),
   ]);
 
-  const monthOrders = orders.filter(record => getOrderFinanceMonth(
-    record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
-  ) === month);
-  const monthMarketing = marketing.filter(record => {
-    const fields = record.fields;
-    const date = String(fields['Spend Date'] || '');
-    const status = String(fields['Payment Status'] || 'Paid').toLowerCase();
-    return date.startsWith(month) && !['pending', 'refunded', 'cancelled'].includes(status);
+  const finance = calculateOwnerFinanceSummary({
+    month,
+    orders,
+    marketing,
+    expenses,
+    getOrderMonth: fields => getOrderFinanceMonth(
+      fields['Internal 1 Order No'] || fields['Internal Order No']
+    ),
+    getDriverPayable: fields => getDriverPayable(fields as FieldSet),
+    getOutstandingFinanceStatus: fields => getOutstandingFinanceStatus(fields as FieldSet),
   });
-  const monthExpenses = expenses.filter(record => String(record.fields['Month'] || '').startsWith(month));
-
-  const totals = monthOrders.reduce((sum, record) => {
-    const fields = record.fields;
-    sum.revenue += numberField(fields, 'Final Amount');
-    sum.supplier += numberField(fields, 'Supplier Cost Used HKD') || numberField(fields, 'Actual Supplier Cost HKD') || numberField(fields, 'Cost');
-    sum.china += numberField(fields, 'China Freight Used HKD') || numberField(fields, 'Actual China Freight HKD') || numberField(fields, 'China Freight Cost HKD');
-    sum.delivery += getDriverPayable(fields);
-    sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
-    if (getOutstandingFinanceStatus(fields)) sum.pending += 1;
-    if (fields['Is Ad Attributed Order']) sum.adOrders += 1;
-    return sum;
-  }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, pending: 0, adOrders: 0 });
-
-  const marketingSpend = monthMarketing.reduce((sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0);
-  const businessExpenses = monthExpenses.reduce((sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0);
-  const orderGrossProfit = totals.revenue - totals.supplier - totals.china - totals.delivery - totals.reissue;
   const missingExpenseItems = '';
-  const financeStatus = totals.pending > 0 ? '暫計／尚欠訂單成本資料' : 'Complete';
+  const hasGoogleAdsActivity = finance.allocatedMarketing.some(record =>
+    /google/i.test(`${String(record.fields['Campaign Name'] || '')} ${String(record.fields['Channel'] || '')}`),
+  );
+  const googleAdsStatementPending = month === '2026-08' && !hasGoogleAdsActivity;
+  const financeStatus = [
+    finance.pendingCostOrders > 0 ? `暫計／尚欠${finance.pendingCostOrders}張訂單成本資料` : '',
+    finance.unallocatedMarketing.length > 0 ? '有Marketing支出待分配月份' : '',
+    googleAdsStatementPending ? '暫計／Google Ads官方8月月結待到' : '',
+  ].filter(Boolean).join('；') || 'Complete';
   const fields: FieldSet = {
     'Month': month,
     'Month Start': start,
     'Month End': end,
-    'Order Count': monthOrders.length,
-    'Total Revenue HKD': totals.revenue,
-    'Supplier Cost HKD': totals.supplier,
-    'China Freight HKD': totals.china,
-    'Local Delivery Cost HKD': totals.delivery,
-    'Reissue Cost HKD': totals.reissue,
-    'Order Gross Profit HKD': orderGrossProfit,
-    'Marketing Spend HKD': marketingSpend,
-    'Business Expenses HKD': businessExpenses,
-    'Ad Attributed Orders': totals.adOrders,
-    'Pending Cost Orders': totals.pending,
+    'Order Count': finance.monthOrders.length,
+    'Total Revenue HKD': finance.revenue,
+    'Supplier Cost HKD': finance.supplier,
+    'China Freight HKD': finance.china,
+    'Local Delivery Cost HKD': finance.deliveryPayable,
+    'Reissue Cost HKD': finance.reissue,
+    'Order Gross Profit HKD': finance.orderGrossProfit,
+    'Marketing Spend HKD': finance.marketingSpend,
+    'Business Expenses HKD': finance.businessExpenses,
+    'Capital Items HKD': finance.capitalItemsTotal,
+    'Unallocated Marketing Spend HKD': finance.unallocatedMarketingSpend,
+    'Ad Attributed Orders': finance.adOrders,
+    'Pending Cost Orders': finance.pendingCostOrders,
     'Missing Expense Items': missingExpenseItems,
     'Finance Status': financeStatus,
     'Last Updated': new Date().toISOString(),
@@ -2706,7 +2719,16 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
       console.warn('Unable to update optional Monthly Finance summary; live owner dashboard will continue:', error);
     }
   }
-  return { month, orderCount: monthOrders.length, marketingSpend, businessExpenses, pendingCostOrders: totals.pending };
+  return {
+    month,
+    orderCount: finance.monthOrders.length,
+    marketingSpend: finance.marketingSpend,
+    businessExpenses: finance.businessExpenses,
+    capitalItems: finance.capitalItemsTotal,
+    unallocatedMarketingSpend: finance.unallocatedMarketingSpend,
+    pendingCostOrders: finance.pendingCostOrders,
+    netProfit: finance.netProfit,
+  };
 };
 
 const getNextNumber = async (
@@ -6796,6 +6818,63 @@ const previousMonth = (month: string): string => {
   return `${date.getUTCFullYear()}-${String(date.getUTCMonth() + 1).padStart(2, '0')}`;
 };
 
+const DRIVER_PAID_FIELD = 'Driver Paid Total HKD';
+const DRIVER_STATUS_FIELD = 'Driver Payment Status';
+const DRIVER_LAST_PAID_FIELD = 'Driver Last Paid At';
+const DRIVER_PAYMENT_LOG_FIELD = 'Driver Payment Log';
+const DRIVER_PAYMENT_DIFFERENCE_FIELD = 'Driver Payment Difference HKD';
+const driverPaymentLock = new InProcessQuoteItemsLock();
+
+type FinanceRecord = { id: string; fields: FieldSet };
+
+const requireDriverPaymentSchema = async (): Promise<void> => {
+  const tables = await getAirtableMetadataTables();
+  const table = findMetadataTable(tables, process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS, 'China Shipments');
+  if (!table) throw new Error('driver-payment-schema-missing-table');
+  const expected = new Map<string, string>([
+    [DRIVER_PAID_FIELD, 'currency'],
+    [DRIVER_STATUS_FIELD, 'singleSelect'],
+    [DRIVER_LAST_PAID_FIELD, 'dateTime'],
+    [DRIVER_PAYMENT_LOG_FIELD, 'multilineText'],
+    [DRIVER_PAYMENT_DIFFERENCE_FIELD, 'currency'],
+  ]);
+  for (const [name, type] of expected) {
+    const field = table.fields.find(item => item.name === name);
+    if (!field || field.type !== type) throw new Error(`driver-payment-schema-invalid:${name}`);
+    if (name === DRIVER_STATUS_FIELD) {
+      const choices = new Set(field.options?.choices?.map(choice => choice.name) || []);
+      if (!['未付款', '部分付款', '已付款', '超付'].every(choice => choices.has(choice))) {
+        throw new Error('driver-payment-schema-invalid:status-choices');
+      }
+    }
+  }
+};
+
+const getShipmentDriverOrders = (
+  shipment: FinanceRecord,
+  orderItemsById: Map<string, FinanceRecord>,
+  ordersById: Map<string, FinanceRecord>,
+): FinanceRecord[] => {
+  const linkedItemIds = Array.isArray(shipment.fields['Order Items'])
+    ? shipment.fields['Order Items'] as string[]
+    : [];
+  const linkedOrderIds = new Set<string>();
+  for (const itemId of linkedItemIds) {
+    const item = orderItemsById.get(itemId);
+    const itemOrderIds = Array.isArray(item?.fields['Order']) ? item.fields['Order'] as string[] : [];
+    itemOrderIds.forEach(orderId => linkedOrderIds.add(orderId));
+  }
+  return Array.from(linkedOrderIds)
+    .map(orderId => ordersById.get(orderId))
+    .filter((record): record is FinanceRecord => Boolean(record))
+    .filter(record => usesQuotedDeliveryDriverShare(
+      record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
+    ));
+};
+
+const getDriverBatchPayableCents = (orders: FinanceRecord[]): number =>
+  orders.reduce((sum, order) => sum + toHkdCents(getDriverPayable(order.fields)), 0);
+
 app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) => {
   try {
     const selectedMonth = String(req.query.month || getHongKongMonth());
@@ -6813,43 +6892,37 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       tableChinaShipments.select().all(),
     ]);
 
-    const monthOrders = orders
-      .filter(record => getOrderFinanceMonth(
-        record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
-      ) === selectedMonth)
+    const finance = calculateOwnerFinanceSummary({
+      month: selectedMonth,
+      orders,
+      marketing,
+      expenses,
+      getOrderMonth: fields => getOrderFinanceMonth(
+        fields['Internal 1 Order No'] || fields['Internal Order No']
+      ),
+      getDriverPayable: fields => getDriverPayable(fields as FieldSet),
+      getOutstandingFinanceStatus: fields => getOutstandingFinanceStatus(fields as FieldSet),
+    });
+
+    const monthOrders = finance.monthOrders
       .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
         .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])));
-
-    const monthMarketing = marketing.filter(record => {
-      const fields = record.fields;
-      const date = String(fields['Spend Date'] || '');
-      const status = String(fields['Payment Status'] || 'Paid').trim().toLowerCase();
-      return date.startsWith(selectedMonth) && !['pending', 'refunded', 'cancelled'].includes(status);
-    });
-    const monthExpenses = expenses.filter(record => String(record.fields['Month'] || '').startsWith(selectedMonth));
-
-    const totals = monthOrders.reduce((sum, record) => {
-      const fields = record.fields;
-      sum.revenue += numberField(fields, 'Final Amount');
-      sum.supplier += numberField(fields, 'Supplier Cost Used HKD')
-        || numberField(fields, 'Actual Supplier Cost HKD')
-        || numberField(fields, 'Cost');
-      sum.china += numberField(fields, 'China Freight Used HKD')
-        || numberField(fields, 'Actual China Freight HKD')
-        || numberField(fields, 'China Freight Cost HKD');
-      sum.delivery += getDriverPayable(fields);
-      sum.reissue += numberField(fields, 'Actual Reissue Cost HKD');
-      if (getOutstandingFinanceStatus(fields)) sum.pending += 1;
-      if (fields['Is Ad Attributed Order'] || String(fields['Campaign / Source Detail'] || '').trim()) sum.adOrders += 1;
-      return sum;
-    }, { revenue: 0, supplier: 0, china: 0, delivery: 0, reissue: 0, pending: 0, adOrders: 0 });
-
-    const marketingSpend = monthMarketing.reduce((sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0);
-    const businessExpenses = monthExpenses.reduce((sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0);
-    const orderCosts = totals.supplier + totals.china + totals.delivery + totals.reissue;
-    const grossProfit = totals.revenue - orderCosts;
-    const netProfit = grossProfit - marketingSpend - businessExpenses;
-    const margin = totals.revenue > 0 ? (netProfit / totals.revenue) * 100 : 0;
+    const monthExpenses = finance.operatingExpenses;
+    const totals = {
+      revenue: finance.revenue,
+      supplier: finance.supplier,
+      china: finance.china,
+      delivery: finance.deliveryPayable,
+      reissue: finance.reissue,
+      pending: finance.pendingCostOrders,
+      adOrders: finance.adOrders,
+    };
+    const marketingSpend = finance.marketingSpend;
+    const businessExpenses = finance.businessExpenses;
+    const orderCosts = finance.orderCosts;
+    const grossProfit = finance.orderGrossProfit;
+    const netProfit = finance.netProfit;
+    const margin = finance.margin;
 
     const campaignCounts = new Map<string, number>();
     for (const record of monthOrders) {
@@ -6873,47 +6946,65 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     const missingExpenses = activeChecklist
       .map(record => String(record.fields['Expense Name'] || '').trim())
       .filter(name => name && !expenseNames.has(name.toLowerCase()));
+    const hasGoogleAdsActivity = finance.allocatedMarketing.some(record =>
+      /google/i.test(`${String(record.fields['Campaign Name'] || '')} ${String(record.fields['Channel'] || '')}`),
+    );
+    const googleAdsStatementPending = selectedMonth === '2026-08' && !hasGoogleAdsActivity;
     const expenseRows = monthExpenses
       .sort((a, b) => String(a.fields['Expense Date'] || '').localeCompare(String(b.fields['Expense Date'] || '')))
       .map(record => {
         const fields = record.fields;
-        const status = String(fields['Status'] || '已自動記錄');
-        return `<tr><td>${escapeHtml(fields['Expense Name'] || '-')}</td><td>${escapeHtml(fields['Expense Date'] || selectedMonth)}</td><td>${formatOwnerMoney(numberField(fields, 'Amount HKD'))}</td><td>${escapeHtml(status)}</td></tr>`;
+        const rawStatus = String(fields['Status'] || '').trim().toLowerCase();
+        const notes = String(fields['Notes'] || '');
+        const status = /(?:usd|estimated|estimate|7\.8|匯率)/i.test(notes)
+          ? '預估匯率／待實扣'
+          : rawStatus === 'paid'
+            ? '已付款'
+            : rawStatus === 'auto-accrued'
+              ? '待實扣'
+              : String(fields['Status'] || '待核對');
+        return `<tr><td>${escapeHtml(fields['Expense Name'] || '-')}</td><td>${escapeHtml(fields['Expense Date'] || selectedMonth)}</td><td>${formatOwnerMoney(numberField(fields as FieldSet, 'Amount HKD'))}</td><td>${escapeHtml(status)}</td></tr>`;
       }).join('');
-
-    const pendingRows = monthOrders
-      .filter(record => getOutstandingFinanceStatus(record.fields))
-      .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(getOutstandingFinanceStatus(record.fields) || '尚欠成本')}</li>`)
+    const unallocatedMarketingRows = finance.unallocatedMarketing
+      .map(record => `<tr><td>${escapeHtml(record.fields['Campaign Name'] || 'Marketing支出')}</td><td>${formatOwnerMoney(numberField(record.fields as FieldSet, 'Spend Amount HKD'))}</td><td>月份待分配</td></tr>`)
       .join('');
 
-    const ordersById = new Map(orders.map(record => [record.id, record]));
-    const orderItemsById = new Map(orderItems.map(record => [record.id, record]));
+    const pendingRows = monthOrders
+      .filter(record => getOutstandingFinanceStatus(record.fields as FieldSet))
+      .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(getOutstandingFinanceStatus(record.fields as FieldSet) || '尚欠成本')}</li>`)
+      .join('');
+
+    const ordersById = new Map<string, FinanceRecord>(orders.map(record => [record.id, { id: record.id, fields: record.fields }]));
+    const orderItemsById = new Map<string, FinanceRecord>(orderItems.map(record => [record.id, { id: record.id, fields: record.fields }]));
     const driverBatchRows = chinaShipments.flatMap(shipment => {
-      const linkedItemIds = Array.isArray(shipment.fields['Order Items'])
-        ? shipment.fields['Order Items'] as string[]
-        : [];
-      const linkedOrderIds = new Set<string>();
-      for (const itemId of linkedItemIds) {
-        const item = orderItemsById.get(itemId);
-        const itemOrderIds = Array.isArray(item?.fields['Order']) ? item?.fields['Order'] as string[] : [];
-        itemOrderIds.forEach(orderId => linkedOrderIds.add(orderId));
-      }
-      const linkedOrders = Array.from(linkedOrderIds)
-        .map(orderId => ordersById.get(orderId))
-        .filter((record): record is NonNullable<typeof record> => Boolean(record))
-        .filter(record => usesQuotedDeliveryDriverShare(record.fields['Internal 1 Order No'] || record.fields['Internal Order No']));
+      const shipmentRecord: FinanceRecord = { id: shipment.id, fields: shipment.fields };
+      const linkedOrders = getShipmentDriverOrders(shipmentRecord, orderItemsById, ordersById);
       if (linkedOrders.length === 0) return [];
 
       const monthlyTotals = new Map<string, number>();
-      let batchTotal = 0;
       for (const order of linkedOrders) {
         const orderMonth = getOrderFinanceMonth(order.fields['Internal 1 Order No'] || order.fields['Internal Order No']);
         if (!orderMonth) continue;
         const payable = getDriverPayable(order.fields);
-        batchTotal += payable;
         monthlyTotals.set(orderMonth, (monthlyTotals.get(orderMonth) || 0) + payable);
       }
       if (!monthlyTotals.has(selectedMonth)) return [];
+
+      const batchPayableCents = getDriverBatchPayableCents(linkedOrders);
+      const settlement = getDriverSettlement(batchPayableCents / 100, shipment.fields[DRIVER_PAID_FIELD]);
+      const storedStatus = String(shipment.fields[DRIVER_STATUS_FIELD] || '').trim();
+      const storedDifferenceCents = toHkdCents(shipment.fields[DRIVER_PAYMENT_DIFFERENCE_FIELD]);
+      const integrityWarning = (storedStatus && storedStatus !== settlement.status)
+        || (shipment.fields[DRIVER_PAYMENT_DIFFERENCE_FIELD] !== undefined
+          && storedDifferenceCents !== settlement.differenceCents);
+      const paymentRequestId = `pay_${crypto.randomBytes(16).toString('hex')}`;
+      const paymentForm = settlement.status === '未付款' || settlement.status === '部分付款' ? `<form class="owner-payment-form" method="POST" action="/admin/china-shipments/${encodeURIComponent(shipment.id)}/driver-payments" data-payable="${(settlement.payableCents / 100).toFixed(2)}" data-paid="${(settlement.paidCents / 100).toFixed(2)}" onsubmit="return confirmDriverPayment(this)">
+        <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
+        <input type="hidden" name="month" value="${escapeHtml(selectedMonth)}">
+        <input type="hidden" name="payment_request_id" value="${paymentRequestId}">
+        <label>今次實際付款金額HK$<input name="payment_amount" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="例如 ${(settlement.outstandingCents / 100).toFixed(2)}" required></label>
+        <button class="btn btn-primary" type="submit">記錄付款／已付款</button>
+      </form>` : `<span class="owner-paid-chip">${escapeHtml(settlement.status)}</span>`;
 
       const monthSplit = Array.from(monthlyTotals.entries())
         .sort((a, b) => a[0].localeCompare(b[0]))
@@ -6926,12 +7017,27 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       return [`<tr>
         <td><strong>${escapeHtml(shipment.fields['Shipment No.'] || shipment.id)}</strong><small>${escapeHtml(orderNumbers)}</small></td>
         <td>${monthSplit}</td>
-        <td><strong>${formatOwnerMoney(batchTotal)}</strong></td>
+        <td><strong>${formatOwnerMoney(settlement.payableCents / 100)}</strong></td>
+        <td><strong>${formatOwnerMoney(settlement.paidCents / 100)}</strong></td>
+        <td><strong>${settlement.overpaidCents > 0
+          ? `超付 ${formatOwnerMoney(settlement.overpaidCents / 100)}`
+          : settlement.outstandingCents > 0
+            ? `尚欠 ${formatOwnerMoney(settlement.outstandingCents / 100)}`
+            : formatOwnerMoney(0)}</strong></td>
+        <td><span class="owner-payment-status">${escapeHtml(settlement.status)}</span>${integrityWarning ? '<small class="owner-integrity-warning">付款狀態待核對</small>' : ''}</td>
+        <td>${paymentForm}</td>
       </tr>`];
     }).join('');
 
-    const statusClass = totals.pending || missingExpenses.length ? 'owner-status warning' : 'owner-status complete';
-    const statusText = totals.pending || missingExpenses.length ? '暫計｜仍有資料待補' : '本月資料完整';
+    const isProvisional = Boolean(totals.pending || missingExpenses.length || googleAdsStatementPending);
+    const statusClass = isProvisional ? 'owner-status warning' : 'owner-status complete';
+    const statusText = isProvisional
+      ? `暫計／上限｜${[
+        totals.pending ? `尚欠${totals.pending}張Order成本` : '',
+        missingExpenses.length ? '仍有每月支出待補' : '',
+        googleAdsStatementPending ? 'Google Ads官方8月月結待到' : '',
+      ].filter(Boolean).join('｜')}`
+      : '本月資料完整';
     const content = `<div class="owner-dashboard">
       <div class="owner-topbar">
         <div><div class="owner-eyebrow">LKS OWNER</div><h1>老闆 Dashboard</h1><p>收入、成本、廣告及每月支出集中一頁。</p></div>
@@ -6941,52 +7047,165 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         <form method="GET" action="/admin/dashboard"><label>月份<input name="month" type="month" value="${escapeHtml(selectedMonth)}"></label><button class="btn btn-primary" type="submit">查看／重新整理</button></form>
         <div class="${statusClass}">${statusText}</div>
       </div>
+      ${req.query.driverPayment === 'saved' ? '<div class="owner-ok">司機付款已記錄；只更新現金settlement，冇再次扣淨利。</div>' : ''}
+      ${req.query.driverPayment === 'duplicate' ? '<div class="owner-ok">呢次付款要求已處理，冇重複累加。</div>' : ''}
+      ${req.query.driverPayment === 'error' ? '<div class="owner-alert">付款未有記錄；請重新整理後按尚欠金額再試。</div>' : ''}
       <div class="owner-kpis">
         <div class="owner-kpi"><span>本月收入</span><strong>${formatOwnerMoney(totals.revenue)}</strong><small>${monthOrders.length} 張 Order</small></div>
-        <div class="owner-kpi"><span>訂單毛利</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>收入減產品及運輸成本</small></div>
-        <div class="owner-kpi owner-kpi-highlight"><span>本月淨利</span><strong>${formatOwnerMoney(netProfit)}</strong><small>淨利率 ${margin.toFixed(1)}%</small></div>
+        <div class="owner-kpi"><span>${totals.pending > 0 ? '訂單暫計毛利（上限）' : '訂單毛利'}</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>收入減已知產品及運輸成本</small></div>
+        <div class="owner-kpi owner-kpi-highlight"><span>${isProvisional ? '本月暫計淨利（上限）' : '本月淨利'}</span><strong>${formatOwnerMoney(netProfit)}</strong><small>${totals.pending > 0 ? `尚欠${totals.pending}張Order成本｜` : ''}${googleAdsStatementPending ? '8月Google Ads月結待到｜' : ''}淨利率 ${margin.toFixed(1)}%</small></div>
         <div class="owner-kpi"><span>廣告帶來訂單</span><strong>${totals.adOrders}</strong><small>共 ${monthOrders.length} 張 Order</small></div>
       </div>
       <div class="owner-grid">
         <section class="owner-panel"><h2>成本分拆</h2><div class="owner-lines">
           <div><span>小糖成本</span><strong>${formatOwnerMoney(totals.supplier)}</strong></div>
           <div><span>中國運費</span><strong>${formatOwnerMoney(totals.china)}</strong></div>
-          <div><span>實際司機費</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
+          <div><span>司機應付成本</span><strong>${formatOwnerMoney(totals.delivery)}</strong></div>
           <div><span>補寄成本</span><strong>${formatOwnerMoney(totals.reissue)}</strong></div>
           <div class="owner-line-total"><span>訂單成本合計</span><strong>${formatOwnerMoney(orderCosts)}</strong></div>
           <div><span>Meta／Marketing</span><strong>${formatOwnerMoney(marketingSpend)}</strong></div>
-          <div><span>公司每月支出</span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+          <div><span>公司每月／現金支出</span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+          ${finance.unallocatedMarketingSpend > 0 ? `<div><span>Marketing待分配（不計入淨利）</span><strong>${formatOwnerMoney(finance.unallocatedMarketingSpend)}</strong></div>` : ''}
         </div></section>
         <section class="owner-panel"><h2>Order 來自邊個 Ads／來源</h2>
           ${campaignRows ? `<div class="owner-table-wrap"><table><thead><tr><th>Campaign / Source</th><th>Order</th><th>比例</th></tr></thead><tbody>${campaignRows}</tbody></table></div>` : '<div class="owner-empty">本月未有 Order。</div>'}
         </section>
       </div>
       <div class="owner-grid">
-        <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>司機付款（按到港批次）</h2><strong>實際司機費</strong></div>
-          ${driverBatchRows ? `<div class="owner-table-wrap"><table><thead><tr><th>批次／包括訂單</th><th>成本月份分拆</th><th>要過畀司機總額</th></tr></thead><tbody>${driverBatchRows}</tbody></table></div>` : '<div class="owner-empty">本月未有已連接 China Shipment 嘅司機付款批次。</div>'}
-          <p class="owner-note">由 JUN2602 起，實際司機費＝報價香港運費 × 90%；同一批貨可跨月份付款，但成本按各 Order 原本月份分開入帳。</p>
+        <section class="owner-panel" style="grid-column:1/-1"><div class="owner-panel-head"><h2>司機付款（按到港批次）</h2><strong>現金settlement</strong></div>
+          ${driverBatchRows ? `<div class="owner-table-wrap"><table><thead><tr><th>批次／包括訂單</th><th>成本月份分拆</th><th>應付總額</th><th>累計已付</th><th>尚欠／超付差額</th><th>狀態</th><th>記錄付款</th></tr></thead><tbody>${driverBatchRows}</tbody></table></div>` : '<div class="owner-empty">本月未有已連接 China Shipment 嘅司機付款批次。</div>'}
+          <p class="owner-note">由 JUN2602 起，司機應付成本＝報價香港運費 × 90%，按Order月份只計一次。付款按鈕只更新現金settlement，唔會再扣淨利或建立Business Expense。</p>
         </section>
       </div>
       <div class="owner-grid">
         <section class="owner-panel"><div class="owner-panel-head"><h2>每月固定及公司支出</h2><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
           ${missingExpenses.length ? `<div class="owner-alert">未見本月記錄：${missingExpenses.map(escapeHtml).join('、')}</div>` : '<div class="owner-ok">固定支出已按排程自動記錄，毋須逐張單據再入。</div>'}
           ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>日期</th><th>金額</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
+          ${unallocatedMarketingRows ? `<h3 class="owner-subhead">Marketing待分配</h3><div class="owner-table-wrap"><table><thead><tr><th>項目</th><th>金額</th><th>狀態</th></tr></thead><tbody>${unallocatedMarketingRows}</tbody></table></div>` : ''}
         </section>
         <section class="owner-panel"><div class="owner-panel-head"><h2>尚欠資料提醒</h2><a href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">前往補資料 →</a></div>
           ${pendingRows ? `<ul class="owner-pending">${pendingRows}</ul>` : '<div class="owner-ok">所有 Order 成本資料已齊。</div>'}
-          <p class="owner-note">財務月份跟 Order Month & Year；即使下月先送貨，實際司機費仍會計回原本落單月份。</p>
+          <p class="owner-note">財務月份跟 Order Month & Year；即使下月先付款，司機應付成本仍只會計回原本落單月份一次。</p>
         </section>
       </div>
       <div class="owner-footer-nav"><a href="/admin/dashboard?month=${previousMonth(selectedMonth)}">← 上一個月</a><a href="/admin/dashboard?month=${getHongKongMonth()}">返回今個月</a></div>
     </div>`;
 
     const extraHead = `<style>
-      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}}
-    </style>`;
+      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
+    </style><script>
+      function confirmDriverPayment(form) {
+        var input = form.querySelector('input[name="payment_amount"]');
+        var amount = Number(input && input.value);
+        if (!Number.isFinite(amount) || amount <= 0) return false;
+        var payable = Number(form.getAttribute('data-payable')) || 0;
+        var paid = Number(form.getAttribute('data-paid')) || 0;
+        var nextPaid = paid + amount;
+        var difference = nextPaid - payable;
+        var balanceText = difference > 0
+          ? '超付 HK$' + difference.toFixed(2)
+          : difference < 0
+            ? '尚欠 HK$' + Math.abs(difference).toFixed(2)
+            : '剛好付清';
+        return window.confirm(
+          '請確認司機付款：\\n' +
+          '應付總額 HK$' + payable.toFixed(2) + '\\n' +
+          '目前已付 HK$' + paid.toFixed(2) + '\\n' +
+          '今次實付 HK$' + amount.toFixed(2) + '\\n' +
+          '付款後累計 HK$' + nextPaid.toFixed(2) + '\\n' +
+          balanceText + '\\n\\n' +
+          '呢次只更新現金付款紀錄，唔會改兩張Order成本或再扣淨利。'
+        );
+      }
+    </script>`;
     res.send(renderPage(`老闆 Dashboard ${selectedMonth}`, content, extraHead));
   } catch (error: any) {
     console.error('Unable to render owner dashboard:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
+app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
+  if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
+    return res.status(403).type('text/plain').send('Invalid form token.');
+  }
+  const selectedMonth = String(req.body.month || getHongKongMonth());
+  try {
+    monthBounds(selectedMonth);
+  } catch {
+    return res.redirect(303, '/admin/dashboard?driverPayment=error');
+  }
+  const redirectTo = (state: 'saved' | 'duplicate' | 'error') => {
+    const params = new URLSearchParams({ month: selectedMonth, driverPayment: state });
+    return res.redirect(303, `/admin/dashboard?${params.toString()}`);
+  };
+  const shipmentId = String(req.params.shipmentId || '').trim();
+  if (!/^rec[A-Za-z0-9]{14}$/.test(shipmentId)) return redirectTo('error');
+
+  let paymentRequestId: string;
+  let amountCents: number;
+  try {
+    paymentRequestId = validateDriverPaymentRequestId(req.body.payment_request_id);
+    amountCents = parseDriverPaymentAmountCents(req.body.payment_amount);
+  } catch {
+    return redirectTo('error');
+  }
+
+  try {
+    const state = await driverPaymentLock.run(shipmentId, async (): Promise<'saved' | 'duplicate'> => {
+      await requireDriverPaymentSchema();
+      const [shipment, allOrderItems, allOrders] = await Promise.all([
+        tableChinaShipments.find(shipmentId),
+        tableOrderItems.select().all(),
+        tableOrders.select().all(),
+      ]);
+      const orderItemsById = new Map<string, FinanceRecord>(allOrderItems.map(record => [
+        record.id, { id: record.id, fields: record.fields },
+      ]));
+      const ordersById = new Map<string, FinanceRecord>(allOrders.map(record => [
+        record.id, { id: record.id, fields: record.fields },
+      ]));
+      const shipmentRecord: FinanceRecord = { id: shipment.id, fields: shipment.fields };
+      const linkedOrders = getShipmentDriverOrders(shipmentRecord, orderItemsById, ordersById);
+      const payableCents = getDriverBatchPayableCents(linkedOrders);
+      if (payableCents <= 0) throw new Error('driver-payment-no-payable');
+
+      const paidAt = new Date().toISOString();
+      const plan = planDriverPayment({
+        payable: payableCents / 100,
+        paid: shipment.fields[DRIVER_PAID_FIELD],
+        log: shipment.fields[DRIVER_PAYMENT_LOG_FIELD],
+        requestId: paymentRequestId,
+        amountCents,
+        paidAt,
+      });
+      if (plan.duplicate) return 'duplicate';
+      await tableChinaShipments.update([{
+        id: shipmentId,
+        fields: {
+          [DRIVER_PAID_FIELD]: plan.paidCents / 100,
+          [DRIVER_STATUS_FIELD]: plan.status,
+          [DRIVER_LAST_PAID_FIELD]: paidAt,
+          [DRIVER_PAYMENT_LOG_FIELD]: plan.log,
+          [DRIVER_PAYMENT_DIFFERENCE_FIELD]: plan.differenceCents / 100,
+        },
+      }]);
+
+      const verified = await tableChinaShipments.find(shipmentId);
+      if (
+        toHkdCents(verified.fields[DRIVER_PAID_FIELD]) !== plan.paidCents
+        || String(verified.fields[DRIVER_STATUS_FIELD] || '') !== plan.status
+        || toHkdCents(verified.fields[DRIVER_PAYMENT_DIFFERENCE_FIELD]) !== plan.differenceCents
+        || !paymentLogHasRequest(verified.fields[DRIVER_PAYMENT_LOG_FIELD], paymentRequestId)
+      ) {
+        throw new Error('driver-payment-write-verification-failed');
+      }
+      return 'saved';
+    });
+    return redirectTo(state);
+  } catch (error) {
+    logSafeError('Driver settlement update rejected.', error);
+    return redirectTo('error');
   }
 });
 

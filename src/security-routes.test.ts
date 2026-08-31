@@ -17,6 +17,7 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin,",
     "app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin,",
     "app.get('/admin/dashboard', requireAdmin,",
+    "app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, requireSameOrigin,",
     "app.get('/admin/costs', requireAdmin,",
     "app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,",
     "app.post('/admin/costs', requireAdmin, requireSameOrigin,",
@@ -35,6 +36,18 @@ test('service APIs remain bearer-protected and confirmed', () => {
   ];
   for (const route of serviceRoutes) {
     assert.match(source, new RegExp(`app\\.post\\('${route.replaceAll('/', '\\/')}', requireQuotePilotApi,`));
+  }
+});
+
+test('driver settlement route cannot write P&L or Business Expenses', () => {
+  const start = source.indexOf("app.post('/admin/china-shipments/:shipmentId/driver-payments'");
+  const end = source.indexOf("app.get('/admin/costs'", start);
+  assert.ok(start >= 0 && end > start, 'driver settlement route must exist');
+  const route = source.slice(start, end);
+  assert.ok(route.includes("safeEqual(String(req.body.csrf || ''), getOwnerFormToken())"));
+  assert.ok(route.includes('tableChinaShipments.update'));
+  for (const forbidden of ['tableBusinessExpenses.update', 'tableBusinessExpenses.create', 'tableMonthlyFinance.update', 'syncMonthlyFinance(']) {
+    assert.ok(!route.includes(forbidden), `driver settlement must not call ${forbidden}`);
   }
 });
 
