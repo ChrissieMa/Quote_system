@@ -66,6 +66,7 @@ import {
 import {
   createImmutableItemId,
   ensureImmutableItemIds,
+  InMemoryQuotationImageRecoveryClaims,
   isImmutableItemId,
   linkQuoteItemsToOrderItemRecords,
   overlayConfirmedOrderItemsByIdentity,
@@ -643,13 +644,10 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
     res.setHeader('Content-Security-Policy', quotationImageBridgeCsp(QUOTATION_IMAGE_RENDERER_URL));
     res.type('html').send(browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL));
   });
-  const recoveryClaims = new Set<string>();
-  let recoveryScanAfter = 0;
+  const recoveryClaims = new InMemoryQuotationImageRecoveryClaims();
   let recoveryScanInFlight: Promise<number> | null = null;
   const scheduleLatestRetryableQuotationImage = async (): Promise<number> => {
-    if (Date.now() < recoveryScanAfter) return 0;
     if (recoveryScanInFlight) return recoveryScanInFlight;
-    recoveryScanAfter = Date.now() + 30_000;
     recoveryScanInFlight = (async () => {
       const latest = await tableQuotes.select({
         fields: ['Quote Items JSON', 'Created At'],
@@ -660,16 +658,21 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
       const jobs = prepareRetryableQuotationImageJobs(
         parseQuoteItems(latest[0].fields['Quote Items JSON']),
         { enabled: QUOTATION_IMAGE_ENABLED, runtime: quotationImageRuntime },
-      ).filter(job => {
-        const claim = `${latest[0].id}:${job.itemId}:${quotationImageIdempotencyKey(job.itemId, job.request)}`;
-        if (recoveryClaims.has(claim)) return false;
-        recoveryClaims.add(claim);
-        while (recoveryClaims.size > 256) recoveryClaims.delete(recoveryClaims.values().next().value as string);
-        return true;
-      });
-      if (!jobs.length) return 0;
-      scheduleQuotationImageJobsAfterWrite(jobs, latest[0].id, quotationImageRuntime);
-      return jobs.length;
+      );
+      let accepted = 0;
+      for (const job of jobs) {
+        const key = `${latest[0].id}:${job.itemId}:${quotationImageIdempotencyKey(job.itemId, job.request)}`;
+        const claim = recoveryClaims.tryAcquire(key);
+        if (!claim) continue;
+        accepted += 1;
+        scheduleQuotationImageJobsAfterWrite(
+          [job],
+          latest[0].id,
+          quotationImageRuntime,
+          { onSettled: () => { recoveryClaims.release(claim); } },
+        );
+      }
+      return accepted;
     })().catch(error => {
       logSafeError('Quotation-image recovery scan failed.', error);
       return 0;
@@ -679,9 +682,9 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
     return recoveryScanInFlight;
   };
 
-  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, async (_req: Request, res: Response) => {
+  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
     let job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
-    if (!job) {
+    if (!job && req.query.recover_latest === '1') {
       await scheduleLatestRetryableQuotationImage();
       job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
     }

@@ -46,6 +46,9 @@ test('production browser transport accepts only a safe HTTPS renderer URL', () =
   assert.match(html, /rendererReadinessGraceMs = 1000/);
   assert.match(html, /rendererResponseTimeoutMs = 6000/);
   assert.match(html, /activeJob = null/);
+  assert.match(html, /let recoverLatest = true/);
+  assert.match(html, /recoveryQuery = recoverLatest \? '\?recover_latest=1' : ''/);
+  assert.match(html, /recoverLatest = false/);
   assert.equal(
     quotationImageBridgeCsp('https://lksdisplaybox.online/configurator/'),
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src https://lksdisplaybox.online; connect-src 'self'",
