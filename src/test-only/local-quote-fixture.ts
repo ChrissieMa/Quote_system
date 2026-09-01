@@ -2,6 +2,7 @@ import crypto from 'crypto';
 import fs from 'fs';
 import type { FieldSet } from 'airtable';
 import { formatDeterministicPublicToken } from '../security';
+import { INQUIRY_PRODUCT_INTEREST_OPTIONS } from '../inquiry-attribution';
 import {
   FixtureQuotationImageRenderer,
   LocalTestQuotationImageStorage,
@@ -307,8 +308,15 @@ export const createLocalQuoteFixture = (): {
     'Outer H': item.outerH,
     'Accessories': item.accessories,
   })]);
+  register(['Inquiries'], [], fields => {
+    const productInterest = String(fields['Product Interest'] || '').trim();
+    if (productInterest && !INQUIRY_PRODUCT_INTEREST_OPTIONS.includes(productInterest as any)) {
+      throw new Error(`Fixture rejected unknown Product Interest: ${productInterest}`);
+    }
+    return fields;
+  });
   [
-    'China Shipments', 'Inquiries', 'Monthly Performance', 'Campaigns', 'Business Expenses',
+    'China Shipments', 'Monthly Performance', 'Campaigns', 'Business Expenses',
     'Expense Checklist', 'Monthly Finance', 'Marketing Spend',
   ].forEach(name => register([name]));
 

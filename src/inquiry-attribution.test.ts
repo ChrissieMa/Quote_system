@@ -4,11 +4,33 @@ import {
   appendLinkedRecordId,
   firstTouchValue,
   isInquiryCycleActive,
+  INQUIRY_PRODUCT_INTEREST_OPTIONS,
   linkedRecordIds,
+  mapQuoteItemTypeToInquiryProductInterest,
   resolveInquiryCycleInactivityDays,
   selectCanonicalInquiry,
   type InquiryAttributionCandidate,
 } from './inquiry-attribution';
+
+test('Quote product labels map only to existing Airtable Product Interest options', () => {
+  const cases: Array<[string, string]> = [
+    ['Display box 展示盒', 'Display Box'],
+    ['Display Case 疊高展示櫃', 'Display Case'],
+    ['階梯', 'Other'],
+    ['Display Box', 'Display Box'],
+    ['Display Case', 'Display Case'],
+    ['Ready Stock', 'Ready Stock'],
+    ['Reissue', 'Reissue'],
+    ['Other', 'Other'],
+    ['Future product label', 'Other'],
+  ];
+
+  for (const [input, expected] of cases) {
+    const mapped = mapQuoteItemTypeToInquiryProductInterest(input);
+    assert.equal(mapped, expected);
+    assert.equal(INQUIRY_PRODUCT_INTEREST_OPTIONS.includes(mapped), true);
+  }
+});
 
 const activeInquiry = (
   overrides: Partial<InquiryAttributionCandidate> = {},

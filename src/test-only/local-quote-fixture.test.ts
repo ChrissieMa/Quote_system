@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { mapQuoteItemTypeToInquiryProductInterest } from '../inquiry-attribution';
 import { createLocalQuoteFixture, localQuoteFixtureEnabled } from './local-quote-fixture';
 
 const withFixtureEnvironment = (values: Record<string, string | undefined>, check: () => void): void => {
@@ -113,6 +114,25 @@ test('local original-route fixture keeps every conditional bottom section popula
     const automaticQuote = (await automaticFixture.base('Quotes').select().firstPage())[0];
     const automaticItems = JSON.parse(String(automaticQuote.fields['Quote Items JSON'])) as Array<Record<string, unknown>>;
     assert.equal(automaticItems[0].quotation_image, undefined);
+
+    const inquiryTable = fixture.base('Inquiries');
+    const quoteItemTypes = ['Display box 展示盒', 'Display Case 疊高展示櫃', '階梯'];
+    const createdInquiries = await inquiryTable.create(quoteItemTypes.map((itemType, index) => ({
+      fields: {
+        'Inquiry Date': '2026-09-01',
+        'Product Interest': mapQuoteItemTypeToInquiryProductInterest(itemType),
+        'Inquiry Status': 'Quoted',
+        'Notes': `TEST-ONLY synthetic product type ${index + 1}`,
+      },
+    })));
+    assert.deepEqual(
+      createdInquiries.map(item => item.fields['Product Interest']),
+      ['Display Box', 'Display Case', 'Other'],
+    );
+    await assert.rejects(
+      inquiryTable.create([{ fields: { 'Product Interest': 'Display Case 疊高展示櫃' } }]),
+      /unknown Product Interest/,
+    );
   } finally {
     if (previousPng === undefined) delete process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG;
     else process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG = previousPng;
