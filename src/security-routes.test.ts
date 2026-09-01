@@ -54,7 +54,7 @@ test('driver settlement route cannot write P&L or Business Expenses', () => {
   }
 });
 
-test('Receipt creation route is evidence-gated, CSRF-protected, idempotent and full-total atomic', () => {
+test('Receipt creation route requires no payment evidence and remains CSRF-protected, idempotent and full-total atomic', () => {
   const start = source.indexOf("app.post('/admin/invoice/:token/mark-paid'");
   const end = source.indexOf("app.get(['/receipt/:token'", start);
   assert.ok(start >= 0 && end > start, 'customer payment route must exist');
@@ -64,12 +64,13 @@ test('Receipt creation route is evidence-gated, CSRF-protected, idempotent and f
     'validateOrderPaymentRequestId',
     "receiptSequenceLock.run('receipt-sequence'",
     'orderPaymentLock.run',
-    'ORDER_PAYMENT_EVIDENCE_FIELD',
     'planFullReceipt',
     'paymentLogHasRequest',
     'syncMonthlyFinance(orderMonth)',
   ]) assert.ok(route.includes(required), `payment route missing ${required}`);
-  assert.ok(!route.includes("fields['Attachments']"), 'invoice/general attachments cannot be payment evidence');
+  for (const forbidden of ['Payment Evidence', 'payment-evidence', 'Dropbox', 'dropbox']) {
+    assert.ok(!route.includes(forbidden), `Receipt creation must not depend on ${forbidden}`);
+  }
   assert.ok(!route.includes('req.body.amount_received'), 'Receipt creation must not accept a second payment amount');
   for (const field of ["'Receipt Number'", "'Receipt Public Token'", "'Pay Date'", "'Status'"]) {
     assert.ok(route.includes(field), `atomic Receipt update missing ${field}`);

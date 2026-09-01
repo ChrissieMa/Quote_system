@@ -6720,7 +6720,6 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
 // ═══════════════════════════════════════════════════════════════════════════
 const ORDER_AMOUNT_RECEIVED_FIELD = 'Amount Received HKD';
 const ORDER_OUTSTANDING_FIELD = 'Outstanding HKD';
-const ORDER_PAYMENT_EVIDENCE_FIELD = 'Payment Evidence';
 const ORDER_PAYMENT_AUDIT_FIELD = 'Payment Audit Log';
 const orderPaymentLock = new InProcessQuoteItemsLock();
 const receiptSequenceLock = new InProcessQuoteItemsLock();
@@ -6732,7 +6731,6 @@ const requireOrderPaymentSchema = async (): Promise<void> => {
   const expected = new Map<string, string>([
     [ORDER_AMOUNT_RECEIVED_FIELD, 'currency'],
     [ORDER_OUTSTANDING_FIELD, 'formula'],
-    [ORDER_PAYMENT_EVIDENCE_FIELD, 'multipleAttachments'],
     [ORDER_PAYMENT_AUDIT_FIELD, 'multilineText'],
   ]);
   for (const [name, type] of expected) {
@@ -6765,8 +6763,6 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
       // A stale/replayed dashboard form cannot create another Receipt or add a
       // second revenue event, even when it carries a different request ID.
       if (hasIssuedReceipt(fields)) return;
-      const evidence = fields[ORDER_PAYMENT_EVIDENCE_FIELD];
-      if (!Array.isArray(evidence) || evidence.length === 0) throw new Error('order-payment-evidence-required');
 
       const paidAt = new Date().toISOString();
       const payDate = getHongKongDate();
@@ -6816,9 +6812,7 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
     res.redirect('/quotes');
   } catch (error: any) {
     logSafeError('Order payment update rejected.', error);
-    const message = String(error?.message || '').includes('evidence-required')
-      ? '未有記錄付款：請先將原始付款證明保存到Dropbox，並附到Airtable Order嘅 Payment Evidence。'
-      : '未有建立收據；請重新整理後核對付款證明及Invoice總額。';
+    const message = '未有建立收據；請重新整理後再試一次。';
     res.status(400).send(renderPage('Receipt not created', `<div class="alert alert-danger">${message}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
   }
 });
