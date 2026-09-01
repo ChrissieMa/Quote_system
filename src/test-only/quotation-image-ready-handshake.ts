@@ -14,7 +14,7 @@ import { ADMIN_SESSION_COOKIE, parseCookies } from '../security';
 
 export const QUOTATION_IMAGE_READY_HANDSHAKE_PATH = '/test-only/quotation-image-ready-handshake';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH = `${QUOTATION_IMAGE_READY_HANDSHAKE_PATH}/bridge`;
-export const QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL = 'https://lksdisplaybox.online/configurator-test/';
+export const QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL = 'https://lksdisplaybox.online/configurator/';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER = 'x-lks-test-run';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN = /^[a-f0-9]{32}$/;
 

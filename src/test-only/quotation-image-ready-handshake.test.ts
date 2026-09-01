@@ -51,8 +51,8 @@ test('TEST HTML installs the parent listener before loading the iframe and expos
   const html = fixture.html();
   assert.match(html, /<meta name="robots" content="noindex,nofollow">/);
   assert.match(html, /id="status" hidden aria-hidden="true"/);
-  assert.match(html, /data-renderer-src="https:\/\/lksdisplaybox\.online\/configurator-test\/"/);
-  assert.doesNotMatch(html, /<iframe[^>]+\ssrc="https:\/\/lksdisplaybox\.online\/configurator-test\/"/);
+  assert.match(html, /data-renderer-src="https:\/\/lksdisplaybox\.online\/configurator\/"/);
+  assert.doesNotMatch(html, /<iframe[^>]+\ssrc="https:\/\/lksdisplaybox\.online\/configurator\/"/);
   for (const key of [
     'iframe_loaded', 'ready_received', 'request_sent', 'response_received',
     'png_valid', 'writer_ok', 'fail_code',
