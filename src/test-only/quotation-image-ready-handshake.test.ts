@@ -163,6 +163,124 @@ test('TEST HTML installs the parent listener before loading the iframe and expos
   await fixture.waitForCompletion();
 });
 
+test('TEST parent preserves an exact READY delivered before the matching iframe load', async () => {
+  const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 100 });
+  fixture.begin('2026-09-01T09:00:00.000Z');
+  const job = fixture.takeNext();
+  assert.ok(job);
+  const script = fixture.html().match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+
+  const frameListeners = new Map<string, () => void>();
+  const windowListeners = new Map<string, (event: any) => unknown>();
+  const fetches: string[] = [];
+  const stageLogs: string[] = [];
+  const status = { textContent: '' };
+  const counters = { textContent: '' };
+  let frameAssignments = 0;
+  let frameSrc = '';
+  const contentWindow = { postMessage(message: unknown) { assert.deepEqual(message, job); } };
+  const frame = {
+    contentWindow,
+    get src() { return frameSrc; },
+    set src(value: string) { frameAssignments += 1; frameSrc = value; },
+    addEventListener(type: string, listener: () => void) { frameListeners.set(type, listener); },
+  };
+  const context = vm.createContext({
+    URL,
+    ArrayBuffer,
+    document: {
+      getElementById(id: string) {
+        if (id === 'quotation-image-renderer') return frame;
+        if (id === 'handshake-counters') return counters;
+        return status;
+      },
+    },
+    window: {
+      addEventListener(type: string, listener: (event: any) => unknown) {
+        windowListeners.set(type, listener);
+      },
+    },
+    console: { info(_label: string, payload: string) { stageLogs.push(payload); } },
+    clearTimeout() {},
+    setTimeout() { return 1; },
+    fetch: async (url: string) => {
+      fetches.push(url);
+      if (url.startsWith(`${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/next`)) {
+        return { ok: true, status: 200, json: async () => job };
+      }
+      if (url.startsWith(`${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/complete/`)) {
+        return { ok: true, status: 202, json: async () => ({ state: 'processing' }) };
+      }
+      if (url.startsWith(`${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/status/`)) {
+        return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      }
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+  new vm.Script(script).runInContext(context);
+
+  await windowListeners.get('message')?.({
+    origin: 'https://lksdisplaybox.online',
+    source: contentWindow,
+    data: {
+      protocol: BROWSER_TRANSPORT_PROTOCOL,
+      type: BROWSER_RENDER_READY_TYPE,
+      capability: BROWSER_RENDER_CAPABILITY,
+    },
+  });
+  frameListeners.get('load')?.();
+  await vm.runInContext('poll()', context);
+  await windowListeners.get('message')?.({
+    origin: 'https://lksdisplaybox.online',
+    source: contentWindow,
+    data: {
+      protocol: BROWSER_TRANSPORT_PROTOCOL,
+      type: BROWSER_RENDER_RESPONSE_TYPE,
+      request_id: job.request_id,
+      ok: true,
+      artifact: {
+        contract: BROWSER_RENDER_CAPABILITY,
+        mime_type: 'image/png',
+        width: 1280,
+        height: 1280,
+        request_identity: quotationRenderRequestIdentity(job.render_request),
+        png_bytes: new ArrayBuffer(16),
+      },
+    },
+  });
+
+  assert.equal(frameAssignments, 1, 'READY before load must not trigger a renderer reload');
+  assert.equal(fetches.filter(url => url.includes('/next')).length, 1);
+  assert.equal(fetches.filter(url => url.includes('/complete/')).length, 1);
+  assert.equal(fetches.filter(url => url.includes('/status/')).length, 1);
+  assert.equal(fetches.filter(url => url.endsWith('/fail')).length, 0);
+  assert.deepEqual(JSON.parse(stageLogs.at(-1) || '{}'), {
+    iframe_loaded: 1,
+    ready_received: 1,
+    request_sent: 1,
+    response_received: 1,
+    png_valid: 1,
+    writer_ok: 1,
+    fail_code: '',
+  });
+  assert.equal(counters.textContent, [
+    'iframe_loaded=1', 'ready_received=1', 'request_sent=1', 'response_received=1',
+    'png_valid=1', 'writer_ok=1', 'fail_code=',
+  ].join('\n'));
+
+  fixture.complete({
+    requestId: job.request_id,
+    contract: BROWSER_RENDER_CAPABILITY,
+    mimeType: 'image/png',
+    width: 1280,
+    height: 1280,
+    requestIdentity: quotationRenderRequestIdentity(job.render_request),
+    bytes: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]),
+  });
+  await fixture.waitForCompletion();
+});
+
 test('TEST fixture validates and writes one synthetic PNG exactly once', async () => {
   const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 100 });
   fixture.begin('2026-09-01T09:00:00.000Z');
@@ -207,4 +325,57 @@ test('Production parent defaults remain on the existing worker and eager iframe 
   assert.doesNotMatch(html, /id="status" hidden/);
   assert.match(html, /fetch\("\/quotation-image\/browser-bridge\/next" \+ recoveryQuery/);
   assert.doesNotMatch(html, /test-only\/quotation-image-ready-handshake/);
+});
+
+test('an unexpected child self-load still clears readiness until a fresh exact READY', async () => {
+  const html = browserQuotationImageClientHtml('https://lksdisplaybox.online/configurator/');
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+  const frameListeners = new Map<string, () => void>();
+  const windowListeners = new Map<string, (event: any) => unknown>();
+  const requests: string[] = [];
+  const contentWindow = { postMessage() {} };
+  const frame = {
+    contentWindow,
+    src: 'https://lksdisplaybox.online/configurator/',
+    addEventListener(type: string, listener: () => void) { frameListeners.set(type, listener); },
+  };
+  const context = vm.createContext({
+    URL,
+    ArrayBuffer,
+    document: {
+      getElementById(id: string) {
+        return id === 'quotation-image-renderer' ? frame : { textContent: '' };
+      },
+    },
+    window: {
+      addEventListener(type: string, listener: (event: any) => unknown) {
+        windowListeners.set(type, listener);
+      },
+    },
+    console: { info() {} },
+    clearTimeout() {},
+    setTimeout() { return 1; },
+    fetch: async (url: string) => {
+      requests.push(url);
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+  new vm.Script(script).runInContext(context);
+  const ready = {
+    origin: 'https://lksdisplaybox.online',
+    source: contentWindow,
+    data: {
+      protocol: BROWSER_TRANSPORT_PROTOCOL,
+      type: BROWSER_RENDER_READY_TYPE,
+      capability: BROWSER_RENDER_CAPABILITY,
+    },
+  };
+  await windowListeners.get('message')?.(ready);
+  frameListeners.get('load')?.();
+  await vm.runInContext('poll()', context);
+  assert.equal(requests.length, 0, 'untracked self-load must clear the earlier READY');
+  await windowListeners.get('message')?.(ready);
+  await vm.runInContext('poll()', context);
+  assert.equal(requests.length, 1, 'fresh READY after self-load may resume polling');
 });

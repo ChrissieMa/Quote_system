@@ -271,9 +271,6 @@ const renderStageCounters = () => {
 };`
     : '';
   const stageCounterEmit = showStageCounters ? 'renderStageCounters();' : '';
-  const deferredRendererStart = deferRendererLoad
-    ? `frame.src = ${JSON.stringify(rendererUrl)};`
-    : '';
   return `<!doctype html>
 <meta charset="utf-8">
 <meta name="robots" content="noindex,nofollow">
@@ -293,6 +290,9 @@ let readyTimer = null;
 let responseTimer = null;
 let recoverLatest = true;
 let rendererReloads = 0;
+let rendererNavigationGeneration = 0;
+let pendingRendererLoadGeneration = 0;
+let acceptedReadyGeneration = 0;
 const rendererReadyTimeoutMs = 8000;
 const rendererResponseTimeoutMs = 6000;
 const maxRendererReloads = 2;
@@ -314,6 +314,11 @@ const emitStage = (name, failCode = '') => {
   console.info('quotation-image-stage', JSON.stringify(stageCounts));
 };
 const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };
+const navigateRenderer = () => {
+  rendererNavigationGeneration += 1;
+  pendingRendererLoadGeneration = rendererNavigationGeneration;
+  frame.src = ${JSON.stringify(rendererUrl)};
+};
 const reloadRenderer = failCode => {
   rendererReady = false;
   clearTimeout(readyTimer);
@@ -323,7 +328,7 @@ const reloadRenderer = failCode => {
   status.textContent = '3D系統準備中；報價單已正常建立';
   if (rendererReloads >= maxRendererReloads) return;
   rendererReloads += 1;
-  frame.src = ${JSON.stringify(rendererUrl)};
+  navigateRenderer();
 };
 const armReadyTimeout = () => {
   clearTimeout(readyTimer);
@@ -380,6 +385,7 @@ window.addEventListener('message', async event => {
   if (isExactRendererReady(response)) {
     if (rendererReady || activeJob) return;
     rendererReady = true;
+    acceptedReadyGeneration = pendingRendererLoadGeneration || rendererNavigationGeneration;
     rendererReloads = 0;
     clearTimeout(readyTimer);
     emitStage('ready_received');
@@ -421,15 +427,24 @@ window.addEventListener('message', async event => {
   } finally { schedulePoll(); }
 });
 frame.addEventListener('load', () => {
-  rendererReady = false;
   emitStage('iframe_loaded');
+  const loadedGeneration = pendingRendererLoadGeneration;
+  pendingRendererLoadGeneration = 0;
+  const preserveAcceptedReady = loadedGeneration > 0
+    && acceptedReadyGeneration === loadedGeneration
+    && rendererReady;
+  if (preserveAcceptedReady) {
+    if (!activeJob) schedulePoll(0);
+    return;
+  }
+  rendererReady = false;
   clearTimeout(readyTimer);
   clearTimeout(responseTimer);
   activeJob = null;
   armReadyTimeout();
 });
 armReadyTimeout();
-${deferredRendererStart}
+${deferRendererLoad ? 'navigateRenderer();' : ''}
 </script>`;
 };
 
