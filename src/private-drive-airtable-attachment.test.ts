@@ -18,6 +18,9 @@ import {
 import type { GoogleDriveAccessTokenProvider } from './google-drive-quotation-image';
 import {
   ALTERNATE_SAFE_PNG,
+  CORRUPT_IDAT_PNG,
+  CORRUPT_IDAT_PNG_SHA256,
+  OVERSIZED_DIMENSION_PNG,
   SAFE_JPEG,
   SAFE_JPEG_SHA256,
   SAFE_PNG,
@@ -61,13 +64,17 @@ class MemoryAirtable implements AirtableAttachmentProvider {
   uploads = 0;
   reads = 0;
   ambiguousUpload = false;
+  failListAfterUpload = false;
   readback = SAFE_PNG;
   identity: AttachmentTarget = { ...TARGET };
 
   async preflight(): Promise<{ identity: AttachmentTarget; attachments: AttachmentDescriptor[] }> {
     return { identity: { ...this.identity }, attachments: [...this.attachments] };
   }
-  async list(): Promise<AttachmentDescriptor[]> { return [...this.attachments]; }
+  async list(): Promise<AttachmentDescriptor[]> {
+    if (this.failListAfterUpload && this.uploads > 0) throw new Error('mock post-upload read timeout');
+    return [...this.attachments];
+  }
   async uploadRaw(input: { filename: string; bytes: Uint8Array; mimeType: 'image/png' | 'image/jpeg' }): Promise<void> {
     this.uploads += 1;
     assert.deepEqual(Buffer.from(input.bytes), SAFE_PNG);
@@ -101,7 +108,7 @@ test('safe fixtures are complete PNG/JPEG files with fixed full-file SHA-256 dig
   assertSafeImage(SAFE_PNG, 'image/png');
   assertSafeImage(SAFE_JPEG, 'image/jpeg');
   assert.equal(SAFE_PNG.length, 70);
-  assert.equal(SAFE_JPEG.length, 518);
+  assert.equal(SAFE_JPEG.length, 616);
   assert.equal(fullSha256(SAFE_PNG), SAFE_PNG_SHA256);
   assert.equal(fullSha256(SAFE_JPEG), SAFE_JPEG_SHA256);
 });
@@ -114,6 +121,16 @@ test('strict image validation rejects truncation, trailing data, forged CRC, and
   assert.throws(() => assertSafeImage(forged, 'image/png'), AttachmentTransferError);
   assert.throws(() => assertSafeImage(SAFE_JPEG, 'image/png'), AttachmentTransferError);
   assert.throws(() => assertSafeImage(SAFE_JPEG.subarray(0, -2), 'image/jpeg'), AttachmentTransferError);
+});
+
+test('full decode rejects corrupt IDAT with a valid CRC and oversized declared dimensions', () => {
+  assert.equal(CORRUPT_IDAT_PNG.length, 70);
+  assert.equal(fullSha256(CORRUPT_IDAT_PNG), CORRUPT_IDAT_PNG_SHA256);
+  assert.throws(() => assertSafeImage(CORRUPT_IDAT_PNG, 'image/png'),
+    (error: AttachmentTransferError) => error.audit.code === 'image_decode_failed');
+
+  assert.throws(() => assertSafeImage(OVERSIZED_DIMENSION_PNG, 'image/png'),
+    (error: AttachmentTransferError) => error.audit.code === 'invalid_png');
 });
 
 test('idempotency identity is deterministic and changes for every required component', () => {
@@ -162,9 +179,54 @@ test('ambiguous Airtable write is never retried and is reconciled by full readba
   airtable.ambiguousUpload = true;
   const { value } = adapter(new StaticDrive(), airtable);
   const receipt = await value.execute({ fileId: FILE_ID, expectedSha256: SAFE_PNG_SHA256, target: TARGET });
-  assert.equal(receipt.outcome, 'deduped');
+  assert.equal(receipt.outcome, 'created');
+  assert.equal(receipt.writeResolution, 'ambiguous_reconciled');
   assert.equal(airtable.uploads, 1);
   assert.equal(airtable.attachments.length, 1);
+});
+
+test('ambiguous write with failed readback preserves exact created-attachment rollback evidence', async () => {
+  const airtable = new MemoryAirtable();
+  airtable.ambiguousUpload = true;
+  airtable.readback = ALTERNATE_SAFE_PNG;
+  const { value } = adapter(new StaticDrive(), airtable);
+  let audit: AttachmentTransferError['audit'] | undefined;
+  await assert.rejects(value.execute({ fileId: FILE_ID, expectedSha256: SAFE_PNG_SHA256, target: TARGET }),
+    (error: AttachmentTransferError) => {
+      audit = error.audit;
+      assert.equal(error.audit.mutation, 'attachment_created');
+      assert.equal(error.audit.rollback, 'eligible_after_reread');
+      assert.equal(error.audit.createdAttachmentId, ATTACHMENT_ID);
+      return true;
+    });
+  assert.equal(planAttachmentRollback(audit!, { target: TARGET, attachments: airtable.attachments }).state, 'removable');
+  assert.equal(airtable.uploads, 1);
+});
+
+test('2xx upload followed by an unreadable record remains ambiguous and never reports zero mutation', async () => {
+  const airtable = new MemoryAirtable();
+  airtable.failListAfterUpload = true;
+  const { value } = adapter(new StaticDrive(), airtable);
+  await assert.rejects(value.execute({ fileId: FILE_ID, expectedSha256: SAFE_PNG_SHA256, target: TARGET }),
+    (error: AttachmentTransferError) => {
+      assert.equal(error.audit.code, 'airtable_post_upload_read_ambiguous');
+      assert.equal(error.audit.mutation, 'ambiguous');
+      assert.equal(error.audit.rollback, 'manual_review');
+      return true;
+    });
+  assert.equal(airtable.uploads, 1);
+});
+
+test('concurrent replay rejects conflicting retention metadata', async () => {
+  const { value } = adapter();
+  const input = { fileId: FILE_ID, expectedSha256: SAFE_PNG_SHA256, target: TARGET };
+  const results = await Promise.allSettled([
+    value.execute({ ...input, retainUntil: '2026-10-01T00:00:00.000Z' }),
+    value.execute({ ...input, retainUntil: '2026-11-01T00:00:00.000Z' }),
+  ]);
+  assert.equal(results.filter(result => result.status === 'fulfilled').length, 1);
+  const rejected = results.find(result => result.status === 'rejected') as PromiseRejectedResult;
+  assert.equal((rejected.reason as AttachmentTransferError).audit.code, 'retention_conflict');
 });
 
 test('target and provider identity mismatches fail closed before any Airtable write', async () => {
