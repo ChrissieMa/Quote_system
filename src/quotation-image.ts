@@ -87,6 +87,34 @@ export type PreparedQuotationImageJob = {
   request: RenderRequestV1 & { purpose: 'quotation' };
 };
 
+export type QuotationImageRecoveryClaim = Readonly<{
+  key: string;
+  leaseId: number;
+}>;
+
+export class InMemoryQuotationImageRecoveryClaims {
+  private readonly active = new Map<string, number>();
+  private nextLeaseId = 1;
+
+  tryAcquire(key: string): QuotationImageRecoveryClaim | null {
+    if (!key || key.length > 512 || this.active.has(key) || this.active.size >= 256) return null;
+    const leaseId = this.nextLeaseId;
+    this.nextLeaseId += 1;
+    this.active.set(key, leaseId);
+    return Object.freeze({ key, leaseId });
+  }
+
+  release(claim: QuotationImageRecoveryClaim): boolean {
+    if (this.active.get(claim.key) !== claim.leaseId) return false;
+    this.active.delete(claim.key);
+    return true;
+  }
+
+  get activeCount(): number {
+    return this.active.size;
+  }
+}
+
 // Deliberately empty in this development PR. An approved composition module
 // can install provider adapters on this module singleton without changing the
 // Quote persistence/presentation flows. No Production provider or credential
@@ -620,29 +648,84 @@ export const prepareNewQuoteItemsForQuotationImageJobs = <T extends QuoteItemWit
   return { items: prepared, jobs };
 };
 
+export const prepareRetryableQuotationImageJobs = <T extends QuoteItemWithQuotationImage>(
+  items: readonly T[],
+  options: {
+    enabled: boolean;
+    runtime: QuotationImageRuntimeAdapters;
+    now?: Date | string;
+    maxAgeMs?: number;
+  },
+): PreparedQuotationImageJob[] => {
+  const configured = options.runtime.coordinator
+    && options.runtime.jobScheduler
+    && options.runtime.metadataWriter;
+  if (!options.enabled || !configured) return [];
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const nowMs = now.getTime();
+  const maxAgeMs = options.maxAgeMs ?? 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return [];
+
+  return items.flatMap(item => {
+    const metadata = item.quotation_image;
+    if (metadata?.contract !== QUOTATION_IMAGE_CONTRACT
+      || metadata.state !== 'failed'
+      || !['temporary', 'timeout'].includes(String(metadata.error_class || ''))
+      || !item.item_id) return [];
+    const failedAt = Date.parse(String(metadata.updated_at || ''));
+    const ageMs = nowMs - failedAt;
+    if (!Number.isFinite(failedAt) || ageMs < 0 || ageMs > maxAgeMs) return [];
+    const request = buildQuotationRenderRequestFromQuoteItem(item);
+    if (!request) return [];
+    const expectedIdempotencyKey = quotationImageIdempotencyKey(item.item_id, request);
+    if (metadata.idempotency_key !== expectedIdempotencyKey) return [];
+    return [{ itemId: item.item_id, request }];
+  });
+};
+
 export const scheduleQuotationImageJobsAfterWrite = (
   jobs: PreparedQuotationImageJob[],
   quoteRecordId: string,
   runtime: QuotationImageRuntimeAdapters,
+  options: {
+    onSettled?: (input: {
+      job: PreparedQuotationImageJob;
+      metadata?: QuotationImageMetadata;
+      error?: unknown;
+    }) => void;
+  } = {},
 ): void => {
   const coordinator = runtime.coordinator;
   const scheduler = runtime.jobScheduler;
   const writer = runtime.metadataWriter;
   if (!coordinator || !scheduler || !writer || !quoteRecordId) return;
   for (const job of jobs) {
+    const settle = (input: { metadata?: QuotationImageMetadata; error?: unknown }) => {
+      try {
+        options.onSettled?.({ job, ...input });
+      } catch {
+        // Lifecycle hooks must never change the authoritative Quote outcome.
+      }
+    };
     try {
       scheduler.enqueue(async () => {
+        let metadata: QuotationImageMetadata | undefined;
+        let failure: unknown;
         try {
-          const metadata = await coordinator.process(job.itemId, job.request);
+          metadata = await coordinator.process(job.itemId, job.request);
           await writer.update({ quoteRecordId, itemId: job.itemId, metadata });
-        } catch {
+        } catch (error) {
+          failure = error;
           // Renderer, storage and metadata-writer errors are isolated from the
           // already-completed authoritative Quote create response.
+        } finally {
+          settle(failure === undefined ? { metadata } : { metadata, error: failure });
         }
       });
-    } catch {
+    } catch (error) {
       // A scheduler refusing a job must likewise never change the create
       // response after the authoritative Quote write has succeeded.
+      settle({ error });
     }
   }
 };
