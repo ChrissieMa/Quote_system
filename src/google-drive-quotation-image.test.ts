@@ -2,6 +2,10 @@ import assert from 'node:assert/strict';
 import express from 'express';
 import test from 'node:test';
 import {
+  BrowserQuotationImageBridge,
+  quotationRenderRequestIdentity,
+} from './browser-quotation-image';
+import {
   GOOGLE_DRIVE_QUOTATION_IMAGE_OAUTH_SCOPE,
   GoogleDriveQuotationImageProxy,
   GoogleDriveQuotationImageStorage,
@@ -10,9 +14,13 @@ import {
   registerGoogleDriveQuotationImageProxy,
   type GoogleDriveAccessTokenProvider,
 } from './google-drive-quotation-image';
+import { AirtableQuotationImageMetadataWriter } from './airtable-quotation-image-metadata';
 import {
   FixtureQuotationImageRenderer,
   QuotationImageCoordinator,
+  quotationImageIdempotencyKey,
+  type QuotationImageStorage,
+  type RenderRequestV1,
 } from './quotation-image';
 
 const DIGEST = 'a'.repeat(64);
@@ -35,6 +43,25 @@ const FOLDER_ID = 'drive_folder_12345678';
 const OWNER_PERMISSION_ID = 'owner_permission_12345678';
 const OWNER_EMAIL = 'owner@example.test';
 const ITEM_ID = '9e4f6e72-d31a-4d1a-8d15-730282c1b102';
+const RENDER_REQUEST: RenderRequestV1 = {
+  purpose: 'quotation',
+  product_type: 'display_box',
+  configuration_id: ITEM_ID,
+  dimensions: {
+    unit: 'cm',
+    inner: { length: 28, depth: 18, height: 21 },
+    outer: { length: 30, depth: 20, height: 22 },
+    actual: { length: 30, depth: 20, height: 22 },
+  },
+  cabinet_layers: [],
+  accessories: [],
+  colours: { body: 'clear_acrylic', background: 'light_blue_gray' },
+  camera_preset: 'quotation_square_three_quarter_v2',
+  output: { width: 1280, height: 1280, background: 'configured' },
+  branding: { enabled: false, style: 'none' },
+  show_dimensions: true,
+  show_price: false,
+};
 
 class StaticTokenProvider implements GoogleDriveAccessTokenProvider {
   invalidations = 0;
@@ -71,14 +98,14 @@ const storageConfig = (fetchMock: typeof fetch) => ({
   retryDelay: async () => {},
 });
 
-const privateFile = () => ({
+const privateFile = (digest = DIGEST) => ({
   id: FILE_ID,
-  name: `quotation-image-${DIGEST}.png`,
+  name: `quotation-image-${digest}.png`,
   mimeType: 'image/png',
   trashed: false,
   appProperties: {
     lks_contract: 'quotation-image-v1',
-    lks_asset_digest: DIGEST,
+    lks_asset_digest: digest,
   },
   parents: [FOLDER_ID],
   permissions: [{ id: OWNER_PERMISSION_ID, type: 'user', role: 'owner' }],
@@ -242,6 +269,250 @@ test('exhausted Drive failures remain fail-open through the quotation coordinato
   });
   assert.equal(metadata.state, 'failed');
   assert.equal(metadata.error_class, 'temporary');
+  assert.equal(metadata.error_stage, 'storage');
+  assert.equal(metadata.error_code, 'google-drive-http-retryable');
+  assert.equal(metadata.error_http_class, '5xx');
+});
+
+test('Production-like browser, Drive and Airtable path retries storage without rendering a second PNG', async t => {
+  const transientCases = [
+    { name: 'HTTP 408', response: () => json({ error: 'safe fixture' }, 408), httpClass: '408' },
+    { name: 'HTTP 429', response: () => json({ error: 'safe fixture' }, 429), httpClass: '429' },
+    { name: 'HTTP 5xx', response: () => json({ error: 'safe fixture' }, 503), httpClass: '5xx' },
+    {
+      name: 'network',
+      response: () => { throw new Error('unsafe fixture URL and credential must never be logged'); },
+      httpClass: 'network',
+    },
+  ] as const;
+
+  for (const transient of transientCases) {
+    await t.test(transient.name, async () => {
+      const expectedDigest = quotationImageIdempotencyKey(ITEM_ID, RENDER_REQUEST).slice('sha256:'.length);
+      let lookupCalls = 0;
+      let generatedIds = 0;
+      let uploadCalls = 0;
+      let deleteCalls = 0;
+      const fetchMock: typeof fetch = async (input, init = {}) => {
+        const url = String(input);
+        const preflight = preflightResponse(url);
+        if (preflight) return preflight;
+        if (url.includes('/drive/v3/files?') && init.method === 'GET') {
+          lookupCalls += 1;
+          if (lookupCalls <= 3) return transient.response();
+          return json({ files: lookupCalls === 4 ? [] : [{ id: FILE_ID }] });
+        }
+        if (url.includes('/drive/v3/files/generateIds')) {
+          generatedIds += 1;
+          return json({ ids: [FILE_ID] });
+        }
+        if (url.includes('/upload/drive/v3/files')) {
+          uploadCalls += 1;
+          return json({ id: FILE_ID });
+        }
+        if (url.includes(`/drive/v3/files/${FILE_ID}?fields=`)) return json(privateFile(expectedDigest));
+        if (init.method === 'DELETE') {
+          deleteCalls += 1;
+          return json({});
+        }
+        throw new Error(`Unexpected mock Drive request: ${init.method} ${url}`);
+      };
+      const drive = new GoogleDriveQuotationImageStorage({
+        ...storageConfig(fetchMock),
+        maxAttempts: 3,
+      });
+      let storagePutCalls = 0;
+      const storage: QuotationImageStorage = {
+        async put(input) {
+          storagePutCalls += 1;
+          return drive.put(input);
+        },
+      };
+      const failures: unknown[] = [];
+      const bridge = new BrowserQuotationImageBridge();
+      const coordinator = new QuotationImageCoordinator(bridge, storage, {
+        maxAttempts: 2,
+        retryDelay: async () => {},
+        onFailure: failure => failures.push(failure),
+      });
+      const processing = coordinator.process(ITEM_ID, RENDER_REQUEST);
+      const job = bridge.takeNext();
+      assert.ok(job, 'one browser render request must be available');
+      let responseCount = 0;
+      let pngCount = 0;
+      responseCount += 1;
+      if (bridge.complete({
+        requestId: job.request_id,
+        contract: '3d-render-v1',
+        mimeType: 'image/png',
+        width: 1280,
+        height: 1280,
+        requestIdentity: quotationRenderRequestIdentity(RENDER_REQUEST),
+        bytes: PNG,
+      })) pngCount += 1;
+      const metadata = await processing;
+
+      let writerCalls = 0;
+      const idempotencyKey = quotationImageIdempotencyKey(ITEM_ID, RENDER_REQUEST);
+      const fields: Record<string, unknown> = {
+        'Quote Items JSON': JSON.stringify([{
+          item_id: ITEM_ID,
+          quotation_image: {
+            contract: 'quotation-image-v1', state: 'pending', idempotency_key: idempotencyKey,
+            attempts: 0, updated_at: '2026-09-02T00:00:00.000Z',
+          },
+        }]),
+      };
+      const writer = new AirtableQuotationImageMetadataWriter({
+        async find(id: string) { return { id, fields: { ...fields } }; },
+        async update(records) {
+          writerCalls += 1;
+          Object.assign(fields, records[0].fields);
+        },
+      });
+      await writer.update({ quoteRecordId: 'rec-safe-fixture', itemId: ITEM_ID, metadata });
+      bridge.markMetadataPersisted(metadata);
+
+      assert.equal(metadata.state, 'ready');
+      assert.equal(metadata.attempts, 2);
+      assert.equal(bridge.takeNext(), null);
+      assert.equal(responseCount, 1);
+      assert.equal(pngCount, 1);
+      assert.equal(storagePutCalls, 2);
+      assert.equal(writerCalls, 1);
+      assert.equal(bridge.status(job.request_id)?.state, 'ready');
+      assert.deepEqual(failures, [{
+        stage: 'storage',
+        error_class: 'temporary',
+        error_code: transient.httpClass === 'network' ? 'google-drive-network' : 'google-drive-http-retryable',
+        error_http_class: transient.httpClass,
+        attempt: 1,
+        max_attempts: 2,
+      }]);
+      assert.equal(JSON.stringify(failures).includes('unsafe fixture'), false);
+      assert.equal(generatedIds, 1);
+      assert.equal(uploadCalls, 1);
+      assert.equal(deleteCalls, 0);
+      assert.equal(lookupCalls, 5, 'Drive request retries and coordinator storage retry must both remain bounded');
+
+      const replay = await coordinator.process(ITEM_ID, RENDER_REQUEST);
+      assert.deepEqual(replay, metadata);
+      assert.equal(storagePutCalls, 2, 'deterministic replay must not create another Drive file');
+      assert.equal(generatedIds, 1);
+      assert.equal(uploadCalls, 1);
+    });
+  }
+});
+
+test('permanent Drive failure persists safe storage metadata without re-entering the renderer', async () => {
+  let lookupCalls = 0;
+  const fetchMock: typeof fetch = async (input, init = {}) => {
+    const url = String(input);
+    const preflight = preflightResponse(url);
+    if (preflight) return preflight;
+    if (url.includes('/drive/v3/files?') && init.method === 'GET') {
+      lookupCalls += 1;
+      return json({ error: 'safe fixture' }, 403);
+    }
+    throw new Error(`Unexpected mock Drive request: ${init.method} ${url}`);
+  };
+  const drive = new GoogleDriveQuotationImageStorage({ ...storageConfig(fetchMock), maxAttempts: 1 });
+  let storagePutCalls = 0;
+  const storage: QuotationImageStorage = {
+    async put(input) {
+      storagePutCalls += 1;
+      return drive.put(input);
+    },
+  };
+  const bridge = new BrowserQuotationImageBridge();
+  const coordinator = new QuotationImageCoordinator(bridge, storage, { maxAttempts: 2 });
+  const processing = coordinator.process(ITEM_ID, RENDER_REQUEST);
+  const job = bridge.takeNext();
+  assert.ok(job);
+  bridge.complete({
+    requestId: job.request_id,
+    contract: '3d-render-v1', mimeType: 'image/png', width: 1280, height: 1280,
+    requestIdentity: quotationRenderRequestIdentity(RENDER_REQUEST), bytes: PNG,
+  });
+  const metadata = await processing;
+  assert.equal(metadata.state, 'failed');
+  assert.equal(metadata.attempts, 1);
+  assert.equal(metadata.error_class, 'terminal');
+  assert.equal(metadata.error_stage, 'storage');
+  assert.equal(metadata.error_code, 'google-drive-http-terminal');
+  assert.equal(metadata.error_http_class, '4xx');
+  assert.equal(storagePutCalls, 1);
+  assert.equal(lookupCalls, 1);
+  assert.equal(bridge.takeNext(), null, 'permanent storage failure must not render again');
+});
+
+test('Airtable writer failure is isolated after one successful render and deterministic Drive write', async () => {
+  const expectedDigest = quotationImageIdempotencyKey(ITEM_ID, RENDER_REQUEST).slice('sha256:'.length);
+  let uploadCalls = 0;
+  let lookupCalls = 0;
+  const fetchMock: typeof fetch = async (input, init = {}) => {
+    const url = String(input);
+    const preflight = preflightResponse(url);
+    if (preflight) return preflight;
+    if (url.includes('/drive/v3/files?') && init.method === 'GET') {
+      lookupCalls += 1;
+      return json({ files: lookupCalls === 1 ? [] : [{ id: FILE_ID }] });
+    }
+    if (url.includes('/drive/v3/files/generateIds')) return json({ ids: [FILE_ID] });
+    if (url.includes('/upload/drive/v3/files')) {
+      uploadCalls += 1;
+      return json({ id: FILE_ID });
+    }
+    if (url.includes(`/drive/v3/files/${FILE_ID}?fields=`)) return json(privateFile(expectedDigest));
+    throw new Error(`Unexpected mock Drive request: ${init.method} ${url}`);
+  };
+  const bridge = new BrowserQuotationImageBridge();
+  const coordinator = new QuotationImageCoordinator(
+    bridge,
+    new GoogleDriveQuotationImageStorage({ ...storageConfig(fetchMock), maxAttempts: 1 }),
+    { maxAttempts: 2 },
+  );
+  const processing = coordinator.process(ITEM_ID, RENDER_REQUEST);
+  const job = bridge.takeNext();
+  assert.ok(job);
+  bridge.complete({
+    requestId: job.request_id,
+    contract: '3d-render-v1', mimeType: 'image/png', width: 1280, height: 1280,
+    requestIdentity: quotationRenderRequestIdentity(RENDER_REQUEST), bytes: PNG,
+  });
+  const metadata = await processing;
+  assert.equal(metadata.state, 'ready');
+
+  let writerCalls = 0;
+  const idempotencyKey = quotationImageIdempotencyKey(ITEM_ID, RENDER_REQUEST);
+  const writer = new AirtableQuotationImageMetadataWriter({
+    async find(id: string) {
+      return {
+        id,
+        fields: { 'Quote Items JSON': JSON.stringify([{
+          item_id: ITEM_ID,
+          quotation_image: {
+            contract: 'quotation-image-v1', state: 'pending', idempotency_key: idempotencyKey,
+            attempts: 0, updated_at: '2026-09-02T00:00:00.000Z',
+          },
+        }]) },
+      };
+    },
+    async update() {
+      writerCalls += 1;
+      throw new Error('safe Airtable writer fixture');
+    },
+  });
+  await assert.rejects(
+    writer.update({ quoteRecordId: 'rec-safe-fixture', itemId: ITEM_ID, metadata }),
+    /safe Airtable writer fixture/,
+  );
+  assert.equal(writerCalls, 1);
+  assert.equal(uploadCalls, 1);
+  assert.equal(bridge.takeNext(), null);
+  assert.equal(bridge.status(job.request_id)?.state, 'processing');
+  assert.deepEqual(await coordinator.process(ITEM_ID, RENDER_REQUEST), metadata);
+  assert.equal(uploadCalls, 1, 'writer failure must not rerender or rewrite Drive');
 });
 
 test('OAuth user refresh token provider caches short-lived access tokens without exposing credentials', async () => {
