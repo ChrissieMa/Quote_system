@@ -226,16 +226,62 @@ export class BrowserQuotationImageBridge implements QuotationImageRenderer {
   }
 }
 
-export const browserQuotationImageClientHtml = (rendererUrlValue: unknown): string => {
+export type BrowserQuotationImageClientOptions = {
+  bridgePath?: string;
+  deferRendererLoadUntilListener?: boolean;
+  showStageCounters?: boolean;
+};
+
+const normalizeBrowserBridgePath = (value: unknown): string => {
+  const path = String(value || '/quotation-image/browser-bridge').trim();
+  if (!/^\/[a-z0-9/_-]+$/i.test(path) || path.includes('//') || path.endsWith('/')) {
+    throw new Error('Quotation-image browser bridge path is invalid.');
+  }
+  return path;
+};
+
+export const browserQuotationImageClientHtml = (
+  rendererUrlValue: unknown,
+  options: BrowserQuotationImageClientOptions = {},
+): string => {
   const rendererUrl = normalizeQuotationImageRendererUrl(rendererUrlValue);
   const rendererOrigin = new URL(rendererUrl).origin;
+  const bridgePath = normalizeBrowserBridgePath(options.bridgePath);
+  const deferRendererLoad = options.deferRendererLoadUntilListener === true;
+  const showStageCounters = options.showStageCounters === true;
+  const iframeSourceAttribute = deferRendererLoad
+    ? `data-renderer-src="${rendererUrl}"`
+    : `src="${rendererUrl}"`;
+  const stageCounterMarkup = showStageCounters
+    ? '<pre id="handshake-counters">iframe_loaded=0\nready_received=0\nrequest_sent=0\nresponse_received=0\npng_valid=0\nwriter_ok=0\nfail_code=</pre>'
+    : '';
+  const statusVisibilityAttribute = showStageCounters ? ' hidden aria-hidden="true"' : '';
+  const stageCounterScript = showStageCounters
+    ? `const stageCounter = document.getElementById('handshake-counters');
+const renderStageCounters = () => {
+  stageCounter.textContent = [
+    'iframe_loaded=' + stageCounts.iframe_loaded,
+    'ready_received=' + stageCounts.ready_received,
+    'request_sent=' + stageCounts.request_sent,
+    'response_received=' + stageCounts.response_received,
+    'png_valid=' + stageCounts.png_valid,
+    'writer_ok=' + stageCounts.writer_ok,
+    'fail_code=' + stageCounts.fail_code
+  ].join('\\n');
+};`
+    : '';
+  const stageCounterEmit = showStageCounters ? 'renderStageCounters();' : '';
+  const deferredRendererStart = deferRendererLoad
+    ? `frame.src = ${JSON.stringify(rendererUrl)};`
+    : '';
   return `<!doctype html>
 <meta charset="utf-8">
 <meta name="robots" content="noindex,nofollow">
 <title>LKS 3D quotation image</title>
 <style>body{font:14px system-ui;margin:0;color:#334155}.status{padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:8px}iframe{width:1px;height:1px;border:0;position:absolute;left:-9999px}</style>
-<div class="status" id="status">3D 圖片準備中…</div>
-<iframe id="quotation-image-renderer" src="${rendererUrl}" title="3D quotation image renderer"></iframe>
+<div class="status" id="status"${statusVisibilityAttribute}>3D 圖片準備中…</div>
+${stageCounterMarkup}
+<iframe id="quotation-image-renderer" ${iframeSourceAttribute} title="3D quotation image renderer"></iframe>
 <script>
 const rendererOrigin = ${JSON.stringify(rendererOrigin)};
 const frame = document.getElementById('quotation-image-renderer');
@@ -259,10 +305,12 @@ const stageCounts = Object.seal({
   writer_ok: 0,
   fail_code: ''
 });
+${stageCounterScript}
 const emitStage = (name, failCode = '') => {
   if (name && typeof stageCounts[name] === 'number') stageCounts[name] += 1;
   if (failCode) stageCounts.fail_code = /^[a-z0-9._:$-]{1,120}$/i.test(failCode)
     ? failCode : 'quotation-image-client-failed';
+  ${stageCounterEmit}
   console.info('quotation-image-stage', JSON.stringify(stageCounts));
 };
 const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };
@@ -288,13 +336,13 @@ const isExactRendererReady = response => response && typeof response === 'object
   && response.protocol === '${BROWSER_TRANSPORT_PROTOCOL}'
   && response.type === '${BROWSER_RENDER_READY_TYPE}'
   && response.capability === '${BROWSER_RENDER_CAPABILITY}';
-const fail = async (requestId, errorCode) => fetch('/quotation-image/browser-bridge/fail', {
+const fail = async (requestId, errorCode) => fetch(${JSON.stringify(`${bridgePath}/fail`)}, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ request_id: requestId, error_code: String(errorCode || 'quotation-image-browser-transport-render-failed') })
 });
 const waitForPersistence = async requestId => {
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    const response = await fetch('/quotation-image/browser-bridge/status/' + encodeURIComponent(requestId), { cache: 'no-store' });
+    const response = await fetch(${JSON.stringify(`${bridgePath}/status/`)} + encodeURIComponent(requestId), { cache: 'no-store' });
     if (response.ok) {
       const result = await response.json();
       if (result?.state === 'ready' || result?.state === 'failed') return result.state;
@@ -307,7 +355,7 @@ const poll = async () => {
   if (!rendererReady || activeJob) return schedulePoll();
   try {
     const recoveryQuery = recoverLatest ? '?recover_latest=1' : '';
-    const response = await fetch('/quotation-image/browser-bridge/next' + recoveryQuery, { cache: 'no-store' });
+    const response = await fetch(${JSON.stringify(`${bridgePath}/next`)} + recoveryQuery, { cache: 'no-store' });
     if (!response.ok) throw new Error('bridge-next-failed');
     recoverLatest = false;
     if (response.status === 204) { status.textContent = '3D 圖片已處理完成'; return schedulePoll(1000); }
@@ -353,7 +401,7 @@ window.addEventListener('message', async event => {
       || artifact?.width !== 1280 || artifact?.height !== 1280
       || !(artifact?.png_bytes instanceof ArrayBuffer)) throw new Error('bridge-artifact-invalid');
     emitStage('png_valid');
-    const completed = await fetch('/quotation-image/browser-bridge/complete/' + encodeURIComponent(requestId), {
+    const completed = await fetch(${JSON.stringify(`${bridgePath}/complete/`)} + encodeURIComponent(requestId), {
       method: 'POST', headers: {
         'Content-Type': 'application/octet-stream', 'X-LKS-Contract': artifact.contract,
         'X-LKS-Mime-Type': artifact.mime_type, 'X-LKS-Width': String(artifact.width),
@@ -381,6 +429,7 @@ frame.addEventListener('load', () => {
   armReadyTimeout();
 });
 armReadyTimeout();
+${deferredRendererStart}
 </script>`;
 };
 
