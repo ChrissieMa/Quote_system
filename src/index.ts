@@ -111,6 +111,7 @@ import {
   calculateOwnerOrderCostBreakdown,
   calculateOwnerFinanceSummary,
   getOrderAmountReceived,
+  hasIssuedReceipt,
   getOrderOutstandingAmount,
   getMacbookInstallmentNumber,
   getDriverSettlement,
@@ -119,7 +120,9 @@ import {
   MACBOOK_INSTALLMENT_EXPENSE_NAME,
   parseDriverPaymentAmountCents,
   planDriverPayment,
-  planOrderPayment,
+  planFullReceipt,
+  auditReceiptBackfill,
+  makeReceiptBackfillUpdate,
   paymentLogHasRequest,
   summarizeOwnerOrderCostCoverage,
   toHkdCents,
@@ -862,7 +865,7 @@ const renderOptionalQuotationImage = (
 ): string => {
   if (!QUOTATION_IMAGE_ENABLED) return '';
   if (!presentation) return '';
-  return `<div class="quotation-image"><img src="${escapeHtml(presentation.src)}" alt="${escapeHtml(presentation.alt)}" loading="lazy"></div>`;
+  return `<div class="quotation-image"><img src="${escapeHtml(presentation.src)}" alt="${escapeHtml(presentation.alt)}" loading="eager" fetchpriority="high"></div>`;
 };
 
 const renderOptionalQuotationImageRow = (
@@ -4041,7 +4044,7 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
       { key: 'all', label: 'All' },
       { key: 'draft', label: 'Draft' },
       { key: 'ready', label: 'Ready' },
-      { key: 'paid', label: 'Mark as Paid' },
+      { key: 'paid', label: '待收款' },
     ];
 
     const tabsHtml = tabs.map(t => {
@@ -4051,7 +4054,7 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
     }).join('');
 
     // Pre-fetch receipt tokens from Order_2026 for quotes that have been converted
-    const receiptTokenMap: Record<string, string> = {};
+    const receiptStateMap: Record<string, { issued: boolean; token?: string }> = {};
     const convertedRecords = records.filter(r => r.fields['Order Ref']);
     if (convertedRecords.length > 0) {
       for (const cr of convertedRecords) {
@@ -4059,8 +4062,12 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
         if (orderRecordId) {
           try {
             const orderRecord = await tableOrders.find(orderRecordId);
-            if (orderRecord && orderRecord.fields['Receipt Public Token']) {
-              receiptTokenMap[cr.id] = orderRecord.fields['Receipt Public Token'] as string;
+            if (orderRecord && hasIssuedReceipt(orderRecord.fields)) {
+              const receiptToken = String(orderRecord.fields['Receipt Public Token'] || '').trim();
+              receiptStateMap[cr.id] = {
+                issued: true,
+                ...(receiptToken ? { token: receiptToken } : {}),
+              };
             }
           } catch { /* order not found, skip */ }
         }
@@ -4079,7 +4086,9 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
           const phone = escapeHtml((f['Customer Phone'] as string) || (f['Phone'] as string) || '');
           const total = f['Total'] ? `$${f['Total']}` : '-';
           const invoiceToken = f['Invoice Public Token'] as string | undefined;
-          const receiptToken = receiptTokenMap[r.id] || undefined;
+          const receiptState = receiptStateMap[r.id];
+          const receiptToken = receiptState?.token;
+          const receiptIssued = Boolean(receiptState?.issued);
 
           // Build action buttons — ALL always shown
           const customerInfoLink = `${PUBLIC_BASE_URL}${publicCustomerInfoPath(token)}`;
@@ -4102,28 +4111,32 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
             actions += ` <a href="${publicInvoicePath(invoiceToken)}" class="btn btn-success btn-sm" target="_blank">View Invoice</a>`;
           }
 
-          // 5. Mark as Paid (only if invoice token exists)
-          if (invoiceToken) {
+          // 5. Receipt creation is the single full-settlement operation.  Once
+          // a Receipt exists, no payment amount field or duplicate paid action
+          // is rendered.
+          if (invoiceToken && !receiptIssued) {
             const paymentRequestId = `recv_${crypto.randomBytes(16).toString('hex')}`;
             actions += `
-              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline-flex;gap:5px;align-items:center;" onsubmit="return confirm('確認已先將付款證明保存到Dropbox並附到Airtable，再記錄今次實收？')">
+              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline;" onsubmit="return confirm('建立收據並確認已全數收款？系統會以Invoice總額一次過記錄實收，毋須再輸入金額。')">
                 <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
                 <input type="hidden" name="payment_request_id" value="${paymentRequestId}">
-                <input name="amount_received" type="number" min="0.01" step="0.01" inputmode="decimal" placeholder="今次實收HK$" aria-label="今次實收金額" required style="width:118px;">
-                <button type="submit" class="btn btn-primary btn-sm">記錄實收</button>
+                <button type="submit" class="btn btn-primary btn-sm">建立收據＝確認全數收款</button>
               </form>`;
           }
 
-          // 6. View Receipt (only if receipt token exists)
-          if (receiptToken) {
-            actions += ` <a href="${publicReceiptPath(receiptToken)}" class="btn btn-success btn-sm" target="_blank">View Receipt</a>`;
+          // 6. Existing Receipt is read-only from this dashboard.
+          if (receiptIssued) {
+            actions += ' <span class="badge badge-paid">已付款</span>';
+            if (receiptToken) {
+              actions += ` <a href="${publicReceiptPath(receiptToken)}" class="btn btn-success btn-sm" target="_blank">View Receipt</a>`;
+            }
           }
 
           return `
             <div class="quote-card">
               <div class="quote-card-header">
                 <div>
-                  <div class="quote-card-title">${qNum} <span class="badge ${statusBadgeClass(status)}">${escapeHtml(status)}</span></div>
+                  <div class="quote-card-title">${qNum} <span class="badge ${statusBadgeClass(receiptIssued ? 'Paid' : status)}">${receiptIssued ? '已付款' : escapeHtml(status)}</span></div>
                   <div class="quote-card-meta">${qDate}${phone ? ` · ${phone}` : ''}</div>
                 </div>
                 <div style="text-align:right;">
@@ -6710,6 +6723,7 @@ const ORDER_OUTSTANDING_FIELD = 'Outstanding HKD';
 const ORDER_PAYMENT_EVIDENCE_FIELD = 'Payment Evidence';
 const ORDER_PAYMENT_AUDIT_FIELD = 'Payment Audit Log';
 const orderPaymentLock = new InProcessQuoteItemsLock();
+const receiptSequenceLock = new InProcessQuoteItemsLock();
 
 const requireOrderPaymentSchema = async (): Promise<void> => {
   const tables = await getAirtableMetadataTables();
@@ -6742,62 +6756,195 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
     if (records.length === 0) return publicDocumentNotFound(res);
     const paymentRequestId = validateOrderPaymentRequestId(req.body.payment_request_id);
-    const amountCents = parseDriverPaymentAmountCents(req.body.amount_received);
     await requireOrderPaymentSchema();
     const initialOrder = records[0];
-    await orderPaymentLock.run(initialOrder.id, async () => {
+    await receiptSequenceLock.run('receipt-sequence', () => orderPaymentLock.run(initialOrder.id, async () => {
       const order = await tableOrders.find(initialOrder.id);
       const fields = order.fields as FieldSet;
       if (isCancelledOrder(fields)) throw new Error('order-payment-cancelled');
+      // A stale/replayed dashboard form cannot create another Receipt or add a
+      // second revenue event, even when it carries a different request ID.
+      if (hasIssuedReceipt(fields)) return;
       const evidence = fields[ORDER_PAYMENT_EVIDENCE_FIELD];
       if (!Array.isArray(evidence) || evidence.length === 0) throw new Error('order-payment-evidence-required');
 
-      const currentReceived = fields[ORDER_AMOUNT_RECEIVED_FIELD] === undefined
-        ? getOrderAmountReceived(fields)
-        : numberField(fields, ORDER_AMOUNT_RECEIVED_FIELD);
       const paidAt = new Date().toISOString();
-      const plan = planOrderPayment({
+      const payDate = getHongKongDate();
+      const plan = planFullReceipt({
         total: fields['Final Amount'],
-        received: currentReceived,
         log: fields[ORDER_PAYMENT_AUDIT_FIELD],
         requestId: paymentRequestId,
-        amountCents,
         paidAt,
       });
-      if (plan.duplicate) return;
+      const receiptNumber = String(fields['Receipt Number'] || '').trim()
+        || await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
+      const receiptToken = String(fields['Receipt Public Token'] || '').trim() || generateToken();
 
+      // Airtable applies one record update atomically: Receipt identity, full
+      // received total, paid status/date and idempotency log share one write.
       const updates: FieldSet = {
         [ORDER_AMOUNT_RECEIVED_FIELD]: plan.receivedCents / 100,
         [ORDER_PAYMENT_AUDIT_FIELD]: plan.log,
-        'Pay Date': getHongKongDate(),
-        'Status': plan.status,
+        'Pay Date': payDate,
+        'Status': 'Paid',
+        'Receipt Number': receiptNumber,
+        'Receipt Public Token': receiptToken,
       };
-      if (plan.status === 'Paid') {
-        updates['Receipt Number'] = fields['Receipt Number'] || await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
-        updates['Receipt Public Token'] = fields['Receipt Public Token'] || generateToken();
-      }
       await tableOrders.update([{ id: order.id, fields: updates }]);
 
       const verified = await tableOrders.find(order.id);
       if (
         toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== plan.receivedCents
-        || String(verified.fields['Status'] || '') !== plan.status
+        || String(verified.fields['Status'] || '') !== 'Paid'
+        || String(verified.fields['Pay Date'] || '') !== payDate
+        || String(verified.fields['Receipt Number'] || '') !== receiptNumber
+        || String(verified.fields['Receipt Public Token'] || '') !== receiptToken
         || !paymentLogHasRequest(verified.fields[ORDER_PAYMENT_AUDIT_FIELD], paymentRequestId)
       ) throw new Error('order-payment-write-verification-failed');
 
       const orderMonth = getOrderFinanceMonth(
         verified.fields['Internal 1 Order No'] || verified.fields['Internal Order No']
       );
-      if (orderMonth) await syncMonthlyFinance(orderMonth);
-    });
+      if (orderMonth) {
+        try {
+          await syncMonthlyFinance(orderMonth);
+        } catch (error) {
+          logSafeError('Receipt was recorded but Monthly Finance refresh will retry.', error);
+        }
+      }
+    }));
     res.redirect('/quotes');
   } catch (error: any) {
     logSafeError('Order payment update rejected.', error);
     const message = String(error?.message || '').includes('evidence-required')
       ? '未有記錄付款：請先將原始付款證明保存到Dropbox，並附到Airtable Order嘅 Payment Evidence。'
-      : '未有記錄付款；請重新整理後核對實收金額、付款證明及尚欠金額。';
-    res.status(400).send(renderPage('Payment not recorded', `<div class="alert alert-danger">${message}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
+      : '未有建立收據；請重新整理後核對付款證明及Invoice總額。';
+    res.status(400).send(renderPage('Receipt not created', `<div class="alert alert-danger">${message}</div><a href="/quotes" class="btn btn-secondary" style="margin-top:10px;">Back</a>`));
   }
+});
+
+type ReceiptAuditRecord = { id: string; fields: FieldSet };
+
+const loadReceiptAuditRecords = async (): Promise<ReceiptAuditRecord[]> => {
+  const fields = [
+    'Final Amount', ORDER_AMOUNT_RECEIVED_FIELD, 'Status', 'Pay Date',
+    'Receipt Number', 'Receipt Public Token', ORDER_PAYMENT_AUDIT_FIELD,
+    'Internal 1 Order No', 'Internal Order No',
+  ];
+  const records = await tableOrders.select({ fields }).all();
+  return records.map(record => ({ id: record.id, fields: record.fields }));
+};
+
+const receiptAuditResultFromQuery = (query: Request['query']): string => {
+  if (query.done !== '1') return '';
+  const integer = (name: string): number => Math.max(0, Number.parseInt(String(query[name] || '0'), 10) || 0);
+  return `<div class="alert alert-success">Backfill完成：created ${integer('created')}／updated ${integer('updated')}／deduped ${integer('deduped')}／backup ${integer('backup')}／errors ${integer('errors')}</div>`;
+};
+
+app.get('/admin/receipts/audit', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    await requireOrderPaymentSchema();
+    const audit = auditReceiptBackfill(await loadReceiptAuditRecords());
+    const content = `<div class="doc-card"><div class="doc-body">
+      ${receiptAuditResultFromQuery(req.query)}
+      <div class="section-title">Receipt匿名一致性Audit</div>
+      <p>只顯示統計數字；不回傳客戶資料、Order編號、record ID、token或付款證明。</p>
+      <div class="info-grid info-grid-2">
+        <div class="info-block"><div class="lbl">已有Receipt</div><div class="val">${audit.receiptCount}</div></div>
+        <div class="info-block"><div class="lbl">實收blank／0</div><div class="val">${audit.missingOrZeroReceived}</div></div>
+        <div class="info-block"><div class="lbl">manual amount與Receipt total不一致</div><div class="val">${audit.manualAmountMismatch}</div></div>
+        <div class="info-block"><div class="lbl">Status不一致</div><div class="val">${audit.statusMismatch}</div></div>
+        <div class="info-block"><div class="lbl">缺Pay Date（安全阻擋）</div><div class="val">${audit.missingPayDate}</div></div>
+        <div class="info-block"><div class="lbl">可安全backfill</div><div class="val">${audit.eligible}</div></div>
+        <div class="info-block"><div class="lbl">exact deduped</div><div class="val">${audit.exactDeduped}</div></div>
+        <div class="info-block"><div class="lbl">blocked</div><div class="val">${audit.blocked}</div></div>
+      </div>
+      <p style="margin-top:16px;">優先級：已簽發Receipt full total ＞ 舊manual Amount Received。Backfill只處理有正數Invoice total及原有Pay Date的Receipt；每筆先把舊amount／status／date寫入去識別化audit backup，再以exact marker防重。</p>
+      ${audit.eligible > 0 ? `<form method="POST" action="/admin/receipts/backfill" onsubmit="return confirm('確認只按上面匿名audit結果執行Receipt full-total backfill？')">
+        <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
+        <button class="btn btn-primary" type="submit">執行安全Backfill</button>
+      </form>` : '<div class="alert alert-success">冇需要backfill嘅安全項目。</div>'}
+      <a class="btn btn-outline" href="/quotes" style="margin-top:12px;">返回Dashboard</a>
+    </div></div>`;
+    res.send(renderPage('Receipt匿名Audit', content));
+  } catch (error) {
+    logSafeError('Receipt audit failed.', error);
+    res.status(500).send(renderPage('Receipt audit failed', '<div class="alert alert-danger">Audit未能完成；沒有資料被修改。</div>'));
+  }
+});
+
+app.post('/admin/receipts/backfill', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
+  if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
+    return res.status(403).type('text/plain').send('Invalid form token.');
+  }
+  let updated = 0;
+  let deduped = 0;
+  let backups = 0;
+  let errors = 0;
+  const applied: Array<{ id: string; before: FieldSet; after: FieldSet }> = [];
+  try {
+    await requireOrderPaymentSchema();
+    const initial = await loadReceiptAuditRecords();
+    const candidates = initial.filter(record => makeReceiptBackfillUpdate(record, new Date().toISOString()));
+    const affectedMonths = new Set<string>();
+    for (const candidate of candidates) {
+      const current = await tableOrders.find(candidate.id);
+      const action = makeReceiptBackfillUpdate(
+        { id: current.id, fields: current.fields },
+        new Date().toISOString(),
+      );
+      if (!action) {
+        if (auditReceiptBackfill([{ id: current.id, fields: current.fields }]).exactDeduped > 0) deduped += 1;
+        continue;
+      }
+      // Airtable clears a previously blank field with null at runtime, while
+      // its published FieldSet type omits null.  Keep the exact pre-write
+      // values for rollback and narrow only at the API boundary.
+      const before = {
+        [ORDER_AMOUNT_RECEIVED_FIELD]: current.fields[ORDER_AMOUNT_RECEIVED_FIELD] ?? null,
+        'Status': current.fields['Status'] ?? null,
+        [ORDER_PAYMENT_AUDIT_FIELD]: current.fields[ORDER_PAYMENT_AUDIT_FIELD] ?? null,
+      } as unknown as FieldSet;
+      await tableOrders.update([{ id: current.id, fields: action.fields as FieldSet }]);
+      const verified = await tableOrders.find(current.id);
+      const totalCents = toHkdCents(verified.fields['Final Amount']);
+      if (
+        toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== totalCents
+        || String(verified.fields['Status'] || '') !== 'Paid'
+        || !String(verified.fields[ORDER_PAYMENT_AUDIT_FIELD] || '').includes(`${action.marker}|`)
+      ) throw new Error('receipt-backfill-verification-failed');
+      applied.push({ id: current.id, before, after: action.fields as FieldSet });
+      updated += 1;
+      backups += 1;
+      const month = getOrderFinanceMonth(
+        verified.fields['Internal 1 Order No'] || verified.fields['Internal Order No']
+      );
+      if (month) affectedMonths.add(month);
+    }
+    for (const month of affectedMonths) await syncMonthlyFinance(month);
+  } catch (error) {
+    errors += 1;
+    logSafeError('Receipt backfill failed; rolling back verified writes.', error);
+    for (const item of applied.reverse()) {
+      try {
+        const current = await tableOrders.find(item.id);
+        const stillMatches = Object.entries(item.after).every(([field, value]) =>
+          JSON.stringify(current.fields[field] ?? null) === JSON.stringify(value ?? null));
+        if (!stillMatches) throw new Error('receipt-backfill-rollback-concurrent-change');
+        await tableOrders.update([{ id: item.id, fields: item.before }]);
+      } catch (rollbackError) {
+        errors += 1;
+        logSafeError('Receipt backfill rollback failed.', rollbackError);
+      }
+    }
+    updated = 0;
+    backups = 0;
+  }
+  const params = new URLSearchParams({
+    done: '1', created: '0', updated: String(updated), deduped: String(deduped),
+    backup: String(backups), errors: String(errors),
+  });
+  return res.redirect(303, `/admin/receipts/audit?${params.toString()}`);
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -6826,7 +6973,7 @@ app.get(['/receipt/:token', '/r/:token'], async (req: Request, res: Response) =>
       email: isEnglish ? 'Email' : '電郵',
       address: isEnglish ? 'Address' : '地址',
       paymentDetails: isEnglish ? 'Payment Details' : '付款詳情',
-      paidInFull: isEnglish ? '${R.paidInFull}' : '已全數付款',
+      paidInFull: isEnglish ? 'Paid in full' : '已全數付款',
       via: isEnglish ? 'via' : '付款方式：',
       thankYou: isEnglish ? 'Thank you for your payment!' : '多謝您的付款！'
     };

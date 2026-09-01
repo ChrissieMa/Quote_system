@@ -256,6 +256,14 @@ export const createLocalQuoteFixture = (): {
     'Delivery Charge Mode': '已包本地送貨',
     'Delivery Display Text': 'Local fixture only',
     'Payment Method': 'Bank Transfer',
+    'Payment Evidence': [{
+      id: 'att_local_payment_evidence_1',
+      url: 'https://fixture.invalid/test-only-payment-evidence',
+      filename: 'TEST-ONLY-NO-PRODUCTION-DATA.png',
+      size: 128,
+      type: 'image/png',
+    }],
+    'Payment Audit Log': '',
     'Notes': 'TEST-ONLY LOCAL FIXTURE — NO PRODUCTION DATA',
     'Terms and Conditions': 'TEST-ONLY: preserve the original Invoice presentation.',
     'Source Quote Ref': 'QT-2026-9001',
@@ -344,7 +352,18 @@ export const createLocalQuoteFixture = (): {
   ];
   const metadataTables = [
     { id: 'tbl_local_quotes', name: 'Quotes', fields: sharedFields },
-    { id: 'tbl_local_orders', name: 'Order_2026', fields: sharedFields },
+    {
+      id: 'tbl_local_orders',
+      name: 'Order_2026',
+      fields: [
+        ...sharedFields,
+        { name: 'Amount Received HKD', type: 'currency' },
+        { name: 'Outstanding HKD', type: 'formula' },
+        { name: 'Payment Evidence', type: 'multipleAttachments' },
+        { name: 'Payment Audit Log', type: 'multilineText' },
+        choices('Status', ['Unpaid', 'Partially Paid', 'Paid']),
+      ],
+    },
     { id: 'tbl_local_items', name: 'Order Items', fields: [] },
     { id: 'tbl_local_customers', name: 'Customers', fields: [] },
     {
