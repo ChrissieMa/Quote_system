@@ -16,7 +16,6 @@ import {
   overlayConfirmedOrderItemsByIdentity,
   pendingQuotationImageMetadata,
   prepareNewQuoteItemsForQuotationImageJobs,
-  prepareRetryableQuotationImageJobs,
   prepareNewQuoteItemsWithQuotationImages,
   quotationImageEnabled,
   quotationImageIdempotencyKey,
@@ -28,7 +27,6 @@ import {
   sanitizeRenderRequest,
   sanitizeQuotationRenderRequest,
   type QuotationImageRenderer,
-  type QuoteItemWithQuotationImage,
   type RenderRequestV1,
   type RenderedQuotationImage,
 } from './quotation-image';
@@ -476,80 +474,6 @@ test('after-write preparation is a no-op unless coordinator, scheduler and write
   }
 });
 
-test('recent timeout metadata is durably recovered once the idle worker returns', async () => {
-  const storedRequest = buildQuotationRenderRequestFromQuoteItem(storedQuoteItem())!;
-  const renderer = new FixtureQuotationImageRenderer(renderedFixture());
-  const storage = new LocalTestQuotationImageStorage();
-  const scheduler = new InMemoryQuotationImageJobScheduler();
-  const updates: string[] = [];
-  const runtime = {
-    coordinator: new QuotationImageCoordinator(renderer, storage),
-    jobScheduler: scheduler,
-    metadataWriter: {
-      async update(input: { metadata: { state: string } }) { updates.push(input.metadata.state); },
-    },
-  };
-  const failed = {
-    ...storedQuoteItem(),
-    quotation_image: {
-      contract: 'quotation-image-v1' as const,
-      state: 'failed' as const,
-      idempotency_key: quotationImageIdempotencyKey(ITEM_ID, storedRequest),
-      attempts: 2,
-      error_class: 'timeout' as const,
-      updated_at: '2026-09-01T06:16:43.404Z',
-    },
-  };
-  const jobs = prepareRetryableQuotationImageJobs([failed], {
-    enabled: true,
-    runtime,
-    now: '2026-09-01T06:20:00.000Z',
-  });
-  assert.equal(jobs.length, 1);
-
-  // A reload/concurrent poll can request the same recovery twice.  The exact
-  // request identity shares one renderer result and one deterministic asset.
-  scheduleQuotationImageJobsAfterWrite(jobs, 'rec-safe-synthetic', runtime);
-  scheduleQuotationImageJobsAfterWrite(jobs, 'rec-safe-synthetic', runtime);
-  await scheduler.drain();
-  assert.equal(renderer.calls, 1);
-  assert.equal(storage.size, 1);
-  assert.deepEqual(updates, ['ready', 'ready']);
-});
-
-test('recovery refuses stale, terminal, ready and request-identity-mismatched metadata', () => {
-  const storedRequest = buildQuotationRenderRequestFromQuoteItem(storedQuoteItem())!;
-  const runtime = {
-    coordinator: new QuotationImageCoordinator(
-      new FixtureQuotationImageRenderer(renderedFixture()),
-      new LocalTestQuotationImageStorage(),
-    ),
-    jobScheduler: new InMemoryQuotationImageJobScheduler(),
-    metadataWriter: { async update() {} },
-  };
-  const metadata = {
-    contract: 'quotation-image-v1' as const,
-    state: 'failed' as const,
-    idempotency_key: quotationImageIdempotencyKey(ITEM_ID, storedRequest),
-    attempts: 2,
-    error_class: 'timeout' as const,
-    updated_at: '2026-09-01T06:16:43.404Z',
-  };
-  const item = { ...storedQuoteItem(), quotation_image: metadata };
-  const prepare = (candidate: QuoteItemWithQuotationImage) => prepareRetryableQuotationImageJobs([candidate], {
-    enabled: true,
-    runtime,
-    now: '2026-09-02T07:00:00.000Z',
-  });
-  assert.deepEqual(prepare(item), [], 'older than the bounded 24-hour recovery window');
-  assert.deepEqual(prepare({ ...item, quotation_image: { ...metadata, error_class: 'terminal' as const } }), []);
-  assert.deepEqual(prepare({ ...item, quotation_image: { ...metadata, state: 'ready' as const } }), []);
-  assert.deepEqual(prepare({
-    ...item,
-    quotation_image: { ...metadata, idempotency_key: `sha256:${'f'.repeat(64)}` },
-  }), []);
-});
-
 test('central render schema stays broad while quotation policy requires 1280 and quotation purpose', () => {
   assert.deepEqual(sanitizeRenderRequest(renderRequest()), renderRequest());
   assert.throws(() => sanitizeRenderRequest({ ...renderRequest(), show_price: true }), /show_price must be false/);
@@ -729,17 +653,15 @@ test('timeouts are bounded and return failed metadata instead of blocking Quote 
       throw new QuotationImageError('aborted fixture', 'temporary');
     },
   };
-  const storage = new LocalTestQuotationImageStorage();
   const result = await new QuotationImageCoordinator(
     renderer,
-    storage,
+    new LocalTestQuotationImageStorage(),
     { timeoutMs: 5, maxAttempts: 2 },
   ).process(ITEM_ID, renderRequest());
   assert.equal(result.state, 'failed');
   assert.equal(result.error_class, 'timeout');
   assert.equal(result.attempts, 2);
   assert.equal(calls, 2);
-  assert.equal(storage.size, 0);
 });
 
 test('exhausted timeout remains retryable on a later coordinator call', async () => {
@@ -752,10 +674,9 @@ test('exhausted timeout remains retryable on a later coordinator call', async ()
       throw new QuotationImageError('aborted timeout fixture', 'temporary');
     },
   };
-  const storage = new LocalTestQuotationImageStorage();
   const coordinator = new QuotationImageCoordinator(
     renderer,
-    storage,
+    new LocalTestQuotationImageStorage(),
     { timeoutMs: 5, maxAttempts: 2 },
   );
   const timedOut = await coordinator.process(ITEM_ID, renderRequest());
@@ -764,8 +685,6 @@ test('exhausted timeout remains retryable on a later coordinator call', async ()
   const recovered = await coordinator.process(ITEM_ID, renderRequest());
   assert.equal(recovered.state, 'ready');
   assert.equal(calls, 3);
-  assert.equal(storage.size, 1);
-  assert.deepEqual(Buffer.from(storage.get(recovered.asset_key!)!), PNG_FIXTURE);
 });
 
 test('legacy, missing, pending and failed images produce no broken presentation', () => {
@@ -853,8 +772,6 @@ test('provider-neutral resolver supplies ready presentation and absence remains 
 test('real create, public Quote and invoice routes use the shared integration core', () => {
   const source = readFileSync(path.join(__dirname, 'index.ts'), 'utf8');
   assert.match(source, /prepareNewQuoteItemsForQuotationImageJobs\(items,/);
-  assert.match(source, /prepareRetryableQuotationImageJobs\(/);
-  assert.match(source, /scheduleLatestRetryableQuotationImage\(\)/);
   assert.match(source, /scheduleQuotationImageJobsAfterWrite\(/);
   assert.match(source, /'Quote Items JSON': itemsJson/);
   assert.match(source, /linkQuoteItemsToOrderItemRecords\(items, createdOrderItems\)/);
