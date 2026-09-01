@@ -8,6 +8,8 @@ import {
 } from './quotation-image';
 
 export const BROWSER_TRANSPORT_PROTOCOL = 'lks-quotation-image-browser-v1' as const;
+export const BROWSER_RENDER_READY_TYPE = 'lks.quotation-image.render.ready' as const;
+export const BROWSER_RENDER_CAPABILITY = '3d-render-v1' as const;
 export const BROWSER_RENDER_REQUEST_TYPE = 'lks.quotation-image.render.request' as const;
 export const BROWSER_RENDER_RESPONSE_TYPE = 'lks.quotation-image.render.response' as const;
 
@@ -241,11 +243,51 @@ const status = document.getElementById('status');
 let rendererReady = false;
 let activeJob = null;
 let pollTimer = null;
+let readyTimer = null;
 let responseTimer = null;
 let recoverLatest = true;
-const rendererReadinessGraceMs = 1000;
+let rendererReloads = 0;
+const rendererReadyTimeoutMs = 8000;
 const rendererResponseTimeoutMs = 6000;
+const maxRendererReloads = 2;
+const stageCounts = Object.seal({
+  iframe_loaded: 0,
+  ready_received: 0,
+  request_sent: 0,
+  response_received: 0,
+  png_valid: 0,
+  writer_ok: 0,
+  fail_code: ''
+});
+const emitStage = (name, failCode = '') => {
+  if (name && typeof stageCounts[name] === 'number') stageCounts[name] += 1;
+  if (failCode) stageCounts.fail_code = /^[a-z0-9._:$-]{1,120}$/i.test(failCode)
+    ? failCode : 'quotation-image-client-failed';
+  console.info('quotation-image-stage', JSON.stringify(stageCounts));
+};
 const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };
+const reloadRenderer = failCode => {
+  rendererReady = false;
+  clearTimeout(readyTimer);
+  clearTimeout(responseTimer);
+  activeJob = null;
+  emitStage('', failCode);
+  status.textContent = '3D系統準備中；報價單已正常建立';
+  if (rendererReloads >= maxRendererReloads) return;
+  rendererReloads += 1;
+  frame.src = ${JSON.stringify(rendererUrl)};
+};
+const armReadyTimeout = () => {
+  clearTimeout(readyTimer);
+  readyTimer = setTimeout(() => {
+    if (!rendererReady) reloadRenderer('quotation-image-renderer-ready-timeout');
+  }, rendererReadyTimeoutMs);
+};
+const isExactRendererReady = response => response && typeof response === 'object'
+  && Object.keys(response).length === 3
+  && response.protocol === '${BROWSER_TRANSPORT_PROTOCOL}'
+  && response.type === '${BROWSER_RENDER_READY_TYPE}'
+  && response.capability === '${BROWSER_RENDER_CAPABILITY}';
 const fail = async (requestId, errorCode) => fetch('/quotation-image/browser-bridge/fail', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ request_id: requestId, error_code: String(errorCode || 'quotation-image-browser-transport-render-failed') })
@@ -276,30 +318,41 @@ const poll = async () => {
     activeJob = job;
     status.textContent = '正在產生3D圖片…';
     frame.contentWindow.postMessage(job, rendererOrigin);
+    emitStage('request_sent');
     clearTimeout(responseTimer);
     responseTimer = setTimeout(() => {
       if (activeJob?.request_id !== job.request_id) return;
-      activeJob = null;
-      status.textContent = '3D圖片未有回應，正在安全重試…';
-      schedulePoll(0);
+      reloadRenderer('quotation-image-renderer-response-timeout');
     }, rendererResponseTimeoutMs);
   } catch { status.textContent = '3D圖片暫時未能產生；報價單已正常建立'; schedulePoll(1000); }
 };
 window.addEventListener('message', async event => {
-  if (event.origin !== rendererOrigin || event.source !== frame.contentWindow || !activeJob) return;
+  if (event.origin !== rendererOrigin || event.source !== frame.contentWindow) return;
   const response = event.data;
+  if (isExactRendererReady(response)) {
+    if (rendererReady || activeJob) return;
+    rendererReady = true;
+    rendererReloads = 0;
+    clearTimeout(readyTimer);
+    emitStage('ready_received');
+    schedulePoll(0);
+    return;
+  }
+  if (!activeJob) return;
   if (response?.protocol !== '${BROWSER_TRANSPORT_PROTOCOL}'
     || response?.type !== '${BROWSER_RENDER_RESPONSE_TYPE}'
     || response?.request_id !== activeJob.request_id) return;
   const requestId = activeJob.request_id;
   clearTimeout(responseTimer);
   activeJob = null;
+  emitStage('response_received');
   try {
-    if (!response.ok) { await fail(requestId, response.error_code); throw new Error('renderer-failed'); }
+    if (!response.ok) throw new Error(String(response.error_code || 'quotation-image-renderer-failed'));
     const artifact = response.artifact;
     if (artifact?.contract !== '3d-render-v1' || artifact?.mime_type !== 'image/png'
       || artifact?.width !== 1280 || artifact?.height !== 1280
       || !(artifact?.png_bytes instanceof ArrayBuffer)) throw new Error('bridge-artifact-invalid');
+    emitStage('png_valid');
     const completed = await fetch('/quotation-image/browser-bridge/complete/' + encodeURIComponent(requestId), {
       method: 'POST', headers: {
         'Content-Type': 'application/octet-stream', 'X-LKS-Contract': artifact.contract,
@@ -310,19 +363,24 @@ window.addEventListener('message', async event => {
     if (!completed.ok) throw new Error('bridge-complete-failed');
     const persistedState = await waitForPersistence(requestId);
     if (persistedState !== 'ready') throw new Error('bridge-persistence-failed');
+    emitStage('writer_ok');
     status.textContent = '3D 圖片已加入同一張報價單';
   } catch (error) {
-    await fail(requestId, error instanceof Error ? error.message : 'bridge-client-failed');
+    const failCode = error instanceof Error ? error.message : 'bridge-client-failed';
+    await fail(requestId, failCode);
+    emitStage('', failCode);
     status.textContent = '3D圖片暫時未能產生；報價單已正常建立';
   } finally { schedulePoll(); }
 });
 frame.addEventListener('load', () => {
   rendererReady = false;
+  emitStage('iframe_loaded');
+  clearTimeout(readyTimer);
   clearTimeout(responseTimer);
   activeJob = null;
-  setTimeout(() => { rendererReady = true; schedulePoll(0); }, rendererReadinessGraceMs);
+  armReadyTimeout();
 });
-setTimeout(() => { if (!rendererReady) status.textContent = '3D系統未能載入；報價單已正常建立'; }, 15000);
+armReadyTimeout();
 </script>`;
 };
 

@@ -2,6 +2,8 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import vm from 'node:vm';
 import {
+  BROWSER_RENDER_CAPABILITY,
+  BROWSER_RENDER_READY_TYPE,
   BROWSER_RENDER_REQUEST_TYPE,
   BROWSER_RENDER_RESPONSE_TYPE,
   BROWSER_TRANSPORT_PROTOCOL,
@@ -40,11 +42,15 @@ test('production browser transport is safe and retries its first recovery fetch 
   assert.match(html, new RegExp(BROWSER_TRANSPORT_PROTOCOL));
   assert.match(html, new RegExp(BROWSER_RENDER_REQUEST_TYPE.replaceAll('.', '\\.')));
   assert.match(html, new RegExp(BROWSER_RENDER_RESPONSE_TYPE.replaceAll('.', '\\.')));
+  assert.match(html, new RegExp(BROWSER_RENDER_READY_TYPE.replaceAll('.', '\\.')));
+  assert.match(html, new RegExp(BROWSER_RENDER_CAPABILITY));
   assert.match(html, /event\.origin !== rendererOrigin/);
   assert.match(html, /event\.source !== frame\.contentWindow/);
   assert.match(html, /postMessage\(job, rendererOrigin\)/);
   assert.doesNotMatch(html, /postMessage\([^)]*,\s*['"]\*['"]\)/);
-  assert.match(html, /rendererReadinessGraceMs = 1000/);
+  assert.doesNotMatch(html, /rendererReadinessGraceMs/);
+  assert.match(html, /rendererReadyTimeoutMs = 8000/);
+  assert.match(html, /maxRendererReloads = 2/);
   assert.match(html, /rendererResponseTimeoutMs = 6000/);
   assert.match(html, /activeJob = null/);
   assert.match(html, /let recoverLatest = true/);
@@ -59,9 +65,12 @@ test('production browser transport is safe and retries its first recovery fetch 
   for (const firstResult of ['reject', 'non-ok'] as const) {
     const requested: string[] = [];
     let fetchAttempt = 0;
+    const frameListeners = new Map<string, () => void>();
+    const windowListeners = new Map<string, (event: unknown) => void>();
+    const contentWindow = { postMessage() {} };
     const frame = {
-      contentWindow: { postMessage() {} },
-      addEventListener() {},
+      contentWindow,
+      addEventListener(type: string, listener: () => void) { frameListeners.set(type, listener); },
     };
     const context = vm.createContext({
       URL,
@@ -71,7 +80,8 @@ test('production browser transport is safe and retries its first recovery fetch 
           return id === 'quotation-image-renderer' ? frame : { textContent: '' };
         },
       },
-      window: { addEventListener() {} },
+      window: { addEventListener(type: string, listener: (event: unknown) => void) { windowListeners.set(type, listener); } },
+      console: { info() {} },
       clearTimeout() {},
       setTimeout() { return 1; },
       fetch: async (url: string) => {
@@ -83,7 +93,11 @@ test('production browser transport is safe and retries its first recovery fetch 
       },
     });
     new vm.Script(script).runInContext(context);
-    vm.runInContext('rendererReady = true', context);
+    frameListeners.get('load')?.();
+    windowListeners.get('message')?.({
+      origin: 'https://lksdisplaybox.online', source: contentWindow,
+      data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE, capability: BROWSER_RENDER_CAPABILITY },
+    });
 
     await vm.runInContext('poll()', context);
     await vm.runInContext('poll()', context);
@@ -100,7 +114,137 @@ test('iframe reload clears the active job and waits for renderer readiness befor
   const html = browserQuotationImageClientHtml('https://lksdisplaybox.online/configurator/');
   assert.match(html, /frame\.addEventListener\('load', \(\) => \{[\s\S]*rendererReady = false;/);
   assert.match(html, /clearTimeout\(responseTimer\);[\s\S]*activeJob = null;/);
-  assert.match(html, /setTimeout\(\(\) => \{ rendererReady = true; schedulePoll\(0\); \}, rendererReadinessGraceMs\);/);
+  assert.doesNotMatch(html, /rendererReady = true; schedulePoll\(0\)/);
+  assert.ok(html.includes(`response.type === '${BROWSER_RENDER_READY_TYPE}'`));
+  assert.ok(html.includes(`response.capability === '${BROWSER_RENDER_CAPABILITY}'`));
+  assert.match(html, /Object\.keys\(response\)\.length === 3/);
+});
+
+test('client waits for an exact direct ready handshake, reloads on lost ready, and emits only aggregate stages', async () => {
+  const html = browserQuotationImageClientHtml('https://renderer.test/configurator/');
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+
+  const frameListeners = new Map<string, () => void>();
+  const windowListeners = new Map<string, (event: any) => void>();
+  const timers: Array<{ callback: () => void; delay: number }> = [];
+  const requests: string[] = [];
+  const posted: unknown[] = [];
+  const stageLogs: string[] = [];
+  const status = { textContent: '' };
+  const contentWindow = { postMessage(message: unknown) { posted.push(message); } };
+  let frameSrc = 'https://renderer.test/configurator/';
+  const frame = {
+    contentWindow,
+    get src() { return frameSrc; },
+    set src(value: string) { frameSrc = value; },
+    addEventListener(type: string, listener: () => void) { frameListeners.set(type, listener); },
+  };
+  const job = {
+    protocol: BROWSER_TRANSPORT_PROTOCOL,
+    type: BROWSER_RENDER_REQUEST_TYPE,
+    request_id: `quote-${'a'.repeat(64)}`,
+    render_request: request,
+  };
+  const context = vm.createContext({
+    URL,
+    ArrayBuffer,
+    document: { getElementById(id: string) { return id === 'quotation-image-renderer' ? frame : status; } },
+    window: { addEventListener(type: string, listener: (event: any) => void) { windowListeners.set(type, listener); } },
+    console: { info(_label: string, payload: string) { stageLogs.push(payload); } },
+    clearTimeout() {},
+    setTimeout(callback: () => void, delay: number) { timers.push({ callback, delay }); return timers.length; },
+    fetch: async (url: string) => {
+      requests.push(url);
+      if (url.includes('/next')) return { ok: true, status: 200, json: async () => job };
+      if (url.includes('/status/')) return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      return { ok: true, status: 202, json: async () => ({ state: 'processing' }) };
+    },
+  });
+  new vm.Script(script).runInContext(context);
+
+  frameListeners.get('load')?.();
+  assert.equal(requests.length, 0, 'iframe load alone must not poll or send work');
+  assert.equal(posted.length, 0);
+
+  windowListeners.get('message')?.({
+    origin: 'https://wrong.test', source: contentWindow,
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE, capability: BROWSER_RENDER_CAPABILITY },
+  });
+  windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: {},
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE, capability: BROWSER_RENDER_CAPABILITY },
+  });
+  windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: contentWindow,
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE, capability: 'wrong-capability' },
+  });
+  windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: contentWindow,
+    data: {
+      protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE,
+      capability: BROWSER_RENDER_CAPABILITY, extra: true,
+    },
+  });
+  assert.equal(requests.length, 0, 'wrong origin, source, or capability must be ignored');
+
+  const firstReadyTimeout = timers.find(timer => timer.delay === 8_000);
+  assert.ok(firstReadyTimeout);
+  firstReadyTimeout.callback();
+  assert.equal(frameSrc, 'https://renderer.test/configurator/');
+  assert.match(status.textContent, /正常建立/);
+
+  frameListeners.get('load')?.();
+  windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: contentWindow,
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE, capability: BROWSER_RENDER_CAPABILITY },
+  });
+  await vm.runInContext('poll()', context);
+  assert.equal(requests.length, 1);
+  assert.equal(posted.length, 1);
+  assert.equal((posted[0] as typeof job).request_id, job.request_id);
+
+  windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: contentWindow,
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_READY_TYPE, capability: BROWSER_RENDER_CAPABILITY },
+  });
+  assert.equal(posted.length, 1, 'stale ready during an active job must not resend work');
+
+  const renderResponse = {
+    protocol: BROWSER_TRANSPORT_PROTOCOL,
+    type: BROWSER_RENDER_RESPONSE_TYPE,
+    request_id: job.request_id,
+    ok: true,
+    artifact: {
+      contract: BROWSER_RENDER_CAPABILITY,
+      mime_type: 'image/png', width: 1280, height: 1280,
+      request_identity: quotationRenderRequestIdentity(request),
+      png_bytes: new ArrayBuffer(16),
+    },
+  };
+  await windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: contentWindow, data: renderResponse,
+  });
+  const requestsAfterCompletion = requests.length;
+  await windowListeners.get('message')?.({
+    origin: 'https://renderer.test', source: contentWindow, data: renderResponse,
+  });
+  assert.equal(requests.length, requestsAfterCompletion, 'late duplicate response must be an exact no-op');
+  assert.equal(requests.filter(url => url.includes('/complete/')).length, 1);
+
+  const latestStages = JSON.parse(stageLogs.at(-1) || '{}');
+  assert.deepEqual(Object.keys(latestStages).sort(), [
+    'fail_code', 'iframe_loaded', 'png_valid', 'ready_received',
+    'request_sent', 'response_received', 'writer_ok',
+  ]);
+  assert.equal(latestStages.iframe_loaded, 2);
+  assert.equal(latestStages.ready_received, 1);
+  assert.equal(latestStages.request_sent, 1);
+  assert.equal(latestStages.response_received, 1);
+  assert.equal(latestStages.png_valid, 1);
+  assert.equal(latestStages.writer_ok, 1);
+  assert.equal(latestStages.fail_code, 'quotation-image-renderer-ready-timeout');
+  assert.doesNotMatch(JSON.stringify(latestStages), /quote-|sha256|renderer\.test/);
 });
 
 test('browser bridge binds one pending render to its deterministic request and accepted PNG', async () => {
