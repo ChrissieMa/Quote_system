@@ -13,7 +13,35 @@ import {
   QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH,
   QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL,
   QuotationImageReadyHandshakeFixture,
+  quotationImageReadyHandshakeScopedRunKey,
 } from './quotation-image-ready-handshake';
+
+test('TEST run scope uses only the admin session cookie and isolates different sessions', () => {
+  const runKey = 'a'.repeat(32);
+  const expected = quotationImageReadyHandshakeScopedRunKey('lks_admin_session=session-a', runKey);
+  assert.ok(expected);
+  assert.equal(
+    quotationImageReadyHandshakeScopedRunKey(
+      'unrelated=one; lks_admin_session=session-a; preference=two',
+      runKey,
+    ),
+    expected,
+  );
+  assert.equal(
+    quotationImageReadyHandshakeScopedRunKey(
+      'preference=changed; another=value; lks_admin_session=session-a',
+      runKey,
+    ),
+    expected,
+    'unrelated cookie additions, removals and reordering must not change the run scope',
+  );
+  assert.notEqual(
+    quotationImageReadyHandshakeScopedRunKey('lks_admin_session=session-b', runKey),
+    expected,
+  );
+  assert.equal(quotationImageReadyHandshakeScopedRunKey('unrelated=one', runKey), null);
+  assert.equal(quotationImageReadyHandshakeScopedRunKey('lks_admin_session=session-a', 'bad'), null);
+});
 
 test('TEST HTML installs the parent listener before loading the iframe and exposes aggregate counters only', async () => {
   const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 100 });
@@ -449,6 +477,45 @@ test('TEST fixture isolates overlapping tabs and completed runs stay terminal ac
       { complete: 1, storage: 1, attachment: 1, writer: 1, fail: 0 },
     );
   }
+});
+
+test('TEST capacity pressure never evicts a first-fail run that is still retryable', async () => {
+  const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 200 });
+  const retryRun = '00'.repeat(16);
+  fixture.begin('2026-09-01T09:00:00.000Z', retryRun);
+  const firstJob = fixture.takeNext(retryRun);
+  assert.ok(firstJob);
+  fixture.fail(firstJob.request_id, 'safe-first-delivery-failed', retryRun);
+  assert.equal(fixture.evidence(retryRun).fail, 1);
+
+  for (let index = 1; index < 32; index += 1) {
+    const runKey = index.toString(16).padStart(32, '0');
+    fixture.begin(`2026-09-01T09:00:${String(index).padStart(2, '0')}.000Z`, runKey);
+  }
+  const overflowRun = 'ff'.repeat(16);
+  assert.throws(
+    () => fixture.takeNext(overflowRun),
+    /run capacity reached/,
+    'capacity pressure must fail closed while all 32 runs remain active',
+  );
+  const retryJob = fixture.takeNext(retryRun);
+  assert.deepEqual(retryJob, firstJob, 'the original retryable run identity must survive capacity pressure');
+  assert.equal(fixture.evidence(retryRun).fail, 1, 'retryable run state must not be reset');
+
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+  assert.equal(fixture.complete({
+    requestId: retryJob!.request_id,
+    contract: BROWSER_RENDER_CAPABILITY,
+    mimeType: 'image/png',
+    width: 1280,
+    height: 1280,
+    requestIdentity: quotationRenderRequestIdentity(retryJob!.render_request),
+    bytes,
+  }, retryRun), true);
+  assert.equal((await fixture.waitForCompletion(retryRun))?.state, 'ready');
+  assert.equal(fixture.evidence(retryRun).writer, 1);
+  assert.ok(fixture.takeNext(overflowRun), 'one terminal run may be evicted to admit a new isolated run');
+  assert.equal(fixture.takeNext(retryRun), null, 'evicted terminal run key must remain replay-blocked');
 });
 
 test('Production parent defaults remain on the existing worker and eager iframe behavior', () => {

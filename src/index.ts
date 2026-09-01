@@ -100,8 +100,8 @@ import {
   QUOTATION_IMAGE_READY_HANDSHAKE_PATH,
   QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL,
   QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER,
-  QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN,
   QuotationImageReadyHandshakeFixture,
+  quotationImageReadyHandshakeScopedRunKey,
 } from './test-only/quotation-image-ready-handshake';
 import {
   AirtableQuotationImageMetadataWriter,
@@ -650,11 +650,7 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
 
 const quotationImageReadyHandshakeRunKey = (req: Request): string | null => {
   const runKey = String(req.get(QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER) || '');
-  if (!QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN.test(runKey)) return null;
-  const authenticatedSession = String(req.headers.cookie || '');
-  if (!authenticatedSession) return null;
-  const sessionScope = crypto.createHash('sha256').update(authenticatedSession).digest('hex');
-  return `${sessionScope}:${runKey}`;
+  return quotationImageReadyHandshakeScopedRunKey(req.headers.cookie, runKey);
 };
 
 app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin, (_req: Request, res: Response) => {

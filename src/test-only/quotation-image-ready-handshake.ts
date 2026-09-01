@@ -1,3 +1,4 @@
+import crypto from 'crypto';
 import {
   BrowserQuotationImageBridge,
   browserQuotationImageClientHtml,
@@ -9,12 +10,25 @@ import {
   type QuotationImageStorage,
   type RenderRequestV1,
 } from '../quotation-image';
+import { ADMIN_SESSION_COOKIE, parseCookies } from '../security';
 
 export const QUOTATION_IMAGE_READY_HANDSHAKE_PATH = '/test-only/quotation-image-ready-handshake';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH = `${QUOTATION_IMAGE_READY_HANDSHAKE_PATH}/bridge`;
 export const QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL = 'https://lksdisplaybox.online/configurator-test/';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER = 'x-lks-test-run';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN = /^[a-f0-9]{32}$/;
+
+export const quotationImageReadyHandshakeScopedRunKey = (
+  cookieHeader: unknown,
+  runKeyValue: unknown,
+): string | null => {
+  const runKey = String(runKeyValue || '');
+  if (!QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN.test(runKey)) return null;
+  const authenticatedSession = parseCookies(cookieHeader)[ADMIN_SESSION_COOKIE] || '';
+  if (!authenticatedSession) return null;
+  const sessionScope = crypto.createHash('sha256').update(authenticatedSession).digest('hex');
+  return `${sessionScope}:${runKey}`;
+};
 
 const SAFE_ITEM_ID = 'a44bce10-b278-4a90-97dd-52a73b01d59a';
 const SAFE_RENDER_REQUEST: RenderRequestV1 = Object.freeze({
@@ -62,6 +76,7 @@ type ActiveRun = {
   requestIdentity: string;
   startedAt: string;
   completedAt: string | null;
+  terminal: boolean;
   completion: Promise<QuotationImageMetadata>;
 };
 
@@ -100,6 +115,7 @@ export class QuotationImageReadyHandshakeFixture {
       requestIdentity: '',
       startedAt: now,
       completedAt: null,
+      terminal: false,
       completion: Promise.resolve({} as QuotationImageMetadata),
     };
     const storage: QuotationImageStorage = {
@@ -116,15 +132,16 @@ export class QuotationImageReadyHandshakeFixture {
     run.completion = coordinator.process(SAFE_ITEM_ID, SAFE_RENDER_REQUEST).then(metadata => {
       if (metadata.state !== 'ready') {
         run.failCount += 1;
-        return metadata;
+      } else {
+        run.writerCount += 1;
+        run.completedAt = new Date().toISOString();
+        bridge.markMetadataPersisted(metadata);
       }
-      run.writerCount += 1;
-      run.completedAt = new Date().toISOString();
+      run.terminal = true;
       this.terminalRuns.add(runKey);
       while (this.terminalRuns.size > 256) {
         this.terminalRuns.delete(this.terminalRuns.values().next().value as string);
       }
-      bridge.markMetadataPersisted(metadata);
       return metadata;
     });
     return run;
@@ -134,7 +151,7 @@ export class QuotationImageReadyHandshakeFixture {
     if (this.runs.has(runKey) || this.terminalRuns.has(runKey)) return;
     if (this.runs.size >= this.maxRuns) {
       for (const [key, run] of this.runs) {
-        if (run.completedAt || run.failCount > 0) this.runs.delete(key);
+        if (run.terminal) this.runs.delete(key);
         if (this.runs.size < this.maxRuns) break;
       }
     }
