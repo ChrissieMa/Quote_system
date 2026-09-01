@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import vm from 'node:vm';
 import {
   BROWSER_RENDER_REQUEST_TYPE,
   BROWSER_RENDER_RESPONSE_TYPE,
@@ -27,7 +28,7 @@ const request: RenderRequestV1 = {
   branding: { enabled: false, style: 'none' }, show_dimensions: true, show_price: false,
 };
 
-test('production browser transport accepts only a safe HTTPS renderer URL', () => {
+test('production browser transport is safe and retries its first recovery fetch until HTTP success', async () => {
   assert.equal(
     normalizeQuotationImageRendererUrl('https://lksdisplaybox.online/configurator/'),
     'https://lksdisplaybox.online/configurator/',
@@ -53,6 +54,46 @@ test('production browser transport accepts only a safe HTTPS renderer URL', () =
     quotationImageBridgeCsp('https://lksdisplaybox.online/configurator/'),
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; frame-src https://lksdisplaybox.online; connect-src 'self'",
   );
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+  for (const firstResult of ['reject', 'non-ok'] as const) {
+    const requested: string[] = [];
+    let fetchAttempt = 0;
+    const frame = {
+      contentWindow: { postMessage() {} },
+      addEventListener() {},
+    };
+    const context = vm.createContext({
+      URL,
+      ArrayBuffer,
+      document: {
+        getElementById(id: string) {
+          return id === 'quotation-image-renderer' ? frame : { textContent: '' };
+        },
+      },
+      window: { addEventListener() {} },
+      clearTimeout() {},
+      setTimeout() { return 1; },
+      fetch: async (url: string) => {
+        requested.push(url);
+        fetchAttempt += 1;
+        if (fetchAttempt === 1 && firstResult === 'reject') throw new Error('safe network fixture');
+        if (fetchAttempt === 1) return { ok: false, status: 503, json: async () => ({}) };
+        return { ok: true, status: 204, json: async () => ({}) };
+      },
+    });
+    new vm.Script(script).runInContext(context);
+    vm.runInContext('rendererReady = true', context);
+
+    await vm.runInContext('poll()', context);
+    await vm.runInContext('poll()', context);
+    await vm.runInContext('poll()', context);
+    assert.deepEqual(requested, [
+      '/quotation-image/browser-bridge/next?recover_latest=1',
+      '/quotation-image/browser-bridge/next?recover_latest=1',
+      '/quotation-image/browser-bridge/next',
+    ], firstResult);
+  }
 });
 
 test('iframe reload clears the active job and waits for renderer readiness before polling again', () => {

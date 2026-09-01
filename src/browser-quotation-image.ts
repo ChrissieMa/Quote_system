@@ -265,10 +265,10 @@ const poll = async () => {
   if (!rendererReady || activeJob) return schedulePoll();
   try {
     const recoveryQuery = recoverLatest ? '?recover_latest=1' : '';
-    recoverLatest = false;
     const response = await fetch('/quotation-image/browser-bridge/next' + recoveryQuery, { cache: 'no-store' });
-    if (response.status === 204) { status.textContent = '3D 圖片已處理完成'; return schedulePoll(1000); }
     if (!response.ok) throw new Error('bridge-next-failed');
+    recoverLatest = false;
+    if (response.status === 204) { status.textContent = '3D 圖片已處理完成'; return schedulePoll(1000); }
     const job = await response.json();
     if (job?.protocol !== '${BROWSER_TRANSPORT_PROTOCOL}'
       || job?.type !== '${BROWSER_RENDER_REQUEST_TYPE}'
