@@ -13,6 +13,8 @@ import {
 export const QUOTATION_IMAGE_READY_HANDSHAKE_PATH = '/test-only/quotation-image-ready-handshake';
 export const QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH = `${QUOTATION_IMAGE_READY_HANDSHAKE_PATH}/bridge`;
 export const QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL = 'https://lksdisplaybox.online/configurator-test/';
+export const QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER = 'x-lks-test-run';
+export const QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN = /^[a-f0-9]{32}$/;
 
 const SAFE_ITEM_ID = 'a44bce10-b278-4a90-97dd-52a73b01d59a';
 const SAFE_RENDER_REQUEST: RenderRequestV1 = Object.freeze({
@@ -78,11 +80,13 @@ const emptyEvidence = (): QuotationImageReadyHandshakeEvidence => Object.freeze(
 });
 
 export class QuotationImageReadyHandshakeFixture {
-  private run: ActiveRun | null = null;
+  private readonly runs = new Map<string, ActiveRun>();
+  private readonly terminalRuns = new Set<string>();
+  private readonly maxRuns = 32;
 
   constructor(private readonly options: { timeoutMs?: number } = {}) {}
 
-  begin(now = new Date().toISOString()): void {
+  private createRun(now: string, runKey: string): ActiveRun {
     const bridge = new BrowserQuotationImageBridge({ deliveryLeaseMs: 8_000, maxDeliveries: 2 });
     const run: ActiveRun = {
       bridge,
@@ -116,10 +120,28 @@ export class QuotationImageReadyHandshakeFixture {
       }
       run.writerCount += 1;
       run.completedAt = new Date().toISOString();
+      this.terminalRuns.add(runKey);
+      while (this.terminalRuns.size > 256) {
+        this.terminalRuns.delete(this.terminalRuns.values().next().value as string);
+      }
       bridge.markMetadataPersisted(metadata);
       return metadata;
     });
-    this.run = run;
+    return run;
+  }
+
+  begin(now = new Date().toISOString(), runKey = 'default'): void {
+    if (this.runs.has(runKey) || this.terminalRuns.has(runKey)) return;
+    if (this.runs.size >= this.maxRuns) {
+      for (const [key, run] of this.runs) {
+        if (run.completedAt || run.failCount > 0) this.runs.delete(key);
+        if (this.runs.size < this.maxRuns) break;
+      }
+    }
+    if (this.runs.size >= this.maxRuns) {
+      throw new Error('Quotation-image ready handshake run capacity reached.');
+    }
+    this.runs.set(runKey, this.createRun(now, runKey));
   }
 
   html(): string {
@@ -127,11 +149,13 @@ export class QuotationImageReadyHandshakeFixture {
       bridgePath: QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH,
       deferRendererLoadUntilListener: true,
       showStageCounters: true,
+      isolatedTestRun: true,
     });
   }
 
-  takeNext() {
-    return this.run?.bridge.takeNext() || null;
+  takeNext(runKey = 'default') {
+    this.begin(new Date().toISOString(), runKey);
+    return this.runs.get(runKey)?.bridge.takeNext() || null;
   }
 
   complete(input: {
@@ -142,33 +166,35 @@ export class QuotationImageReadyHandshakeFixture {
     height: number;
     requestIdentity: string;
     bytes: Uint8Array;
-  }): boolean {
-    if (!this.run) throw new Error('Quotation-image ready handshake is not active.');
-    const accepted = this.run.bridge.complete(input);
+  }, runKey = 'default'): boolean {
+    const run = this.runs.get(runKey);
+    if (!run) throw new Error('Quotation-image ready handshake is not active.');
+    const accepted = run.bridge.complete(input);
     if (!accepted) return false;
-    this.run.completeCount += 1;
-    this.run.pngBytes = input.bytes.length;
-    this.run.pngSha256 = quotationImageArtifactDigest(input.bytes);
-    this.run.requestIdentity = input.requestIdentity;
+    run.completeCount += 1;
+    run.pngBytes = input.bytes.length;
+    run.pngSha256 = quotationImageArtifactDigest(input.bytes);
+    run.requestIdentity = input.requestIdentity;
     return true;
   }
 
-  fail(requestId: string, errorCode: string): void {
-    if (!this.run) return;
-    this.run.failCount += 1;
-    this.run.bridge.fail(requestId, errorCode);
+  fail(requestId: string, errorCode: string, runKey = 'default'): void {
+    const run = this.runs.get(runKey);
+    if (!run) return;
+    run.failCount += 1;
+    run.bridge.fail(requestId, errorCode);
   }
 
-  status(requestId: string) {
-    return this.run?.bridge.status(requestId) || null;
+  status(requestId: string, runKey = 'default') {
+    return this.runs.get(runKey)?.bridge.status(requestId) || null;
   }
 
-  async waitForCompletion(): Promise<QuotationImageMetadata | null> {
-    return this.run ? this.run.completion : null;
+  async waitForCompletion(runKey = 'default'): Promise<QuotationImageMetadata | null> {
+    return this.runs.get(runKey)?.completion || null;
   }
 
-  evidence(): QuotationImageReadyHandshakeEvidence {
-    const run = this.run;
+  evidence(runKey = 'default'): QuotationImageReadyHandshakeEvidence {
+    const run = this.runs.get(runKey);
     if (!run) return emptyEvidence();
     return Object.freeze({
       active: true,

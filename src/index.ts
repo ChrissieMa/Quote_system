@@ -99,6 +99,8 @@ import {
   QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH,
   QUOTATION_IMAGE_READY_HANDSHAKE_PATH,
   QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL,
+  QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER,
+  QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN,
   QuotationImageReadyHandshakeFixture,
 } from './test-only/quotation-image-ready-handshake';
 import {
@@ -646,8 +648,16 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
   return next();
 };
 
+const quotationImageReadyHandshakeRunKey = (req: Request): string | null => {
+  const runKey = String(req.get(QUOTATION_IMAGE_READY_HANDSHAKE_RUN_HEADER) || '');
+  if (!QUOTATION_IMAGE_READY_HANDSHAKE_RUN_KEY_PATTERN.test(runKey)) return null;
+  const authenticatedSession = String(req.headers.cookie || '');
+  if (!authenticatedSession) return null;
+  const sessionScope = crypto.createHash('sha256').update(authenticatedSession).digest('hex');
+  return `${sessionScope}:${runKey}`;
+};
+
 app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin, (_req: Request, res: Response) => {
-  quotationImageReadyHandshakeFixture.begin();
   res.setHeader(
     'Content-Security-Policy',
     quotationImageBridgeCsp(QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL),
@@ -659,8 +669,10 @@ app.get(
   `${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/next`,
   requireAdmin,
   requireSameOrigin,
-  (_req: Request, res: Response) => {
-    const job = quotationImageReadyHandshakeFixture.takeNext();
+  (req: Request, res: Response) => {
+    const runKey = quotationImageReadyHandshakeRunKey(req);
+    if (!runKey) return res.status(400).type('text/plain').send('Invalid TEST run.');
+    const job = quotationImageReadyHandshakeFixture.takeNext(runKey);
     return job ? res.json(job) : res.status(204).end();
   },
 );
@@ -670,7 +682,9 @@ app.get(
   requireAdmin,
   requireSameOrigin,
   (req: Request, res: Response) => {
-    const status = quotationImageReadyHandshakeFixture.status(String(req.params.requestId || ''));
+    const runKey = quotationImageReadyHandshakeRunKey(req);
+    if (!runKey) return res.status(400).type('text/plain').send('Invalid TEST run.');
+    const status = quotationImageReadyHandshakeFixture.status(String(req.params.requestId || ''), runKey);
     return status ? res.json(status) : res.status(404).json({ state: 'unknown' });
   },
 );
@@ -682,6 +696,8 @@ app.post(
   express.raw({ type: 'application/octet-stream', limit: '8mb' }),
   (req: Request, res: Response) => {
     try {
+      const runKey = quotationImageReadyHandshakeRunKey(req);
+      if (!runKey) return res.status(400).type('text/plain').send('Invalid TEST run.');
       const accepted = quotationImageReadyHandshakeFixture.complete({
         requestId: String(req.params.requestId || ''),
         contract: String(req.get('X-LKS-Contract') || ''),
@@ -690,7 +706,7 @@ app.post(
         height: Number(req.get('X-LKS-Height')),
         requestIdentity: String(req.get('X-LKS-Request-Identity') || ''),
         bytes: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
-      });
+      }, runKey);
       return res.status(accepted ? 202 : 200).json({ state: accepted ? 'processing' : 'duplicate' });
     } catch {
       console.warn('Quotation-image TEST handshake completion rejected.');
@@ -704,9 +720,12 @@ app.post(
   requireAdmin,
   requireSameOrigin,
   (req: Request, res: Response) => {
+    const runKey = quotationImageReadyHandshakeRunKey(req);
+    if (!runKey) return res.status(400).type('text/plain').send('Invalid TEST run.');
     quotationImageReadyHandshakeFixture.fail(
       String(req.body?.request_id || ''),
       String(req.body?.error_code || 'quotation-image-test-transport-render-failed'),
+      runKey,
     );
     return res.status(204).end();
   },
@@ -715,7 +734,11 @@ app.post(
 app.get(
   `${QUOTATION_IMAGE_READY_HANDSHAKE_PATH}/evidence`,
   requireAdmin,
-  (_req: Request, res: Response) => res.json(quotationImageReadyHandshakeFixture.evidence()),
+  (req: Request, res: Response) => {
+    const runKey = quotationImageReadyHandshakeRunKey(req);
+    if (!runKey) return res.status(400).type('text/plain').send('Invalid TEST run.');
+    return res.json(quotationImageReadyHandshakeFixture.evidence(runKey));
+  },
 );
 
 if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {

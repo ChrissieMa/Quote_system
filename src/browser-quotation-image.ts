@@ -230,6 +230,7 @@ export type BrowserQuotationImageClientOptions = {
   bridgePath?: string;
   deferRendererLoadUntilListener?: boolean;
   showStageCounters?: boolean;
+  isolatedTestRun?: boolean;
 };
 
 const normalizeBrowserBridgePath = (value: unknown): string => {
@@ -249,6 +250,7 @@ export const browserQuotationImageClientHtml = (
   const bridgePath = normalizeBrowserBridgePath(options.bridgePath);
   const deferRendererLoad = options.deferRendererLoadUntilListener === true;
   const showStageCounters = options.showStageCounters === true;
+  const isolatedTestRun = options.isolatedTestRun === true;
   const iframeSourceAttribute = deferRendererLoad
     ? `data-renderer-src="${rendererUrl}"`
     : `src="${rendererUrl}"`;
@@ -271,6 +273,25 @@ const renderStageCounters = () => {
 };`
     : '';
   const stageCounterEmit = showStageCounters ? 'renderStageCounters();' : '';
+  const isolatedTestRunScript = isolatedTestRun
+    ? `const testRunStorageKey = 'lks-quotation-image-test-run-v1';
+const testRunKeyPattern = /^[a-f0-9]{32}$/;
+let testRunKey = String(sessionStorage.getItem(testRunStorageKey) || '');
+if (!testRunKeyPattern.test(testRunKey)) {
+  const testRunBytes = new Uint8Array(16);
+  crypto.getRandomValues(testRunBytes);
+  testRunKey = Array.from(testRunBytes, value => value.toString(16).padStart(2, '0')).join('');
+  sessionStorage.setItem(testRunStorageKey, testRunKey);
+}
+const testRunTerminalKey = testRunStorageKey + ':complete:' + testRunKey;
+let terminalSuccess = sessionStorage.getItem(testRunTerminalKey) === '1';
+const bridgeFetch = (url, options = {}) => fetch(url, {
+  ...options,
+  headers: { ...(options.headers || {}), 'X-LKS-Test-Run': testRunKey }
+});`
+    : '';
+  const initialSuccessfulStageCount = isolatedTestRun ? '(terminalSuccess ? 1 : 0)' : '0';
+  const bridgeFetchFunction = isolatedTestRun ? 'bridgeFetch' : 'fetch';
   return `<!doctype html>
 <meta charset="utf-8">
 <meta name="robots" content="noindex,nofollow">
@@ -283,7 +304,7 @@ ${stageCounterMarkup}
 const rendererOrigin = ${JSON.stringify(rendererOrigin)};
 const frame = document.getElementById('quotation-image-renderer');
 const status = document.getElementById('status');
-let rendererReady = false;
+${isolatedTestRun ? `${isolatedTestRunScript}\n` : ''}let rendererReady = false;
 let activeJob = null;
 let pollTimer = null;
 let readyTimer = null;
@@ -297,12 +318,12 @@ const rendererReadyTimeoutMs = 8000;
 const rendererResponseTimeoutMs = 6000;
 const maxRendererReloads = 2;
 const stageCounts = Object.seal({
-  iframe_loaded: 0,
-  ready_received: 0,
-  request_sent: 0,
-  response_received: 0,
-  png_valid: 0,
-  writer_ok: 0,
+  iframe_loaded: ${initialSuccessfulStageCount},
+  ready_received: ${initialSuccessfulStageCount},
+  request_sent: ${initialSuccessfulStageCount},
+  response_received: ${initialSuccessfulStageCount},
+  png_valid: ${initialSuccessfulStageCount},
+  writer_ok: ${initialSuccessfulStageCount},
   fail_code: ''
 });
 ${stageCounterScript}
@@ -313,13 +334,17 @@ const emitStage = (name, failCode = '') => {
   ${stageCounterEmit}
   console.info('quotation-image-stage', JSON.stringify(stageCounts));
 };
-const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };
+${isolatedTestRun ? `const schedulePoll = (delay = 300) => {
+  if (terminalSuccess) return;
+  clearTimeout(pollTimer);
+  pollTimer = setTimeout(poll, delay);
+};` : 'const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };'}
 const navigateRenderer = () => {
   rendererNavigationGeneration += 1;
   pendingRendererLoadGeneration = rendererNavigationGeneration;
   frame.src = ${JSON.stringify(rendererUrl)};
 };
-const reloadRenderer = failCode => {
+const reloadRenderer = failCode => {${isolatedTestRun ? '\n  if (terminalSuccess) return;' : ''}
   rendererReady = false;
   clearTimeout(readyTimer);
   clearTimeout(responseTimer);
@@ -341,13 +366,13 @@ const isExactRendererReady = response => response && typeof response === 'object
   && response.protocol === '${BROWSER_TRANSPORT_PROTOCOL}'
   && response.type === '${BROWSER_RENDER_READY_TYPE}'
   && response.capability === '${BROWSER_RENDER_CAPABILITY}';
-const fail = async (requestId, errorCode) => fetch(${JSON.stringify(`${bridgePath}/fail`)}, {
+const fail = async (requestId, errorCode) => ${bridgeFetchFunction}(${JSON.stringify(`${bridgePath}/fail`)}, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ request_id: requestId, error_code: String(errorCode || 'quotation-image-browser-transport-render-failed') })
 });
 const waitForPersistence = async requestId => {
   for (let attempt = 0; attempt < 120; attempt += 1) {
-    const response = await fetch(${JSON.stringify(`${bridgePath}/status/`)} + encodeURIComponent(requestId), { cache: 'no-store' });
+    const response = await ${bridgeFetchFunction}(${JSON.stringify(`${bridgePath}/status/`)} + encodeURIComponent(requestId), { cache: 'no-store' });
     if (response.ok) {
       const result = await response.json();
       if (result?.state === 'ready' || result?.state === 'failed') return result.state;
@@ -356,11 +381,11 @@ const waitForPersistence = async requestId => {
   }
   return 'failed';
 };
-const poll = async () => {
+const poll = async () => {${isolatedTestRun ? '\n  if (terminalSuccess) return;' : ''}
   if (!rendererReady || activeJob) return schedulePoll();
   try {
     const recoveryQuery = recoverLatest ? '?recover_latest=1' : '';
-    const response = await fetch(${JSON.stringify(`${bridgePath}/next`)} + recoveryQuery, { cache: 'no-store' });
+    const response = await ${bridgeFetchFunction}(${JSON.stringify(`${bridgePath}/next`)} + recoveryQuery, { cache: 'no-store' });
     if (!response.ok) throw new Error('bridge-next-failed');
     recoverLatest = false;
     if (response.status === 204) { status.textContent = '3D 圖片已處理完成'; return schedulePoll(1000); }
@@ -380,7 +405,7 @@ const poll = async () => {
   } catch { status.textContent = '3D圖片暫時未能產生；報價單已正常建立'; schedulePoll(1000); }
 };
 window.addEventListener('message', async event => {
-  if (event.origin !== rendererOrigin || event.source !== frame.contentWindow) return;
+  if (event.origin !== rendererOrigin || event.source !== frame.contentWindow) return;${isolatedTestRun ? '\n  if (terminalSuccess) return;' : ''}
   const response = event.data;
   if (isExactRendererReady(response)) {
     if (rendererReady || activeJob) return;
@@ -407,7 +432,7 @@ window.addEventListener('message', async event => {
       || artifact?.width !== 1280 || artifact?.height !== 1280
       || !(artifact?.png_bytes instanceof ArrayBuffer)) throw new Error('bridge-artifact-invalid');
     emitStage('png_valid');
-    const completed = await fetch(${JSON.stringify(`${bridgePath}/complete/`)} + encodeURIComponent(requestId), {
+    const completed = await ${bridgeFetchFunction}(${JSON.stringify(`${bridgePath}/complete/`)} + encodeURIComponent(requestId), {
       method: 'POST', headers: {
         'Content-Type': 'application/octet-stream', 'X-LKS-Contract': artifact.contract,
         'X-LKS-Mime-Type': artifact.mime_type, 'X-LKS-Width': String(artifact.width),
@@ -418,16 +443,21 @@ window.addEventListener('message', async event => {
     const persistedState = await waitForPersistence(requestId);
     if (persistedState !== 'ready') throw new Error('bridge-persistence-failed');
     emitStage('writer_ok');
-    status.textContent = '3D 圖片已加入同一張報價單';
+    status.textContent = '3D 圖片已加入同一張報價單';${isolatedTestRun ? `
+    terminalSuccess = true;
+    sessionStorage.setItem(testRunTerminalKey, '1');
+    clearTimeout(pollTimer);
+    clearTimeout(readyTimer);
+    clearTimeout(responseTimer);` : ''}
   } catch (error) {
     const failCode = error instanceof Error ? error.message : 'bridge-client-failed';
     await fail(requestId, failCode);
     emitStage('', failCode);
     status.textContent = '3D圖片暫時未能產生；報價單已正常建立';
-  } finally { schedulePoll(); }
+  } finally { ${isolatedTestRun ? 'if (!terminalSuccess) schedulePoll();' : 'schedulePoll();'} }
 });
 frame.addEventListener('load', () => {
-  emitStage('iframe_loaded');
+${isolatedTestRun ? '  if (terminalSuccess) return;\n' : ''}  emitStage('iframe_loaded');
   const loadedGeneration = pendingRendererLoadGeneration;
   pendingRendererLoadGeneration = 0;
   const preserveAcceptedReady = loadedGeneration > 0
@@ -443,8 +473,14 @@ frame.addEventListener('load', () => {
   activeJob = null;
   armReadyTimeout();
 });
-armReadyTimeout();
-${deferRendererLoad ? 'navigateRenderer();' : ''}
+${isolatedTestRun ? `if (terminalSuccess) {
+  status.textContent = '3D 圖片已加入同一張報價單';
+  ${stageCounterEmit}
+} else {
+  armReadyTimeout();
+  ${deferRendererLoad ? 'navigateRenderer();' : ''}
+}` : `armReadyTimeout();
+${deferRendererLoad ? 'navigateRenderer();' : ''}`}
 </script>`;
 };
 

@@ -43,6 +43,7 @@ test('TEST HTML installs the parent listener before loading the iframe and expos
   const fetches: Array<{ url: string; method: string }> = [];
   const status = { textContent: '' };
   const counters = { textContent: '' };
+  const sessionValues = new Map<string, string>();
   const contentWindow = { postMessage(message: unknown) { order.push('request_sent'); assert.deepEqual(message, job); } };
   let frameSrc = '';
   const frame = {
@@ -57,6 +58,12 @@ test('TEST HTML installs the parent listener before loading the iframe and expos
   const context = vm.createContext({
     URL,
     ArrayBuffer,
+    Uint8Array,
+    crypto: { getRandomValues(bytes: Uint8Array) { bytes.fill(0x11); return bytes; } },
+    sessionStorage: {
+      getItem(key: string) { return sessionValues.get(key) || null; },
+      setItem(key: string, value: string) { sessionValues.set(key, value); },
+    },
     document: {
       getElementById(id: string) {
         if (id === 'quotation-image-renderer') return frame;
@@ -123,6 +130,11 @@ test('TEST HTML installs the parent listener before loading the iframe and expos
   await windowListeners.get('message')?.({
     origin: 'https://lksdisplaybox.online', source: contentWindow, data: response,
   });
+  await vm.runInContext('poll(); poll(); poll();', context);
+  await windowListeners.get('message')?.({
+    origin: 'https://lksdisplaybox.online', source: contentWindow, data: response,
+  });
+  frameListeners.get('load')?.();
   const fetchCount = fetches.length;
   await windowListeners.get('message')?.({
     origin: 'https://lksdisplaybox.online', source: contentWindow, data: response,
@@ -177,6 +189,7 @@ test('TEST parent preserves an exact READY delivered before the matching iframe 
   const stageLogs: string[] = [];
   const status = { textContent: '' };
   const counters = { textContent: '' };
+  const sessionValues = new Map<string, string>();
   let frameAssignments = 0;
   let frameSrc = '';
   const contentWindow = { postMessage(message: unknown) { assert.deepEqual(message, job); } };
@@ -189,6 +202,12 @@ test('TEST parent preserves an exact READY delivered before the matching iframe 
   const context = vm.createContext({
     URL,
     ArrayBuffer,
+    Uint8Array,
+    crypto: { getRandomValues(bytes: Uint8Array) { bytes.fill(0x22); return bytes; } },
+    sessionStorage: {
+      getItem(key: string) { return sessionValues.get(key) || null; },
+      setItem(key: string, value: string) { sessionValues.set(key, value); },
+    },
     document: {
       getElementById(id: string) {
         if (id === 'quotation-image-renderer') return frame;
@@ -281,6 +300,77 @@ test('TEST parent preserves an exact READY delivered before the matching iframe 
   await fixture.waitForCompletion();
 });
 
+test('TEST parent reload restores terminal counters and never polls or reloads the renderer again', async () => {
+  const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 100 });
+  const script = fixture.html().match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+  const runKey = '33'.repeat(16);
+  const sessionValues = new Map<string, string>([
+    ['lks-quotation-image-test-run-v1', runKey],
+    [`lks-quotation-image-test-run-v1:complete:${runKey}`, '1'],
+  ]);
+  const frameListeners = new Map<string, () => void>();
+  const windowListeners = new Map<string, (event: any) => unknown>();
+  const counters = { textContent: '' };
+  const status = { textContent: '' };
+  const fetches: string[] = [];
+  let frameAssignments = 0;
+  const contentWindow = { postMessage() { throw new Error('terminal reload must not post a job'); } };
+  const frame = {
+    contentWindow,
+    get src() { return ''; },
+    set src(_value: string) { frameAssignments += 1; },
+    addEventListener(type: string, listener: () => void) { frameListeners.set(type, listener); },
+  };
+  const context = vm.createContext({
+    URL,
+    ArrayBuffer,
+    Uint8Array,
+    crypto: { getRandomValues() { throw new Error('stored run key must be reused'); } },
+    sessionStorage: {
+      getItem(key: string) { return sessionValues.get(key) || null; },
+      setItem(key: string, value: string) { sessionValues.set(key, value); },
+    },
+    document: {
+      getElementById(id: string) {
+        if (id === 'quotation-image-renderer') return frame;
+        if (id === 'handshake-counters') return counters;
+        return status;
+      },
+    },
+    window: {
+      addEventListener(type: string, listener: (event: any) => unknown) {
+        windowListeners.set(type, listener);
+      },
+    },
+    console: { info() {} },
+    clearTimeout() {},
+    setTimeout() { throw new Error('terminal reload must not schedule a timer'); },
+    fetch: async (url: string) => {
+      fetches.push(url);
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+  new vm.Script(script).runInContext(context);
+  await vm.runInContext('poll(); poll(); poll(); poll();', context);
+  frameListeners.get('load')?.();
+  await windowListeners.get('message')?.({
+    origin: 'https://lksdisplaybox.online',
+    source: contentWindow,
+    data: {
+      protocol: BROWSER_TRANSPORT_PROTOCOL,
+      type: BROWSER_RENDER_READY_TYPE,
+      capability: BROWSER_RENDER_CAPABILITY,
+    },
+  });
+  assert.equal(frameAssignments, 0);
+  assert.deepEqual(fetches, []);
+  assert.equal(counters.textContent, [
+    'iframe_loaded=1', 'ready_received=1', 'request_sent=1', 'response_received=1',
+    'png_valid=1', 'writer_ok=1', 'fail_code=',
+  ].join('\n'));
+});
+
 test('TEST fixture validates and writes one synthetic PNG exactly once', async () => {
   const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 100 });
   fixture.begin('2026-09-01T09:00:00.000Z');
@@ -317,6 +407,50 @@ test('TEST fixture validates and writes one synthetic PNG exactly once', async (
   assert.match(String(fixture.evidence().completed_at), /^2026-/);
 });
 
+test('TEST fixture isolates overlapping tabs and completed runs stay terminal across later polls', async () => {
+  const fixture = new QuotationImageReadyHandshakeFixture({ timeoutMs: 100 });
+  const runA = 'a'.repeat(32);
+  const runB = 'b'.repeat(32);
+  fixture.begin('2026-09-01T09:00:00.000Z', runA);
+  fixture.begin('2026-09-01T09:00:01.000Z', runB);
+  const jobA = fixture.takeNext(runA);
+  const jobB = fixture.takeNext(runB);
+  assert.ok(jobA);
+  assert.ok(jobB);
+  const bytes = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1]);
+  const completion = (job: NonNullable<typeof jobA>) => ({
+    requestId: job.request_id,
+    contract: BROWSER_RENDER_CAPABILITY,
+    mimeType: 'image/png',
+    width: 1280,
+    height: 1280,
+    requestIdentity: quotationRenderRequestIdentity(job.render_request),
+    bytes,
+  });
+  assert.equal(fixture.complete(completion(jobA), runA), true);
+  assert.equal(fixture.complete(completion(jobA), runA), false, 'late duplicate complete must be a no-op');
+  assert.equal((await fixture.waitForCompletion(runA))?.state, 'ready');
+  assert.equal(fixture.takeNext(runA), null);
+  assert.equal(fixture.takeNext(runA), null);
+  assert.equal(fixture.takeNext(runA), null, 'completed run must remain empty after more than two polls');
+  assert.equal(fixture.evidence(runB).writer, 0, 'run A must not complete overlapping run B');
+  assert.equal(fixture.complete(completion(jobB), runB), true);
+  assert.equal((await fixture.waitForCompletion(runB))?.state, 'ready');
+  assert.equal(fixture.takeNext(runB), null);
+  for (const runKey of [runA, runB]) {
+    assert.deepEqual(
+      {
+        complete: fixture.evidence(runKey).complete,
+        storage: fixture.evidence(runKey).storage,
+        attachment: fixture.evidence(runKey).attachment,
+        writer: fixture.evidence(runKey).writer,
+        fail: fixture.evidence(runKey).fail,
+      },
+      { complete: 1, storage: 1, attachment: 1, writer: 1, fail: 0 },
+    );
+  }
+});
+
 test('Production parent defaults remain on the existing worker and eager iframe behavior', () => {
   const html = browserQuotationImageClientHtml('https://lksdisplaybox.online/configurator/');
   assert.match(html, /<iframe[^>]+src="https:\/\/lksdisplaybox\.online\/configurator\/"/);
@@ -324,6 +458,7 @@ test('Production parent defaults remain on the existing worker and eager iframe 
   assert.doesNotMatch(html, /handshake-counters/);
   assert.doesNotMatch(html, /id="status" hidden/);
   assert.match(html, /fetch\("\/quotation-image\/browser-bridge\/next" \+ recoveryQuery/);
+  assert.doesNotMatch(html, /bridgeFetch|sessionStorage|X-LKS-Test-Run|testRunKey|terminalSuccess/);
   assert.doesNotMatch(html, /test-only\/quotation-image-ready-handshake/);
 });
 
