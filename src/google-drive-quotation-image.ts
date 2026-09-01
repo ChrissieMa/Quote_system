@@ -4,6 +4,7 @@ import {
   isImmutableItemId,
   QuotationImageError,
   type QuotationImagePresentationResolver,
+  type QuotationImageSafeHttpClass,
   type QuotationImageStorage,
   type QuotationImageRuntimeAdapters,
 } from './quotation-image';
@@ -161,6 +162,13 @@ const driveAssetDigest = (assetKey: string, idempotencyKey?: string): string => 
 };
 
 const isRetryableStatus = (status: number): boolean => status === 408 || status === 429 || status >= 500;
+const safeHttpClass = (status: number): QuotationImageSafeHttpClass => {
+  if (status === 408) return '408';
+  if (status === 429) return '429';
+  if (status >= 500) return '5xx';
+  if (status >= 400) return '4xx';
+  return 'unknown';
+};
 
 const assertQuotationPng = (bytes: Uint8Array, message: string): void => {
   const png = Buffer.from(bytes);
@@ -394,7 +402,6 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
   }
 
   private async authorizedFetch(url: string, init: RequestInit): Promise<FetchResponse> {
-    let lastError: unknown;
     for (let attempt = 1; attempt <= this.maxAttempts; attempt += 1) {
       const timed = timeoutSignal(this.timeoutMs);
       try {
@@ -417,22 +424,28 @@ export class GoogleDriveQuotationImageStorage implements QuotationImageStorage {
           continue;
         }
         return response;
-      } catch (error) {
-        lastError = error;
+      } catch {
         if (attempt >= this.maxAttempts) break;
         await this.retryDelay(attempt);
       } finally {
         timed.cleanup();
       }
     }
-    const message = lastError instanceof Error ? lastError.message : 'Google Drive request failed.';
-    throw new QuotationImageError(message, 'temporary');
+    throw new QuotationImageError(
+      'Google Drive request failed.',
+      'temporary',
+      { code: 'google-drive-network', httpClass: 'network' },
+    );
   }
 
   private driveError(message: string, status: number): QuotationImageError {
     return new QuotationImageError(
       `${message} (${status}).`,
       isRetryableStatus(status) ? 'temporary' : 'terminal',
+      {
+        code: isRetryableStatus(status) ? 'google-drive-http-retryable' : 'google-drive-http-terminal',
+        httpClass: safeHttpClass(status),
+      },
     );
   }
 }

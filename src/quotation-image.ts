@@ -30,6 +30,17 @@ export type RenderRequestV1 = {
 
 export type QuotationImageState = 'pending' | 'ready' | 'failed';
 export type QuotationImageErrorClass = 'temporary' | 'terminal' | 'timeout';
+export type QuotationImageErrorStage = 'renderer' | 'storage';
+export type QuotationImageSafeErrorCode =
+  | 'quotation-image-renderer-temporary'
+  | 'quotation-image-renderer-terminal'
+  | 'quotation-image-renderer-timeout'
+  | 'quotation-image-storage-temporary'
+  | 'quotation-image-storage-terminal'
+  | 'google-drive-http-retryable'
+  | 'google-drive-http-terminal'
+  | 'google-drive-network';
+export type QuotationImageSafeHttpClass = '408' | '429' | '4xx' | '5xx' | 'network' | 'unknown';
 
 export type QuotationImageMetadata = {
   contract: typeof QUOTATION_IMAGE_CONTRACT;
@@ -38,6 +49,9 @@ export type QuotationImageMetadata = {
   asset_key?: string;
   attempts: number;
   error_class?: QuotationImageErrorClass;
+  error_stage?: QuotationImageErrorStage;
+  error_code?: QuotationImageSafeErrorCode;
+  error_http_class?: QuotationImageSafeHttpClass;
   updated_at: string;
 };
 
@@ -750,7 +764,14 @@ export class InMemoryQuotationImageJobScheduler implements QuotationImageJobSche
 }
 
 export class QuotationImageError extends Error {
-  constructor(message: string, readonly classification: 'temporary' | 'terminal') {
+  constructor(
+    message: string,
+    readonly classification: 'temporary' | 'terminal',
+    readonly safeDetails?: {
+      code: QuotationImageSafeErrorCode;
+      httpClass: QuotationImageSafeHttpClass;
+    },
+  ) {
     super(message);
   }
 }
@@ -818,6 +839,14 @@ export class QuotationImageCoordinator {
       maxAttempts?: number;
       now?: () => string;
       retryDelay?: (attempt: number) => Promise<void>;
+      onFailure?: (failure: {
+        stage: QuotationImageErrorStage;
+        error_class: QuotationImageErrorClass;
+        error_code: QuotationImageSafeErrorCode;
+        error_http_class: QuotationImageSafeHttpClass;
+        attempt: number;
+        max_attempts: number;
+      }) => void;
     } = {},
   ) {}
 
@@ -847,8 +876,63 @@ export class QuotationImageCoordinator {
   private async execute(request: RenderRequestV1, idempotencyKey: string): Promise<QuotationImageMetadata> {
     const maxAttempts = Math.max(1, Math.min(5, this.options.maxAttempts || 3));
     const timeoutMs = Math.max(1, this.options.timeoutMs || 10_000);
-    let lastClass: QuotationImageErrorClass = 'terminal';
+    const now = this.options.now || (() => new Date().toISOString());
+    const retryDelay = this.options.retryDelay || (async () => undefined);
+    const failureDetails = (error: unknown, stage: QuotationImageErrorStage) => {
+      const temporary = error instanceof QuotationImageError && error.classification === 'temporary';
+      const timedOut = stage === 'renderer' && /timed out/i.test(String((error as Error)?.message || error));
+      const errorClass: QuotationImageErrorClass = timedOut ? 'timeout' : temporary ? 'temporary' : 'terminal';
+      const safeDetails = error instanceof QuotationImageError ? error.safeDetails : undefined;
+      const fallbackCode: QuotationImageSafeErrorCode = stage === 'renderer'
+        ? timedOut
+          ? 'quotation-image-renderer-timeout'
+          : temporary ? 'quotation-image-renderer-temporary' : 'quotation-image-renderer-terminal'
+        : temporary ? 'quotation-image-storage-temporary' : 'quotation-image-storage-terminal';
+      return {
+        temporary,
+        errorClass,
+        errorCode: safeDetails?.code || fallbackCode,
+        errorHttpClass: safeDetails?.httpClass || 'unknown' as QuotationImageSafeHttpClass,
+      };
+    };
+    const reportFailure = (
+      stage: QuotationImageErrorStage,
+      details: ReturnType<typeof failureDetails>,
+      attempt: number,
+    ) => {
+      try {
+        this.options.onFailure?.({
+          stage,
+          error_class: details.errorClass,
+          error_code: details.errorCode,
+          error_http_class: details.errorHttpClass,
+          attempt,
+          max_attempts: maxAttempts,
+        });
+      } catch {
+        // Failure telemetry must never change the quotation-image result.
+      }
+    };
+    const failed = (
+      stage: QuotationImageErrorStage,
+      details: ReturnType<typeof failureDetails>,
+      attempts: number,
+    ): QuotationImageMetadata => ({
+      contract: QUOTATION_IMAGE_CONTRACT,
+      state: 'failed',
+      idempotency_key: idempotencyKey,
+      attempts,
+      error_class: details.errorClass,
+      error_stage: stage,
+      error_code: details.errorCode,
+      error_http_class: details.errorHttpClass,
+      updated_at: now(),
+    });
+
+    let rendered: RenderedQuotationImage | undefined;
+    let renderAttempts = 0;
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      renderAttempts = attempt;
       const controller = new AbortController();
       let timer: NodeJS.Timeout | undefined;
       try {
@@ -858,7 +942,7 @@ export class QuotationImageCoordinator {
             reject(new QuotationImageError('Quotation image render timed out.', 'temporary'));
           }, timeoutMs);
         });
-        const rendered = await Promise.race([
+        rendered = await Promise.race([
           this.renderer.render(request, { idempotencyKey, signal: controller.signal }),
           timeout,
         ]);
@@ -869,13 +953,28 @@ export class QuotationImageCoordinator {
           || !Buffer.from(rendered.bytes.subarray(0, PNG_SIGNATURE.length)).equals(PNG_SIGNATURE)) {
           throw new QuotationImageError('Renderer returned an invalid quotation PNG.', 'terminal');
         }
+        break;
+      } catch (error) {
+        const details = failureDetails(error, 'renderer');
+        reportFailure('renderer', details, attempt);
+        if (!details.temporary || attempt === maxAttempts) return failed('renderer', details, attempt);
+        await retryDelay(attempt);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+    }
+    if (!rendered) throw new Error('Unreachable quotation image render state.');
+
+    const expectedAssetKey = quotationImageAssetKey(idempotencyKey);
+    for (let storageAttempt = 1; storageAttempt <= maxAttempts; storageAttempt += 1) {
+      const attempts = Math.max(renderAttempts, storageAttempt);
+      try {
         const stored = await this.storage.put({
           assetKey: quotationImageAssetKey(idempotencyKey),
           idempotencyKey,
           bytes: rendered.bytes,
           mimeType: rendered.mimeType,
         });
-        const expectedAssetKey = quotationImageAssetKey(idempotencyKey);
         if (!ASSET_KEY_PATTERN.test(stored.assetKey) || stored.assetKey.includes('..')
           || stored.assetKey !== expectedAssetKey) {
           throw new QuotationImageError('Storage returned an invalid asset_key.', 'terminal');
@@ -885,28 +984,17 @@ export class QuotationImageCoordinator {
           state: 'ready',
           idempotency_key: idempotencyKey,
           asset_key: stored.assetKey,
-          attempts: attempt,
-          updated_at: (this.options.now || (() => new Date().toISOString()))(),
+          attempts,
+          updated_at: now(),
         };
       } catch (error) {
-        const temporary = error instanceof QuotationImageError && error.classification === 'temporary';
-        lastClass = /timed out/i.test(String((error as Error)?.message || error)) ? 'timeout' : temporary ? 'temporary' : 'terminal';
-        if (!temporary || attempt === maxAttempts) {
-          return {
-            contract: QUOTATION_IMAGE_CONTRACT,
-            state: 'failed',
-            idempotency_key: idempotencyKey,
-            attempts: attempt,
-            error_class: lastClass,
-            updated_at: (this.options.now || (() => new Date().toISOString()))(),
-          };
-        }
-        await (this.options.retryDelay || (async () => undefined))(attempt);
-      } finally {
-        if (timer) clearTimeout(timer);
+        const details = failureDetails(error, 'storage');
+        reportFailure('storage', details, storageAttempt);
+        if (!details.temporary || storageAttempt === maxAttempts) return failed('storage', details, attempts);
+        await retryDelay(storageAttempt);
       }
     }
-    throw new Error('Unreachable quotation image state.');
+    throw new Error('Unreachable quotation image storage state.');
   }
 }
 

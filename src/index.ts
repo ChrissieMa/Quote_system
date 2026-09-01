@@ -364,6 +364,9 @@ if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER && BROWSER_QUOTATION_IMAGE_BRIDGE) {
       timeoutMs: 60_000,
       maxAttempts: 2,
       retryDelay: async () => undefined,
+      onFailure: failure => {
+        console.warn('Quotation-image stage failure:', JSON.stringify(failure));
+      },
     },
   );
   quotationImageRuntime.jobScheduler = {
