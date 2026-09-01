@@ -518,10 +518,13 @@ test('TEST capacity pressure never evicts a first-fail run that is still retryab
   assert.equal(fixture.takeNext(retryRun), null, 'evicted terminal run key must remain replay-blocked');
 });
 
-test('Production parent defaults remain on the existing worker and eager iframe behavior', () => {
-  const html = browserQuotationImageClientHtml('https://lksdisplaybox.online/configurator/');
-  assert.match(html, /<iframe[^>]+src="https:\/\/lksdisplaybox\.online\/configurator\/"/);
-  assert.doesNotMatch(html, /data-renderer-src=/);
+test('Production parent configuration keeps the existing worker and defers navigation until listeners exist', () => {
+  const html = browserQuotationImageClientHtml('https://lksdisplaybox.online/configurator/', {
+    deferRendererLoadUntilListener: true,
+  });
+  assert.match(html, /<iframe[^>]+data-renderer-src="https:\/\/lksdisplaybox\.online\/configurator\/"/);
+  assert.doesNotMatch(html, /<iframe[^>]+\ssrc="https:\/\/lksdisplaybox\.online\/configurator\/"/);
+  assert.match(html, /window\.addEventListener\('message',[\s\S]+frame\.addEventListener\('load',[\s\S]+navigateRenderer\(\);/);
   assert.doesNotMatch(html, /handshake-counters/);
   assert.doesNotMatch(html, /id="status" hidden/);
   assert.match(html, /fetch\("\/quotation-image\/browser-bridge\/next" \+ recoveryQuery/);

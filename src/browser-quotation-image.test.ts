@@ -120,6 +120,205 @@ test('iframe reload clears the active job and waits for renderer readiness befor
   assert.match(html, /Object\.keys\(response\)\.length === 3/);
 });
 
+test('Production full bridge installs listeners before the first iframe navigation and completes once', async () => {
+  const html = browserQuotationImageClientHtml('https://renderer.test/configurator/', {
+    deferRendererLoadUntilListener: true,
+  });
+  assert.match(html, /data-renderer-src="https:\/\/renderer\.test\/configurator\/"/);
+  assert.doesNotMatch(html, /<iframe[^>]+\ssrc="https:\/\/renderer\.test\/configurator\/"/);
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+
+  const order: string[] = [];
+  const requests: Array<{ url: string; method: string }> = [];
+  const posted: unknown[] = [];
+  const stageLogs: string[] = [];
+  const frameListeners = new Map<string, () => void>();
+  const windowListeners = new Map<string, (event: any) => unknown>();
+  const contentWindow = { postMessage(message: unknown) { posted.push(message); } };
+  const status = { textContent: '' };
+  const job = {
+    protocol: BROWSER_TRANSPORT_PROTOCOL,
+    type: BROWSER_RENDER_REQUEST_TYPE,
+    request_id: `quote-${'b'.repeat(64)}`,
+    render_request: request,
+  };
+  let frameSrc = '';
+  let frameAssignments = 0;
+  const exactReady = () => windowListeners.get('message')?.({
+    origin: 'https://renderer.test',
+    source: contentWindow,
+    data: {
+      protocol: BROWSER_TRANSPORT_PROTOCOL,
+      type: BROWSER_RENDER_READY_TYPE,
+      capability: BROWSER_RENDER_CAPABILITY,
+    },
+  });
+  const frame = {
+    contentWindow,
+    get src() { return frameSrc; },
+    set src(value: string) {
+      order.push('iframe_src_set');
+      frameAssignments += 1;
+      frameSrc = value;
+      void exactReady();
+      frameListeners.get('load')?.();
+    },
+    addEventListener(type: string, listener: () => void) {
+      if (type === 'load') order.push('iframe_load_listener_installed');
+      frameListeners.set(type, listener);
+    },
+  };
+  const context = vm.createContext({
+    URL,
+    ArrayBuffer,
+    document: {
+      getElementById(id: string) {
+        return id === 'quotation-image-renderer' ? frame : status;
+      },
+    },
+    window: {
+      addEventListener(type: string, listener: (event: any) => unknown) {
+        if (type === 'message') order.push('message_listener_installed');
+        windowListeners.set(type, listener);
+      },
+    },
+    console: { info(_label: string, payload: string) { stageLogs.push(payload); } },
+    clearTimeout() {},
+    setTimeout() { return 1; },
+    fetch: async (url: string, options: { method?: string } = {}) => {
+      const method = options.method || 'GET';
+      requests.push({ url, method });
+      if (url.includes('/next')) return { ok: true, status: 200, json: async () => job };
+      if (url.includes('/status/')) return { ok: true, status: 200, json: async () => ({ state: 'ready' }) };
+      return { ok: true, status: 202, json: async () => ({ state: 'processing' }) };
+    },
+  });
+
+  new vm.Script(script).runInContext(context);
+  assert.ok(order.indexOf('message_listener_installed') < order.indexOf('iframe_src_set'));
+  assert.ok(order.indexOf('iframe_load_listener_installed') < order.indexOf('iframe_src_set'));
+  assert.equal(frameAssignments, 1, 'happy path must navigate the iframe exactly once');
+  assert.equal(frameSrc, 'https://renderer.test/configurator/');
+
+  await vm.runInContext('poll()', context);
+  assert.equal(posted.length, 1);
+  assert.deepEqual(posted[0], job);
+
+  await windowListeners.get('message')?.({
+    origin: 'https://cross-origin.test',
+    source: contentWindow,
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_RESPONSE_TYPE, request_id: job.request_id },
+  });
+  await windowListeners.get('message')?.({
+    origin: 'https://renderer.test',
+    source: {},
+    data: { protocol: BROWSER_TRANSPORT_PROTOCOL, type: BROWSER_RENDER_RESPONSE_TYPE, request_id: job.request_id },
+  });
+  assert.equal(requests.filter(value => value.method === 'POST').length, 0, 'cross-origin/source responses are ignored');
+
+  const response = {
+    protocol: BROWSER_TRANSPORT_PROTOCOL,
+    type: BROWSER_RENDER_RESPONSE_TYPE,
+    request_id: job.request_id,
+    ok: true,
+    artifact: {
+      contract: BROWSER_RENDER_CAPABILITY,
+      mime_type: 'image/png',
+      width: 1280,
+      height: 1280,
+      request_identity: quotationRenderRequestIdentity(request),
+      png_bytes: new ArrayBuffer(16),
+    },
+  };
+  await windowListeners.get('message')?.({ origin: 'https://renderer.test', source: contentWindow, data: response });
+  await windowListeners.get('message')?.({ origin: 'https://renderer.test', source: contentWindow, data: response });
+
+  assert.equal(requests.filter(value => value.url.includes('/next')).length, 1);
+  assert.equal(requests.filter(value => value.url.includes('/complete/')).length, 1);
+  assert.equal(requests.filter(value => value.url.endsWith('/fail')).length, 0);
+  assert.equal(frameAssignments, 1, 'success must not retry or reload the renderer');
+  const latestStages = JSON.parse(stageLogs.at(-1) || '{}');
+  assert.deepEqual(latestStages, {
+    iframe_loaded: 1,
+    ready_received: 1,
+    request_sent: 1,
+    response_received: 1,
+    png_valid: 1,
+    writer_ok: 1,
+    fail_code: '',
+  });
+});
+
+test('Production full bridge READY timeout stays fail-closed after bounded renderer reloads', () => {
+  const html = browserQuotationImageClientHtml('https://renderer.test/configurator/', {
+    deferRendererLoadUntilListener: true,
+  });
+  const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];
+  assert.ok(script);
+
+  const frameListeners = new Map<string, () => void>();
+  const timers = new Map<number, { callback: () => void; delay: number; cancelled: boolean }>();
+  const stageLogs: string[] = [];
+  const requests: string[] = [];
+  const posted: unknown[] = [];
+  let nextTimerId = 0;
+  let frameAssignments = 0;
+  const frame = {
+    contentWindow: { postMessage(message: unknown) { posted.push(message); } },
+    set src(_value: string) {
+      frameAssignments += 1;
+      frameListeners.get('load')?.();
+    },
+    addEventListener(type: string, listener: () => void) { frameListeners.set(type, listener); },
+  };
+  const context = vm.createContext({
+    URL,
+    ArrayBuffer,
+    document: {
+      getElementById(id: string) {
+        return id === 'quotation-image-renderer' ? frame : { textContent: '' };
+      },
+    },
+    window: { addEventListener() {} },
+    console: { info(_label: string, payload: string) { stageLogs.push(payload); } },
+    clearTimeout(id: number) {
+      const timer = timers.get(id);
+      if (timer) timer.cancelled = true;
+    },
+    setTimeout(callback: () => void, delay: number) {
+      nextTimerId += 1;
+      timers.set(nextTimerId, { callback, delay, cancelled: false });
+      return nextTimerId;
+    },
+    fetch: async (url: string) => {
+      requests.push(url);
+      return { ok: true, status: 204, json: async () => ({}) };
+    },
+  });
+
+  new vm.Script(script).runInContext(context);
+  for (let timeout = 0; timeout < 3; timeout += 1) {
+    const activeReadyTimer = [...timers.values()].find(timer => timer.delay === 8_000 && !timer.cancelled);
+    assert.ok(activeReadyTimer, `missing READY timeout ${timeout + 1}`);
+    activeReadyTimer.cancelled = true;
+    activeReadyTimer.callback();
+  }
+
+  assert.equal(frameAssignments, 3, 'initial navigation plus two bounded reloads');
+  assert.equal(requests.length, 0, 'READY timeout must never poll the bridge');
+  assert.equal(posted.length, 0, 'READY timeout must never post a render request');
+  assert.deepEqual(JSON.parse(stageLogs.at(-1) || '{}'), {
+    iframe_loaded: 3,
+    ready_received: 0,
+    request_sent: 0,
+    response_received: 0,
+    png_valid: 0,
+    writer_ok: 0,
+    fail_code: 'quotation-image-renderer-ready-timeout',
+  });
+});
+
 test('client waits for an exact direct ready handshake, reloads on lost ready, and emits only aggregate stages', async () => {
   const html = browserQuotationImageClientHtml('https://renderer.test/configurator/');
   const script = html.match(/<script>([\s\S]*)<\/script>/)?.[1];

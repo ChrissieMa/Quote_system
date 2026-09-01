@@ -740,7 +740,9 @@ app.get(
 if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
   app.get('/quotation-image/browser-bridge', requireAdmin, (_req: Request, res: Response) => {
     res.setHeader('Content-Security-Policy', quotationImageBridgeCsp(QUOTATION_IMAGE_RENDERER_URL));
-    res.type('html').send(browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL));
+    res.type('html').send(browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL, {
+      deferRendererLoadUntilListener: true,
+    }));
   });
   const recoveryClaims = new InMemoryQuotationImageRecoveryClaims();
   let recoveryScanInFlight: Promise<number> | null = null;

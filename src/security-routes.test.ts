@@ -50,6 +50,9 @@ test('owner-only quotation-image TEST route is isolated from Production data and
   ]) assert.ok(!route.includes(forbidden), `TEST handshake route must not access ${forbidden}`);
 
   const productionWorker = source.slice(end, source.indexOf('type AirtableMetadataField', end));
+  assert.ok(productionWorker.includes("app.get('/quotation-image/browser-bridge', requireAdmin,"));
+  assert.ok(productionWorker.includes('browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL, {'));
+  assert.ok(productionWorker.includes('deferRendererLoadUntilListener: true'));
   assert.ok(productionWorker.includes("app.get('/quotation-image/browser-bridge/next'"));
   assert.ok(productionWorker.includes('scheduleLatestRetryableQuotationImage'));
   assert.ok(productionWorker.includes('tableQuotes.select'));
