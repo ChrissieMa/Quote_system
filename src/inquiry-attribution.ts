@@ -17,6 +17,37 @@ export type InquiryCycleOptions = {
 
 export const DEFAULT_INQUIRY_CYCLE_INACTIVITY_DAYS = 30;
 
+export const INQUIRY_PRODUCT_INTEREST_OPTIONS = [
+  'Display Box',
+  'Display Case',
+  'Ready Stock',
+  'Reissue',
+  'Other',
+] as const;
+
+export type InquiryProductInterest = typeof INQUIRY_PRODUCT_INTEREST_OPTIONS[number];
+
+const QUOTE_ITEM_TYPE_TO_PRODUCT_INTEREST: Record<string, InquiryProductInterest> = {
+  'Display box 展示盒': 'Display Box',
+  'Display Box': 'Display Box',
+  'Display Case 疊高展示櫃': 'Display Case',
+  'Display Case': 'Display Case',
+  'Ready Stock': 'Ready Stock',
+  'Reissue': 'Reissue',
+  '階梯': 'Other',
+  'Other': 'Other',
+};
+
+/**
+ * Airtable's Product Interest is a locked single-select. Quote item labels are
+ * bilingual UI values, so never pass them through or ask Airtable to create a
+ * new option. Unknown/future product labels fail safely into the existing
+ * non-identifying Other bucket.
+ */
+export const mapQuoteItemTypeToInquiryProductInterest = (
+  value: unknown,
+): InquiryProductInterest => QUOTE_ITEM_TYPE_TO_PRODUCT_INTEREST[String(value ?? '').trim()] || 'Other';
+
 const normalizedDate = (value: string): string => {
   const trimmed = String(value || '').trim();
   return /^\d{4}-\d{2}-\d{2}/.test(trimmed) ? trimmed.slice(0, 10) : '';

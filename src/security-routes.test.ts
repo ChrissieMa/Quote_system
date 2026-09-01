@@ -86,6 +86,11 @@ test('short customer paths are native aliases and long paths remain backward com
   assert.ok(source.includes('`${PUBLIC_BASE_URL}${publicCustomerInfoPath(publicToken)}`'));
 });
 
+test('Quote creation maps bilingual item labels to the locked Inquiry select options', () => {
+  assert.ok(source.includes("'Product Interest': mapQuoteItemTypeToInquiryProductInterest(firstItem.itemType)"));
+  assert.ok(!source.includes("'Product Interest': firstItem.itemType"));
+});
+
 test('owner dashboard exposes auditable Order cost breakdown without calling provisional profit final', () => {
   for (const label of [
     '實付小糖貨款',

@@ -99,6 +99,7 @@ import {
 import {
   appendLinkedRecordId,
   firstTouchValue,
+  mapQuoteItemTypeToInquiryProductInterest,
   resolveInquiryCycleInactivityDays,
   selectCanonicalInquiry,
 } from './inquiry-attribution';
@@ -5628,7 +5629,9 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
         'Phone': quoteCustomerPhone || String(b.phone || '').trim(),
         ...(quoteSourceChannel ? { 'Channel': mapQuoteChannelToInquiryChannel(quoteSourceChannel) } : {}),
         ...(campaignSourceDetail ? { 'Campaign / Source Detail': campaignSourceDetail } : {}),
-        ...(firstItem.itemType ? { 'Product Interest': firstItem.itemType } : {}),
+        ...(firstItem.itemType ? {
+          'Product Interest': mapQuoteItemTypeToInquiryProductInterest(firstItem.itemType),
+        } : {}),
         'Inquiry Status': 'New',
         ...(performanceMonthRecordId ? { 'Monthly Performance': [performanceMonthRecordId] } : {}),
         ...(selectedCustomerId ? { 'Customer': [selectedCustomerId] } : {}),
