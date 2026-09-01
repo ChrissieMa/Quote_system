@@ -1,3 +1,5 @@
+import crypto from 'crypto';
+
 export type OwnerFinanceFields = Record<string, unknown>;
 
 export type OwnerFinanceRecord = {
@@ -129,8 +131,19 @@ export const hasOrderPaymentEvidence = (fields: OwnerFinanceFields): boolean => 
   return hasAttachment || Boolean(receiptNumber);
 };
 
+export const hasIssuedReceipt = (fields: OwnerFinanceFields): boolean =>
+  Boolean(String(fields['Receipt Number'] || fields['Receipt No'] || '').trim())
+  || Boolean(String(fields['Receipt Public Token'] || '').trim());
+
 export const getOrderAmountReceived = (fields: OwnerFinanceFields): number => {
-  if (isCancelledOrder(fields) || ['unpaid', '未付款'].includes(normalizedOrderStatus(fields))) return 0;
+  if (isCancelledOrder(fields)) return 0;
+
+  // An issued Receipt is the authoritative, one-time revenue event.  Its full
+  // Order total wins over any older manual Amount Received value, so finance
+  // never adds a legacy partial/manual amount to the Receipt total.
+  if (hasIssuedReceipt(fields)) return numberField(fields, 'Final Amount');
+
+  if (['unpaid', '未付款'].includes(normalizedOrderStatus(fields))) return 0;
 
   const explicit = fields['Amount Received HKD'];
   if (explicit !== undefined && explicit !== null && String(explicit).trim() !== '') {
@@ -484,6 +497,132 @@ export const validateOrderPaymentRequestId = (value: unknown): string => {
   const requestId = String(value || '').trim();
   if (!/^recv_[a-f0-9]{32}$/.test(requestId)) throw new Error('order-payment-request-id-invalid');
   return requestId;
+};
+
+const appendFullReceiptLog = (
+  log: unknown,
+  requestId: string,
+  paidAt: string,
+  totalCents: number,
+): string => {
+  const current = String(log || '').trim();
+  const entry = `RECEIPT_FULL|${requestId}|${paidAt}|${(totalCents / 100).toFixed(2)}|${(totalCents / 100).toFixed(2)}`;
+  return current ? `${current}\n${entry}` : entry;
+};
+
+export const planFullReceipt = (input: {
+  total: unknown;
+  log: unknown;
+  requestId: string;
+  paidAt: string;
+}): {
+  duplicate: boolean;
+  receivedCents: number;
+  status: 'Paid';
+  log: string;
+} => {
+  const totalCents = toHkdCents(input.total);
+  if (totalCents <= 0) throw new Error('full-receipt-total-invalid');
+  if (paymentLogHasRequest(input.log, input.requestId)) {
+    if (paymentLogRequestAmountCents(input.log, input.requestId) !== totalCents) {
+      throw new Error('full-receipt-request-conflict');
+    }
+    return {
+      duplicate: true,
+      receivedCents: totalCents,
+      status: 'Paid',
+      log: String(input.log || ''),
+    };
+  }
+  return {
+    duplicate: false,
+    receivedCents: totalCents,
+    status: 'Paid',
+    log: appendFullReceiptLog(input.log, input.requestId, input.paidAt, totalCents),
+  };
+};
+
+export type ReceiptBackfillAudit = {
+  receiptCount: number;
+  missingOrZeroReceived: number;
+  manualAmountMismatch: number;
+  statusMismatch: number;
+  missingPayDate: number;
+  eligible: number;
+  exactDeduped: number;
+  blocked: number;
+};
+
+export type ReceiptBackfillUpdate = {
+  marker: string;
+  fields: OwnerFinanceFields;
+};
+
+const receiptBackfillMarker = (recordId: string): string =>
+  `RECEIPT_BACKFILL|v1|${crypto.createHash('sha256').update(recordId).digest('hex').slice(0, 24)}`;
+
+const hasReceiptBackfillMarker = (log: unknown, marker: string): boolean =>
+  String(log || '').split(/\r?\n/).some(line => line.startsWith(`${marker}|`));
+
+export const makeReceiptBackfillUpdate = (
+  record: OwnerFinanceRecord,
+  auditedAt: string,
+): ReceiptBackfillUpdate | null => {
+  const fields = record.fields;
+  if (!hasIssuedReceipt(fields) || isCancelledOrder(fields)) return null;
+  const totalCents = toHkdCents(fields['Final Amount']);
+  const receivedCents = toHkdCents(fields['Amount Received HKD']);
+  const status = String(fields['Status'] || '').trim();
+  const payDate = String(fields['Pay Date'] || '').trim();
+  if (totalCents <= 0 || !payDate || (receivedCents === totalCents && status === 'Paid')) return null;
+  const marker = receiptBackfillMarker(record.id);
+  if (hasReceiptBackfillMarker(fields['Payment Audit Log'], marker)) return null;
+  const currentLog = String(fields['Payment Audit Log'] || '').trim();
+  const backup = `${marker}|${auditedAt}|before_amount=${(receivedCents / 100).toFixed(2)}|before_status=${status || 'blank'}|pay_date=${payDate}|receipt_total=${(totalCents / 100).toFixed(2)}`;
+  return {
+    marker,
+    fields: {
+      'Amount Received HKD': totalCents / 100,
+      'Status': 'Paid',
+      'Payment Audit Log': currentLog ? `${currentLog}\n${backup}` : backup,
+    },
+  };
+};
+
+export const auditReceiptBackfill = (records: readonly OwnerFinanceRecord[]): ReceiptBackfillAudit => {
+  const audit: ReceiptBackfillAudit = {
+    receiptCount: 0,
+    missingOrZeroReceived: 0,
+    manualAmountMismatch: 0,
+    statusMismatch: 0,
+    missingPayDate: 0,
+    eligible: 0,
+    exactDeduped: 0,
+    blocked: 0,
+  };
+  for (const record of records) {
+    const fields = record.fields;
+    if (!hasIssuedReceipt(fields) || isCancelledOrder(fields)) continue;
+    audit.receiptCount += 1;
+    const totalCents = toHkdCents(fields['Final Amount']);
+    const receivedCents = toHkdCents(fields['Amount Received HKD']);
+    const statusMismatch = String(fields['Status'] || '').trim() !== 'Paid';
+    const missingPayDate = !String(fields['Pay Date'] || '').trim();
+    if (receivedCents <= 0) audit.missingOrZeroReceived += 1;
+    if (receivedCents !== totalCents) audit.manualAmountMismatch += 1;
+    if (statusMismatch) audit.statusMismatch += 1;
+    if (missingPayDate) audit.missingPayDate += 1;
+    const marker = receiptBackfillMarker(record.id);
+    if (hasReceiptBackfillMarker(fields['Payment Audit Log'], marker)) {
+      audit.exactDeduped += 1;
+      continue;
+    }
+    const needsUpdate = receivedCents !== totalCents || statusMismatch;
+    if (!needsUpdate) continue;
+    if (totalCents <= 0 || missingPayDate) audit.blocked += 1;
+    else audit.eligible += 1;
+  }
+  return audit;
 };
 
 const appendOrderPaymentLog = (

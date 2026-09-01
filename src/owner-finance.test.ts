@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   appendDriverPaymentLog,
   calculateOwnerFinanceSummary,
+  auditReceiptBackfill,
   calculateOwnerOrderCostBreakdown,
   getOrderAmountReceived,
   getOrderOutstandingAmount,
@@ -10,7 +11,9 @@ import {
   getDriverSettlement,
   parseDriverPaymentAmountCents,
   planDriverPayment,
+  planFullReceipt,
   planOrderPayment,
+  makeReceiptBackfillUpdate,
   paymentLogHasRequest,
   resolveMarketingFinanceMonth,
   summarizeOwnerOrderCostCoverage,
@@ -194,6 +197,68 @@ test('customer receipt plans support deposits, full settlement and duplicate pro
   }), /exceeds-outstanding/);
 });
 
+test('atomic Receipt creation always records the full Invoice total exactly once', () => {
+  const requestId = 'recv_0123456789abcdef0123456789abcdef';
+  const first = planFullReceipt({
+    total: 3000,
+    log: '',
+    requestId,
+    paidAt: '2026-09-01T04:00:00.000Z',
+  });
+  assert.equal(first.receivedCents, 300000);
+  assert.equal(first.status, 'Paid');
+  assert.match(first.log, /^RECEIPT_FULL\|recv_/);
+  const duplicate = planFullReceipt({
+    total: 3000,
+    log: first.log,
+    requestId,
+    paidAt: '2026-09-01T04:01:00.000Z',
+  });
+  assert.equal(duplicate.duplicate, true);
+  assert.equal(duplicate.receivedCents, 300000);
+  assert.equal(duplicate.log, first.log);
+  assert.throws(() => planFullReceipt({
+    total: 3001,
+    log: first.log,
+    requestId,
+    paidAt: '2026-09-01T04:01:00.000Z',
+  }), /request-conflict/);
+});
+
+test('Receipt total outranks old manual amounts and anonymous backfill is exact-deduped with backup', () => {
+  const legacy = record('recSyntheticReceipt', {
+    Status: 'Partially Paid',
+    'Final Amount': 3000,
+    'Amount Received HKD': 1000,
+    'Pay Date': '2026-08-31',
+    'Receipt Number': 'RCPT-SYNTHETIC',
+    'Receipt Public Token': 'synthetic-token-not-public',
+    'Payment Audit Log': 'RECEIVED|recv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa|2026-08-31T00:00:00.000Z|1000.00|1000.00',
+  });
+  assert.equal(getOrderAmountReceived(legacy.fields), 3000);
+  assert.equal(getOrderOutstandingAmount(legacy.fields), 0);
+  const before = auditReceiptBackfill([legacy]);
+  assert.equal(before.receiptCount, 1);
+  assert.equal(before.manualAmountMismatch, 1);
+  assert.equal(before.eligible, 1);
+  const update = makeReceiptBackfillUpdate(legacy, '2026-09-01T04:00:00.000Z');
+  assert.ok(update);
+  assert.equal(update.fields['Amount Received HKD'], 3000);
+  assert.equal(update.fields.Status, 'Paid');
+  assert.match(String(update.fields['Payment Audit Log']), /before_amount=1000\.00/);
+  const updated = record(legacy.id, { ...legacy.fields, ...update.fields });
+  const after = auditReceiptBackfill([updated]);
+  assert.equal(after.exactDeduped, 1);
+  assert.equal(makeReceiptBackfillUpdate(updated, '2026-09-01T04:05:00.000Z'), null);
+
+  const blocked = auditReceiptBackfill([record('recBlocked', {
+    Status: 'Paid', 'Final Amount': 2000, 'Amount Received HKD': 0, 'Receipt Number': 'RCPT-BLOCKED',
+  })]);
+  assert.equal(blocked.missingOrZeroReceived, 1);
+  assert.equal(blocked.blocked, 1);
+  assert.equal(blocked.eligible, 0);
+});
+
 test('official Google activity is allocated to cost month, never later payment month', () => {
   const may = resolveMarketingFinanceMonth({ Month: '2026-05', 'Spend Date': '2026-05-31', 'Spend Amount HKD': 959.48 });
   const june = resolveMarketingFinanceMonth({ Month: '2026-06', 'Spend Date': '2026-08-15', 'Spend Amount HKD': 1213.14 });
@@ -326,6 +391,10 @@ test('only explicit actual receipts or fully evidenced legacy payments count as 
   assert.equal(getOrderAmountReceived({
     Status: 'Paid', 'Final Amount': 3000, 'Pay Date': '2026-08-31', 'Receipt Number': 'RCPT-1',
   }), 3000);
+  assert.equal(getOrderAmountReceived({
+    Status: 'Partially Paid', 'Final Amount': 3000, 'Amount Received HKD': 1000,
+    'Receipt Number': 'RCPT-1', 'Receipt Public Token': 'synthetic',
+  }), 3000, 'Receipt full total outranks an old manual partial amount');
   assert.equal(getOrderAmountReceived({
     Status: 'Paid', 'Final Amount': 3000, 'Pay Date': '2026-08-31', Attachments: [{ id: 'invoice' }],
   }), 0, 'generic invoice attachments are not payment evidence');

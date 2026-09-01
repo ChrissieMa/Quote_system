@@ -16,6 +16,8 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin,",
     "app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin,",
     "app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin,",
+    "app.get('/admin/receipts/audit', requireAdmin,",
+    "app.post('/admin/receipts/backfill', requireAdmin, requireSameOrigin,",
     "app.get('/admin/dashboard', requireAdmin,",
     "app.get('/admin/analytics/purchase-cycles', requireAdmin,",
     "app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, requireSameOrigin,",
@@ -52,7 +54,7 @@ test('driver settlement route cannot write P&L or Business Expenses', () => {
   }
 });
 
-test('customer payment route is evidence-gated, CSRF-protected and idempotent', () => {
+test('Receipt creation route is evidence-gated, CSRF-protected, idempotent and full-total atomic', () => {
   const start = source.indexOf("app.post('/admin/invoice/:token/mark-paid'");
   const end = source.indexOf("app.get(['/receipt/:token'", start);
   assert.ok(start >= 0 && end > start, 'customer payment route must exist');
@@ -60,13 +62,28 @@ test('customer payment route is evidence-gated, CSRF-protected and idempotent', 
   for (const required of [
     "safeEqual(String(req.body.csrf || ''), getOwnerFormToken())",
     'validateOrderPaymentRequestId',
+    "receiptSequenceLock.run('receipt-sequence'",
     'orderPaymentLock.run',
     'ORDER_PAYMENT_EVIDENCE_FIELD',
-    'planOrderPayment',
+    'planFullReceipt',
     'paymentLogHasRequest',
     'syncMonthlyFinance(orderMonth)',
   ]) assert.ok(route.includes(required), `payment route missing ${required}`);
   assert.ok(!route.includes("fields['Attachments']"), 'invoice/general attachments cannot be payment evidence');
+  assert.ok(!route.includes('req.body.amount_received'), 'Receipt creation must not accept a second payment amount');
+  for (const field of ["'Receipt Number'", "'Receipt Public Token'", "'Pay Date'", "'Status'"]) {
+    assert.ok(route.includes(field), `atomic Receipt update missing ${field}`);
+  }
+});
+
+test('Receipt dashboard has one full-settlement action and signed Quote images fetch eagerly', () => {
+  assert.ok(source.includes('建立收據＝確認全數收款'));
+  assert.ok(!source.includes('placeholder="今次實收HK$"'));
+  assert.ok(!source.includes('>記錄實收</button>'));
+  assert.ok(source.includes('loading="eager" fetchpriority="high"'));
+  assert.ok(!source.includes('loading="lazy"'));
+  assert.ok(source.includes("paidInFull: isEnglish ? 'Paid in full' : '已全數付款'"));
+  assert.ok(!source.includes("paidInFull: isEnglish ? '${R.paidInFull}'"));
 });
 
 test('public document routes validate native aliases and legacy tokens before Airtable lookup', () => {
