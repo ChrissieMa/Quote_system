@@ -18,8 +18,7 @@ const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0
 type PendingRender = {
   requestId: string;
   request: RenderRequestV1;
-  deliveredAt: number | null;
-  deliveryCount: number;
+  delivered: boolean;
   resolve: (value: RenderedQuotationImage) => void;
   reject: (reason: Error) => void;
   detachAbort: () => void;
@@ -29,7 +28,6 @@ type PendingRender = {
 export type BrowserQuotationImageStatus = {
   state: 'waiting' | 'processing' | 'ready' | 'failed';
   updated_at: string;
-  delivery_count: number;
 };
 
 export type BrowserQuotationImageJob = {
@@ -68,24 +66,9 @@ export const quotationRenderRequestIdentity = (request: RenderRequestV1): string
 export class BrowserQuotationImageBridge implements QuotationImageRenderer {
   private readonly pending = new Map<string, PendingRender>();
   private readonly statuses = new Map<string, BrowserQuotationImageStatus>();
-  private readonly completed = new Set<string>();
 
-  constructor(private readonly options: {
-    deliveryLeaseMs?: number;
-    maxDeliveries?: number;
-    now?: () => number;
-  } = {}) {}
-
-  private rememberStatus(
-    requestId: string,
-    state: BrowserQuotationImageStatus['state'],
-    deliveryCount = this.pending.get(requestId)?.deliveryCount || 0,
-  ): void {
-    this.statuses.set(requestId, {
-      state,
-      updated_at: new Date(this.options.now?.() ?? Date.now()).toISOString(),
-      delivery_count: deliveryCount,
-    });
+  private rememberStatus(requestId: string, state: BrowserQuotationImageStatus['state']): void {
+    this.statuses.set(requestId, { state, updated_at: new Date().toISOString() });
     while (this.statuses.size > 256) this.statuses.delete(this.statuses.keys().next().value as string);
   }
 
@@ -104,15 +87,14 @@ export class BrowserQuotationImageBridge implements QuotationImageRenderer {
     return new Promise<RenderedQuotationImage>((resolve, reject) => {
       const onAbort = () => {
         this.pending.delete(requestId);
-        this.rememberStatus(requestId, 'failed', this.statuses.get(requestId)?.delivery_count || 0);
+        this.rememberStatus(requestId, 'failed');
         reject(new QuotationImageError('Browser render aborted.', 'temporary'));
       };
       context.signal.addEventListener('abort', onAbort, { once: true });
       this.pending.set(requestId, {
         requestId,
         request,
-        deliveredAt: null,
-        deliveryCount: 0,
+        delivered: false,
         resolve,
         reject,
         detachAbort: () => context.signal.removeEventListener('abort', onAbort),
@@ -123,29 +105,15 @@ export class BrowserQuotationImageBridge implements QuotationImageRenderer {
   }
 
   takeNext(): BrowserQuotationImageJob | null {
-    const now = this.options.now?.() ?? Date.now();
-    const leaseMs = this.options.deliveryLeaseMs ?? 8_000;
-    const maxDeliveries = this.options.maxDeliveries ?? 4;
-    for (const pending of this.pending.values()) {
-      if (pending.deliveredAt !== null && now - pending.deliveredAt < leaseMs) continue;
-      if (pending.deliveryCount >= maxDeliveries) {
-        this.pending.delete(pending.requestId);
-        pending.detachAbort();
-        this.rememberStatus(pending.requestId, 'failed', pending.deliveryCount);
-        pending.reject(new QuotationImageError('quotation-image-browser-delivery-exhausted', 'temporary'));
-        continue;
-      }
-      pending.deliveredAt = now;
-      pending.deliveryCount += 1;
-      this.rememberStatus(pending.requestId, 'processing', pending.deliveryCount);
-      return {
-        protocol: BROWSER_TRANSPORT_PROTOCOL,
-        type: BROWSER_RENDER_REQUEST_TYPE,
-        request_id: pending.requestId,
-        render_request: pending.request,
-      };
-    }
-    return null;
+    const pending = [...this.pending.values()].find(item => !item.delivered);
+    if (!pending) return null;
+    pending.delivered = true;
+    return {
+      protocol: BROWSER_TRANSPORT_PROTOCOL,
+      type: BROWSER_RENDER_REQUEST_TYPE,
+      request_id: pending.requestId,
+      render_request: pending.request,
+    };
   }
 
   complete(input: {
@@ -156,9 +124,8 @@ export class BrowserQuotationImageBridge implements QuotationImageRenderer {
     height: number;
     requestIdentity: string;
     bytes: Uint8Array;
-  }): boolean {
+  }): void {
     const pending = this.pending.get(input.requestId);
-    if (!pending && this.completed.has(input.requestId)) return false;
     if (!pending) throw new Error('Browser bridge request is unavailable.');
     if (input.contract !== '3d-render-v1'
       || input.mimeType !== 'image/png'
@@ -172,45 +139,31 @@ export class BrowserQuotationImageBridge implements QuotationImageRenderer {
     }
     this.pending.delete(input.requestId);
     pending.detachAbort();
-    this.completed.add(input.requestId);
-    while (this.completed.size > 256) this.completed.delete(this.completed.values().next().value as string);
-    this.rememberStatus(input.requestId, 'processing', pending.deliveryCount);
+    this.rememberStatus(input.requestId, 'processing');
     pending.resolve({
       bytes: new Uint8Array(input.bytes),
       mimeType: 'image/png',
       width: 1280,
       height: 1280,
     });
-    return true;
   }
 
   fail(requestId: string, errorCode: string): void {
     const pending = this.pending.get(requestId);
     if (!pending) return;
+    this.pending.delete(requestId);
+    pending.detachAbort();
     const safeCode = /^[a-z0-9._:$\-[\]]{1,240}$/i.test(errorCode)
       ? errorCode
       : 'quotation-image-browser-transport-render-failed';
-    const maxDeliveries = this.options.maxDeliveries ?? 4;
-    if (pending.deliveryCount < maxDeliveries) {
-      pending.deliveredAt = null;
-      this.rememberStatus(requestId, 'waiting', pending.deliveryCount);
-      return;
-    }
-    this.pending.delete(requestId);
-    pending.detachAbort();
-    this.rememberStatus(requestId, 'failed', pending.deliveryCount);
+    this.rememberStatus(requestId, 'failed');
     pending.reject(new QuotationImageError(safeCode, 'temporary'));
   }
 
   markMetadataPersisted(metadata: QuotationImageMetadata): void {
     const match = String(metadata.idempotency_key || '').match(/^sha256:([a-f0-9]{64})$/);
     if (!match) throw new Error('Browser bridge metadata identity is invalid.');
-    const requestId = `quote-${match[1]}`;
-    this.rememberStatus(
-      requestId,
-      metadata.state === 'ready' ? 'ready' : 'failed',
-      this.statuses.get(requestId)?.delivery_count || 0,
-    );
+    this.rememberStatus(`quote-${match[1]}`, metadata.state === 'ready' ? 'ready' : 'failed');
   }
 
   status(requestId: string): BrowserQuotationImageStatus | null {
@@ -241,10 +194,6 @@ const status = document.getElementById('status');
 let rendererReady = false;
 let activeJob = null;
 let pollTimer = null;
-let responseTimer = null;
-let recoverLatest = true;
-const rendererReadinessGraceMs = 1000;
-const rendererResponseTimeoutMs = 6000;
 const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };
 const fail = async (requestId, errorCode) => fetch('/quotation-image/browser-bridge/fail', {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -264,11 +213,9 @@ const waitForPersistence = async requestId => {
 const poll = async () => {
   if (!rendererReady || activeJob) return schedulePoll();
   try {
-    const recoveryQuery = recoverLatest ? '?recover_latest=1' : '';
-    const response = await fetch('/quotation-image/browser-bridge/next' + recoveryQuery, { cache: 'no-store' });
-    if (!response.ok) throw new Error('bridge-next-failed');
-    recoverLatest = false;
+    const response = await fetch('/quotation-image/browser-bridge/next', { cache: 'no-store' });
     if (response.status === 204) { status.textContent = '3D 圖片已處理完成'; return schedulePoll(1000); }
+    if (!response.ok) throw new Error('bridge-next-failed');
     const job = await response.json();
     if (job?.protocol !== '${BROWSER_TRANSPORT_PROTOCOL}'
       || job?.type !== '${BROWSER_RENDER_REQUEST_TYPE}'
@@ -276,13 +223,6 @@ const poll = async () => {
     activeJob = job;
     status.textContent = '正在產生3D圖片…';
     frame.contentWindow.postMessage(job, rendererOrigin);
-    clearTimeout(responseTimer);
-    responseTimer = setTimeout(() => {
-      if (activeJob?.request_id !== job.request_id) return;
-      activeJob = null;
-      status.textContent = '3D圖片未有回應，正在安全重試…';
-      schedulePoll(0);
-    }, rendererResponseTimeoutMs);
   } catch { status.textContent = '3D圖片暫時未能產生；報價單已正常建立'; schedulePoll(1000); }
 };
 window.addEventListener('message', async event => {
@@ -292,7 +232,6 @@ window.addEventListener('message', async event => {
     || response?.type !== '${BROWSER_RENDER_RESPONSE_TYPE}'
     || response?.request_id !== activeJob.request_id) return;
   const requestId = activeJob.request_id;
-  clearTimeout(responseTimer);
   activeJob = null;
   try {
     if (!response.ok) { await fail(requestId, response.error_code); throw new Error('renderer-failed'); }
@@ -316,12 +255,7 @@ window.addEventListener('message', async event => {
     status.textContent = '3D圖片暫時未能產生；報價單已正常建立';
   } finally { schedulePoll(); }
 });
-frame.addEventListener('load', () => {
-  rendererReady = false;
-  clearTimeout(responseTimer);
-  activeJob = null;
-  setTimeout(() => { rendererReady = true; schedulePoll(0); }, rendererReadinessGraceMs);
-});
+frame.addEventListener('load', () => { rendererReady = true; schedulePoll(0); });
 setTimeout(() => { if (!rendererReady) status.textContent = '3D系統未能載入；報價單已正常建立'; }, 15000);
 </script>`;
 };
