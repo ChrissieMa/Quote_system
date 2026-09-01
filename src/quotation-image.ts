@@ -620,6 +620,41 @@ export const prepareNewQuoteItemsForQuotationImageJobs = <T extends QuoteItemWit
   return { items: prepared, jobs };
 };
 
+export const prepareRetryableQuotationImageJobs = <T extends QuoteItemWithQuotationImage>(
+  items: readonly T[],
+  options: {
+    enabled: boolean;
+    runtime: QuotationImageRuntimeAdapters;
+    now?: Date | string;
+    maxAgeMs?: number;
+  },
+): PreparedQuotationImageJob[] => {
+  const configured = options.runtime.coordinator
+    && options.runtime.jobScheduler
+    && options.runtime.metadataWriter;
+  if (!options.enabled || !configured) return [];
+  const now = options.now instanceof Date ? options.now : new Date(options.now || Date.now());
+  const nowMs = now.getTime();
+  const maxAgeMs = options.maxAgeMs ?? 24 * 60 * 60 * 1000;
+  if (!Number.isFinite(nowMs) || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0) return [];
+
+  return items.flatMap(item => {
+    const metadata = item.quotation_image;
+    if (metadata?.contract !== QUOTATION_IMAGE_CONTRACT
+      || metadata.state !== 'failed'
+      || !['temporary', 'timeout'].includes(String(metadata.error_class || ''))
+      || !item.item_id) return [];
+    const failedAt = Date.parse(String(metadata.updated_at || ''));
+    const ageMs = nowMs - failedAt;
+    if (!Number.isFinite(failedAt) || ageMs < 0 || ageMs > maxAgeMs) return [];
+    const request = buildQuotationRenderRequestFromQuoteItem(item);
+    if (!request) return [];
+    const expectedIdempotencyKey = quotationImageIdempotencyKey(item.item_id, request);
+    if (metadata.idempotency_key !== expectedIdempotencyKey) return [];
+    return [{ itemId: item.item_id, request }];
+  });
+};
+
 export const scheduleQuotationImageJobsAfterWrite = (
   jobs: PreparedQuotationImageJob[],
   quoteRecordId: string,
