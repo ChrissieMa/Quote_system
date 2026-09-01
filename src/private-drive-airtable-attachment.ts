@@ -1,4 +1,6 @@
 import crypto from 'crypto';
+import jpeg from 'jpeg-js';
+import { PNG } from 'pngjs';
 import type { GoogleDriveAccessTokenProvider } from './google-drive-quotation-image';
 
 const GOOGLE_DRIVE_ORIGIN = 'https://www.googleapis.com';
@@ -15,6 +17,8 @@ const AIRTABLE_IDS = {
 } as const;
 const ALLOWED_MIME_TYPES = new Set<AttachmentMimeType>(['image/png', 'image/jpeg']);
 const DEFAULT_MAX_BYTES = 5 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION = 8192;
+const MAX_IMAGE_PIXELS = 16_000_000;
 const PNG_SIGNATURE = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
 
 type FetchLike = typeof fetch;
@@ -69,6 +73,7 @@ export type TransferReceipt = Readonly<{
   contract: 'private-drive-airtable-attachment-v1';
   state: 'processed';
   outcome: 'created' | 'deduped';
+  writeResolution: 'confirmed' | 'preexisting' | 'ambiguous_reconciled';
   idempotencyKey: string;
   source: {
     fileId: string;
@@ -227,7 +232,8 @@ const assertPng = (bytes: Uint8Array): void => {
       const validDepths: Record<number, number[]> = {
         0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16],
       };
-      if (!width || !height || !validDepths[colorType]?.includes(bitDepth)
+      if (!width || !height || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION
+        || width * height > MAX_IMAGE_PIXELS || !validDepths[colorType]?.includes(bitDepth)
         || png[dataStart + 10] !== 0 || png[dataStart + 11] !== 0 || png[dataStart + 12] > 1) {
         fail('invalid_png', 'PNG IHDR values are invalid.');
       }
@@ -278,7 +284,17 @@ const assertJpeg = (bytes: Uint8Array): void => {
     if (segmentLength < 2 || offset + segmentLength > jpeg.length) {
       fail('truncated_jpeg', 'JPEG segment exceeds the file.');
     }
-    if (isJpegFrameMarker(marker)) frames += 1;
+    if (isJpegFrameMarker(marker)) {
+      frames += 1;
+      if (segmentLength < 8) fail('invalid_jpeg', 'JPEG frame header is invalid.');
+      const precision = jpeg[offset + 2];
+      const height = jpeg.readUInt16BE(offset + 3);
+      const width = jpeg.readUInt16BE(offset + 5);
+      if (![8, 12].includes(precision) || !width || !height
+        || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION || width * height > MAX_IMAGE_PIXELS) {
+        fail('invalid_jpeg_dimensions', 'JPEG dimensions are outside the safe decode range.');
+      }
+    }
     if (marker !== 0xda) {
       offset += segmentLength;
       continue;
@@ -314,7 +330,7 @@ const assertJpeg = (bytes: Uint8Array): void => {
       if (offset < 0 || jpeg[offset] !== 0xff) fail('invalid_jpeg', 'JPEG scan marker is invalid.');
     }
   }
-  if (!ended || offset !== jpeg.length || frames < 1 || scans < 1) {
+  if (!ended || offset !== jpeg.length || frames !== 1 || scans < 1) {
     fail('invalid_jpeg', 'JPEG is incomplete or contains trailing data.');
   }
 };
@@ -324,6 +340,23 @@ export const assertSafeImage = (bytes: Uint8Array, mimeType: AttachmentMimeType,
   if (bytes.byteLength < 1 || bytes.byteLength > maxBytes) fail('invalid_size', 'Attachment size is outside the allowed range.');
   if (mimeType === 'image/png') assertPng(bytes);
   else assertJpeg(bytes);
+  try {
+    const decoded = mimeType === 'image/png'
+      ? PNG.sync.read(Buffer.from(bytes), { checkCRC: true, skipRescale: true })
+      : jpeg.decode(Buffer.from(bytes), {
+        useTArray: true,
+        tolerantDecoding: false,
+        maxResolutionInMP: MAX_IMAGE_PIXELS / 1_000_000,
+        maxMemoryUsageInMB: 64,
+      });
+    if (!decoded.width || !decoded.height || decoded.width > MAX_IMAGE_DIMENSION || decoded.height > MAX_IMAGE_DIMENSION
+      || decoded.width * decoded.height > MAX_IMAGE_PIXELS || decoded.data.byteLength !== decoded.width * decoded.height * 4) {
+      fail('image_decode_bounds_failed', 'Decoded image dimensions or pixel data are invalid.');
+    }
+  } catch (error) {
+    if (error instanceof AttachmentTransferError) throw error;
+    fail('image_decode_failed', 'Image bytes cannot be decoded safely.');
+  }
 };
 
 const timeoutSignal = (timeoutMs: number): { signal: AbortSignal; cleanup(): void } => {
@@ -649,7 +682,7 @@ const validateRetention = (value: string | undefined): string | null => {
 
 export class PrivateDriveAirtableAttachmentAdapter {
   private readonly allowedTargets = new Map<string, AttachmentTarget>();
-  private readonly inFlight = new Map<string, Promise<TransferReceipt>>();
+  private readonly inFlight = new Map<string, { retainUntil: string | null; operation: Promise<TransferReceipt> }>();
   private readonly now: () => Date;
 
   constructor(private readonly config: {
@@ -687,13 +720,16 @@ export class PrivateDriveAirtableAttachmentAdapter {
       fieldId: input.target.fieldId,
     });
     const active = this.inFlight.get(idempotencyKey);
-    if (active) return active;
+    if (active) {
+      if (active.retainUntil !== retainUntil) fail('retention_conflict', 'Concurrent replay has conflicting retention metadata.');
+      return active.operation;
+    }
     const operation = this.executeOnce({
       ...input, target: allowed as AttachmentTarget, retainUntil, idempotencyKey,
     }).finally(() => {
-      if (this.inFlight.get(idempotencyKey) === operation) this.inFlight.delete(idempotencyKey);
+      if (this.inFlight.get(idempotencyKey)?.operation === operation) this.inFlight.delete(idempotencyKey);
     });
-    this.inFlight.set(idempotencyKey, operation);
+    this.inFlight.set(idempotencyKey, { retainUntil, operation });
     return operation;
   }
 
@@ -723,17 +759,39 @@ export class PrivateDriveAirtableAttachmentAdapter {
     if (existing.length === 1) {
       await this.verifyReadback(existing[0], source);
       lifecycle.push('verified', 'processed');
-      return this.receipt('deduped', input, source, existing[0], beforeAttachmentIds, lifecycle);
+      return this.receipt('deduped', 'preexisting', input, source, existing[0], beforeAttachmentIds, lifecycle);
     }
 
     try {
       await this.config.airtable.uploadRaw({ target: input.target, filename, bytes: source.bytes, mimeType: source.mimeType });
       lifecycle.push('uploaded');
     } catch (error) {
-      const reconciled = await this.reconcile(filename, input.target, source);
+      let reconciled: AttachmentDescriptor | null = null;
+      try {
+        const attachments = await this.config.airtable.list(input.target);
+        const matches = attachments.filter(attachment => attachment.filename === filename);
+        if (matches.length > 1) fail('duplicate_idempotency_identity', 'Ambiguous Airtable write produced duplicate attachment identities.');
+        if (matches.length === 1) {
+          reconciled = matches[0];
+          try {
+            await this.verifyReadback(reconciled, source);
+          } catch (readbackError) {
+            throw this.createdAttachmentFailure(readbackError, input, reconciled, beforeAttachmentIds, lifecycle);
+          }
+        }
+      } catch (reconcileError) {
+        if (reconcileError instanceof AttachmentTransferError
+          && reconcileError.audit.mutation === 'attachment_created') throw reconcileError;
+        const message = reconcileError instanceof Error ? reconcileError.message : 'Airtable upload reconciliation failed.';
+        throw new AttachmentTransferError(message, {
+          contract: 'private-drive-airtable-attachment-v1', state: 'error', code: 'airtable_upload_reconcile_failed',
+          mutation: 'ambiguous', idempotencyKey: input.idempotencyKey, target: input.target,
+          beforeAttachmentIds, sourceDisposition: 'retained_private', rollback: 'manual_review', lifecycle: [...lifecycle],
+        });
+      }
       if (reconciled) {
         lifecycle.push('uploaded', 'verified', 'processed');
-        return this.receipt('deduped', input, source, reconciled, beforeAttachmentIds, lifecycle);
+        return this.receipt('created', 'ambiguous_reconciled', input, source, reconciled, beforeAttachmentIds, lifecycle);
       }
       if (error instanceof AttachmentTransferError) {
         throw new AttachmentTransferError(error.message, {
@@ -750,8 +808,18 @@ export class PrivateDriveAirtableAttachmentAdapter {
       });
     }
 
-    const after = await this.config.airtable.list(input.target);
-    const matches = after.filter(attachment => attachment.filename === filename);
+    let matches: AttachmentDescriptor[];
+    try {
+      const after = await this.config.airtable.list(input.target);
+      matches = after.filter(attachment => attachment.filename === filename);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Airtable post-upload read failed.';
+      throw new AttachmentTransferError(message, {
+        contract: 'private-drive-airtable-attachment-v1', state: 'error', code: 'airtable_post_upload_read_ambiguous',
+        mutation: 'ambiguous', idempotencyKey: input.idempotencyKey, target: input.target,
+        beforeAttachmentIds, sourceDisposition: 'retained_private', rollback: 'manual_review', lifecycle: [...lifecycle],
+      });
+    }
     if (matches.length !== 1 || beforeAttachmentIds.includes(matches[0]?.id || '')) {
       fail('airtable_upload_identity_mismatch', 'Airtable did not return one new deterministic attachment.', {
         mutation: 'ambiguous', rollback: 'manual_review', idempotencyKey: input.idempotencyKey,
@@ -762,29 +830,28 @@ export class PrivateDriveAirtableAttachmentAdapter {
     try {
       await this.verifyReadback(created, source);
     } catch (error) {
-      const message = error instanceof Error ? error.message : 'Airtable attachment readback verification failed.';
-      throw new AttachmentTransferError(message, {
-        contract: 'private-drive-airtable-attachment-v1', state: 'error',
-        code: error instanceof AttachmentTransferError ? error.audit.code : 'readback_integrity_failed',
-        mutation: 'attachment_created', idempotencyKey: input.idempotencyKey, target: input.target,
-        createdAttachmentId: created.id, createdAttachmentFilename: created.filename,
-        expectedSha256: source.sha256, beforeAttachmentIds, sourceDisposition: 'retained_private',
-        rollback: 'eligible_after_reread', lifecycle: [...lifecycle],
-      });
+      throw this.createdAttachmentFailure(error, input, created, beforeAttachmentIds, lifecycle);
     }
     lifecycle.push('verified', 'processed');
-    return this.receipt('created', input, source, created, beforeAttachmentIds, lifecycle);
+    return this.receipt('created', 'confirmed', input, source, created, beforeAttachmentIds, lifecycle);
   }
 
-  private async reconcile(filename: string, target: AttachmentTarget, source: PrivateDriveFile): Promise<AttachmentDescriptor | null> {
-    const attachments = await this.config.airtable.list(target);
-    const matches = attachments.filter(attachment => attachment.filename === filename);
-    if (matches.length > 1) fail('duplicate_idempotency_identity', 'Ambiguous Airtable write produced duplicate attachment identities.', {
-      mutation: 'ambiguous', rollback: 'manual_review', target,
+  private createdAttachmentFailure(
+    error: unknown,
+    input: { idempotencyKey: string; target: AttachmentTarget },
+    created: AttachmentDescriptor,
+    beforeAttachmentIds: string[],
+    lifecycle: TransferReceipt['lifecycle'],
+  ): AttachmentTransferError {
+    const message = error instanceof Error ? error.message : 'Airtable attachment readback verification failed.';
+    return new AttachmentTransferError(message, {
+      contract: 'private-drive-airtable-attachment-v1', state: 'error',
+      code: error instanceof AttachmentTransferError ? error.audit.code : 'readback_integrity_failed',
+      mutation: 'attachment_created', idempotencyKey: input.idempotencyKey, target: input.target,
+      createdAttachmentId: created.id, createdAttachmentFilename: created.filename,
+      beforeAttachmentIds, sourceDisposition: 'retained_private', rollback: 'eligible_after_reread',
+      lifecycle: [...lifecycle],
     });
-    if (matches.length === 0) return null;
-    await this.verifyReadback(matches[0], source);
-    return matches[0];
   }
 
   private async verifyReadback(attachment: AttachmentDescriptor, source: PrivateDriveFile): Promise<void> {
@@ -800,6 +867,7 @@ export class PrivateDriveAirtableAttachmentAdapter {
 
   private receipt(
     outcome: 'created' | 'deduped',
+    writeResolution: TransferReceipt['writeResolution'],
     input: { fileId: string; target: AttachmentTarget; retainUntil: string | null; idempotencyKey: string },
     source: PrivateDriveFile,
     attachment: AttachmentDescriptor,
@@ -807,7 +875,7 @@ export class PrivateDriveAirtableAttachmentAdapter {
     lifecycle: TransferReceipt['lifecycle'],
   ): TransferReceipt {
     return {
-      contract: 'private-drive-airtable-attachment-v1', state: 'processed', outcome,
+      contract: 'private-drive-airtable-attachment-v1', state: 'processed', outcome, writeResolution,
       idempotencyKey: input.idempotencyKey,
       source: { fileId: source.fileId, sha256: source.sha256, mimeType: source.mimeType, size: source.size },
       target: { ...input.target },
