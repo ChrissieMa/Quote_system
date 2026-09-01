@@ -124,13 +124,6 @@ const normalizedOrderStatus = (fields: OwnerFinanceFields): string =>
 export const isCancelledOrder = (fields: OwnerFinanceFields): boolean =>
   /^(?:cancelled|canceled|void|refunded|取消|已取消|作廢)$/.test(normalizedOrderStatus(fields));
 
-export const hasOrderPaymentEvidence = (fields: OwnerFinanceFields): boolean => {
-  const attachments = fields['Payment Evidence'];
-  const hasAttachment = Array.isArray(attachments) && attachments.length > 0;
-  const receiptNumber = String(fields['Receipt Number'] || fields['Receipt No'] || '').trim();
-  return hasAttachment || Boolean(receiptNumber);
-};
-
 export const hasIssuedReceipt = (fields: OwnerFinanceFields): boolean =>
   Boolean(String(fields['Receipt Number'] || fields['Receipt No'] || '').trim())
   || Boolean(String(fields['Receipt Public Token'] || '').trim());
@@ -151,12 +144,11 @@ export const getOrderAmountReceived = (fields: OwnerFinanceFields): number => {
     return Number.isFinite(amount) && amount > 0 ? amount : 0;
   }
 
-  // Safe legacy bridge: historic fully-paid Orders can use Final Amount only
-  // when all three independent payment signals exist. An Invoice or a generic
-  // attachment alone is never payment evidence.
+  // Safe legacy bridge: historic Orders explicitly marked Paid with a Pay Date
+  // use their full total. A payment image is never a condition for paid status.
   const paid = ['paid', '已付款'].includes(normalizedOrderStatus(fields));
   const payDate = String(fields['Pay Date'] || '').trim();
-  return paid && payDate && hasOrderPaymentEvidence(fields)
+  return paid && payDate
     ? numberField(fields, 'Final Amount')
     : 0;
 };

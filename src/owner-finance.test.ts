@@ -375,7 +375,7 @@ test('supplier coverage reports entered records separately from pending records'
   });
 });
 
-test('only explicit actual receipts or fully evidenced legacy payments count as revenue', () => {
+test('Receipts and paid legacy Orders count without any payment image dependency', () => {
   assert.equal(getOrderAmountReceived({
     Status: 'Unpaid', 'Final Amount': 8873.177229,
   }), 0);
@@ -397,7 +397,7 @@ test('only explicit actual receipts or fully evidenced legacy payments count as 
   }), 3000, 'Receipt full total outranks an old manual partial amount');
   assert.equal(getOrderAmountReceived({
     Status: 'Paid', 'Final Amount': 3000, 'Pay Date': '2026-08-31', Attachments: [{ id: 'invoice' }],
-  }), 0, 'generic invoice attachments are not payment evidence');
+  }), 3000, 'Paid status plus Pay Date is enough; images are never required');
   assert.equal(getOrderAmountReceived({
     Status: 'Cancelled', 'Final Amount': 3000, 'Amount Received HKD': 3000,
   }), 0);
