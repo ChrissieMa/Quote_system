@@ -66,12 +66,15 @@ import {
 import {
   createImmutableItemId,
   ensureImmutableItemIds,
+  InMemoryQuotationImageRecoveryClaims,
   isImmutableItemId,
   linkQuoteItemsToOrderItemRecords,
   overlayConfirmedOrderItemsByIdentity,
   prepareNewQuoteItemsForQuotationImageJobs,
+  prepareRetryableQuotationImageJobs,
   QuotationImageCoordinator,
   quotationImageEnabled,
+  quotationImageIdempotencyKey,
   quotationImageRuntime,
   resolveQuotationImagePresentations,
   quotationImageDisclaimer,
@@ -92,6 +95,12 @@ import {
   normalizeQuotationImageRendererUrl,
   quotationImageBridgeCsp,
 } from './browser-quotation-image';
+import {
+  QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH,
+  QUOTATION_IMAGE_READY_HANDSHAKE_PATH,
+  QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL,
+  QuotationImageReadyHandshakeFixture,
+} from './test-only/quotation-image-ready-handshake';
 import {
   AirtableQuotationImageMetadataWriter,
   InProcessQuoteItemsLock,
@@ -171,6 +180,7 @@ const maintenanceDeleteInFlight = new Map<string, Promise<Record<string, unknown
 const maintenanceMutationPlans = new Map<string, ProductionMutationPlan>();
 const maintenanceMutationCompleted = new Map<string, Record<string, unknown>>();
 const maintenanceMutationInFlight = new Map<string, Promise<Record<string, unknown>>>();
+const quotationImageReadyHandshakeFixture = new QuotationImageReadyHandshakeFixture();
 
 if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER) {
   installGoogleDriveQuotationImageProvider(
@@ -636,13 +646,127 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
   return next();
 };
 
+app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin, (_req: Request, res: Response) => {
+  quotationImageReadyHandshakeFixture.begin();
+  res.setHeader(
+    'Content-Security-Policy',
+    quotationImageBridgeCsp(QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL),
+  );
+  return res.type('html').send(quotationImageReadyHandshakeFixture.html());
+});
+
+app.get(
+  `${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/next`,
+  requireAdmin,
+  requireSameOrigin,
+  (_req: Request, res: Response) => {
+    const job = quotationImageReadyHandshakeFixture.takeNext();
+    return job ? res.json(job) : res.status(204).end();
+  },
+);
+
+app.get(
+  `${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/status/:requestId`,
+  requireAdmin,
+  requireSameOrigin,
+  (req: Request, res: Response) => {
+    const status = quotationImageReadyHandshakeFixture.status(String(req.params.requestId || ''));
+    return status ? res.json(status) : res.status(404).json({ state: 'unknown' });
+  },
+);
+
+app.post(
+  `${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/complete/:requestId`,
+  requireAdmin,
+  requireSameOrigin,
+  express.raw({ type: 'application/octet-stream', limit: '8mb' }),
+  (req: Request, res: Response) => {
+    try {
+      const accepted = quotationImageReadyHandshakeFixture.complete({
+        requestId: String(req.params.requestId || ''),
+        contract: String(req.get('X-LKS-Contract') || ''),
+        mimeType: String(req.get('X-LKS-Mime-Type') || ''),
+        width: Number(req.get('X-LKS-Width')),
+        height: Number(req.get('X-LKS-Height')),
+        requestIdentity: String(req.get('X-LKS-Request-Identity') || ''),
+        bytes: Buffer.isBuffer(req.body) ? req.body : Buffer.alloc(0),
+      });
+      return res.status(accepted ? 202 : 200).json({ state: accepted ? 'processing' : 'duplicate' });
+    } catch {
+      console.warn('Quotation-image TEST handshake completion rejected.');
+      return res.status(400).type('text/plain').send('TEST artifact rejected.');
+    }
+  },
+);
+
+app.post(
+  `${QUOTATION_IMAGE_READY_HANDSHAKE_BRIDGE_PATH}/fail`,
+  requireAdmin,
+  requireSameOrigin,
+  (req: Request, res: Response) => {
+    quotationImageReadyHandshakeFixture.fail(
+      String(req.body?.request_id || ''),
+      String(req.body?.error_code || 'quotation-image-test-transport-render-failed'),
+    );
+    return res.status(204).end();
+  },
+);
+
+app.get(
+  `${QUOTATION_IMAGE_READY_HANDSHAKE_PATH}/evidence`,
+  requireAdmin,
+  (_req: Request, res: Response) => res.json(quotationImageReadyHandshakeFixture.evidence()),
+);
+
 if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
   app.get('/quotation-image/browser-bridge', requireAdmin, (_req: Request, res: Response) => {
     res.setHeader('Content-Security-Policy', quotationImageBridgeCsp(QUOTATION_IMAGE_RENDERER_URL));
     res.type('html').send(browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL));
   });
-  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, (_req: Request, res: Response) => {
-    const job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+  const recoveryClaims = new InMemoryQuotationImageRecoveryClaims();
+  let recoveryScanInFlight: Promise<number> | null = null;
+  const scheduleLatestRetryableQuotationImage = async (): Promise<number> => {
+    if (recoveryScanInFlight) return recoveryScanInFlight;
+    recoveryScanInFlight = (async () => {
+      const latest = await tableQuotes.select({
+        fields: ['Quote Items JSON', 'Created At'],
+        sort: [{ field: 'Created At', direction: 'desc' }],
+        maxRecords: 1,
+      }).firstPage();
+      if (!latest.length) return 0;
+      const jobs = prepareRetryableQuotationImageJobs(
+        parseQuoteItems(latest[0].fields['Quote Items JSON']),
+        { enabled: QUOTATION_IMAGE_ENABLED, runtime: quotationImageRuntime },
+      );
+      let accepted = 0;
+      for (const job of jobs) {
+        const key = `${latest[0].id}:${job.itemId}:${quotationImageIdempotencyKey(job.itemId, job.request)}`;
+        const claim = recoveryClaims.tryAcquire(key);
+        if (!claim) continue;
+        accepted += 1;
+        scheduleQuotationImageJobsAfterWrite(
+          [job],
+          latest[0].id,
+          quotationImageRuntime,
+          { onSettled: () => { recoveryClaims.release(claim); } },
+        );
+      }
+      return accepted;
+    })().catch(error => {
+      logSafeError('Quotation-image recovery scan failed.', error);
+      return 0;
+    }).finally(() => {
+      recoveryScanInFlight = null;
+    });
+    return recoveryScanInFlight;
+  };
+
+  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
+    let job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+    if (!job && req.query.recover_latest === '1') {
+      await scheduleLatestRetryableQuotationImage();
+      job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+    }
     return job ? res.json(job) : res.status(204).end();
   });
   app.get('/quotation-image/browser-bridge/status/:requestId', requireAdmin, requireSameOrigin, (req: Request, res: Response) => {
