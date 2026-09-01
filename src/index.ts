@@ -66,12 +66,15 @@ import {
 import {
   createImmutableItemId,
   ensureImmutableItemIds,
+  InMemoryQuotationImageRecoveryClaims,
   isImmutableItemId,
   linkQuoteItemsToOrderItemRecords,
   overlayConfirmedOrderItemsByIdentity,
   prepareNewQuoteItemsForQuotationImageJobs,
+  prepareRetryableQuotationImageJobs,
   QuotationImageCoordinator,
   quotationImageEnabled,
+  quotationImageIdempotencyKey,
   quotationImageRuntime,
   resolveQuotationImagePresentations,
   quotationImageDisclaimer,
@@ -641,8 +644,50 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
     res.setHeader('Content-Security-Policy', quotationImageBridgeCsp(QUOTATION_IMAGE_RENDERER_URL));
     res.type('html').send(browserQuotationImageClientHtml(QUOTATION_IMAGE_RENDERER_URL));
   });
-  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, (_req: Request, res: Response) => {
-    const job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+  const recoveryClaims = new InMemoryQuotationImageRecoveryClaims();
+  let recoveryScanInFlight: Promise<number> | null = null;
+  const scheduleLatestRetryableQuotationImage = async (): Promise<number> => {
+    if (recoveryScanInFlight) return recoveryScanInFlight;
+    recoveryScanInFlight = (async () => {
+      const latest = await tableQuotes.select({
+        fields: ['Quote Items JSON', 'Created At'],
+        sort: [{ field: 'Created At', direction: 'desc' }],
+        maxRecords: 1,
+      }).firstPage();
+      if (!latest.length) return 0;
+      const jobs = prepareRetryableQuotationImageJobs(
+        parseQuoteItems(latest[0].fields['Quote Items JSON']),
+        { enabled: QUOTATION_IMAGE_ENABLED, runtime: quotationImageRuntime },
+      );
+      let accepted = 0;
+      for (const job of jobs) {
+        const key = `${latest[0].id}:${job.itemId}:${quotationImageIdempotencyKey(job.itemId, job.request)}`;
+        const claim = recoveryClaims.tryAcquire(key);
+        if (!claim) continue;
+        accepted += 1;
+        scheduleQuotationImageJobsAfterWrite(
+          [job],
+          latest[0].id,
+          quotationImageRuntime,
+          { onSettled: () => { recoveryClaims.release(claim); } },
+        );
+      }
+      return accepted;
+    })().catch(error => {
+      logSafeError('Quotation-image recovery scan failed.', error);
+      return 0;
+    }).finally(() => {
+      recoveryScanInFlight = null;
+    });
+    return recoveryScanInFlight;
+  };
+
+  app.get('/quotation-image/browser-bridge/next', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
+    let job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+    if (!job && req.query.recover_latest === '1') {
+      await scheduleLatestRetryableQuotationImage();
+      job = BROWSER_QUOTATION_IMAGE_BRIDGE.takeNext();
+    }
     return job ? res.json(job) : res.status(204).end();
   });
   app.get('/quotation-image/browser-bridge/status/:requestId', requireAdmin, requireSameOrigin, (req: Request, res: Response) => {
