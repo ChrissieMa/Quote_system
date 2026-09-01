@@ -1,6 +1,7 @@
 import crypto from 'crypto';
 import jpeg from 'jpeg-js';
 import { PNG } from 'pngjs';
+import { inflateSync } from 'zlib';
 import type { GoogleDriveAccessTokenProvider } from './google-drive-quotation-image';
 
 const GOOGLE_DRIVE_ORIGIN = 'https://www.googleapis.com';
@@ -209,6 +210,12 @@ const assertPng = (bytes: Uint8Array): void => {
   let ihdr = 0;
   let idat = 0;
   let iend = 0;
+  let width = 0;
+  let height = 0;
+  let bitDepth = 0;
+  let colorType = 0;
+  let idatClosed = false;
+  const idatPayloads: Buffer[] = [];
   while (offset < png.length) {
     if (offset + 12 > png.length) fail('truncated_png', 'PNG chunk is truncated.');
     const length = png.readUInt32BE(offset);
@@ -225,21 +232,22 @@ const assertPng = (bytes: Uint8Array): void => {
     if (type === 'IHDR') {
       ihdr += 1;
       if (chunks !== 1 || ihdr !== 1 || length !== 13) fail('invalid_png', 'PNG IHDR is invalid.');
-      const width = png.readUInt32BE(dataStart);
-      const height = png.readUInt32BE(dataStart + 4);
-      const bitDepth = png[dataStart + 8];
-      const colorType = png[dataStart + 9];
+      width = png.readUInt32BE(dataStart);
+      height = png.readUInt32BE(dataStart + 4);
+      bitDepth = png[dataStart + 8];
+      colorType = png[dataStart + 9];
       const validDepths: Record<number, number[]> = {
         0: [1, 2, 4, 8, 16], 2: [8, 16], 3: [1, 2, 4, 8], 4: [8, 16], 6: [8, 16],
       };
       if (!width || !height || width > MAX_IMAGE_DIMENSION || height > MAX_IMAGE_DIMENSION
         || width * height > MAX_IMAGE_PIXELS || !validDepths[colorType]?.includes(bitDepth)
-        || png[dataStart + 10] !== 0 || png[dataStart + 11] !== 0 || png[dataStart + 12] > 1) {
+        || png[dataStart + 10] !== 0 || png[dataStart + 11] !== 0 || png[dataStart + 12] !== 0) {
         fail('invalid_png', 'PNG IHDR values are invalid.');
       }
     } else if (type === 'IDAT') {
-      if (ihdr !== 1 || iend) fail('invalid_png', 'PNG IDAT order is invalid.');
+      if (ihdr !== 1 || iend || idatClosed) fail('invalid_png', 'PNG IDAT order is invalid.');
       idat += 1;
+      idatPayloads.push(png.subarray(dataStart, dataEnd));
     } else if (type === 'IEND') {
       iend += 1;
       if (length !== 0 || iend !== 1 || idat < 1 || dataEnd + 4 !== png.length) {
@@ -247,11 +255,26 @@ const assertPng = (bytes: Uint8Array): void => {
       }
     } else if (iend) {
       fail('invalid_png', 'PNG contains data after IEND.');
+    } else if (idat > 0) {
+      idatClosed = true;
     }
     offset = dataEnd + 4;
   }
   if (ihdr !== 1 || idat < 1 || iend !== 1 || offset !== png.length) {
     fail('invalid_png', 'PNG is incomplete.');
+  }
+  const channelsByColorType: Record<number, number> = { 0: 1, 2: 3, 3: 1, 4: 2, 6: 4 };
+  const rowBytes = Math.ceil((width * channelsByColorType[colorType] * bitDepth) / 8);
+  const expectedInflatedBytes = height * (rowBytes + 1);
+  let inflated: Buffer;
+  try {
+    inflated = inflateSync(Buffer.concat(idatPayloads), { maxOutputLength: expectedInflatedBytes + 1 });
+  } catch {
+    return fail('invalid_png_data', 'PNG compressed pixel data is invalid.');
+  }
+  if (inflated.length !== expectedInflatedBytes) fail('invalid_png_data', 'PNG scanline data length is invalid.');
+  for (let row = 0; row < height; row += 1) {
+    if (inflated[row * (rowBytes + 1)] > 4) fail('invalid_png_data', 'PNG scanline filter is invalid.');
   }
 };
 

@@ -14,12 +14,12 @@ export const ALTERNATE_SAFE_PNG = Buffer.from(
 );
 export const ALTERNATE_SAFE_PNG_SHA256 = '3c96bd9156d0499f256e3f2b101d4765691666a2b4ad4f0bcfc684900c4f9897';
 
-// Fixed invalid zlib/IDAT bytes with a deliberately valid PNG chunk CRC.
+// Valid zlib stream and PNG chunk CRC, but it inflates to zero scanlines.
 export const CORRUPT_IDAT_PNG = Buffer.from(
-  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQAAAAAAAAAAAAAAAAAQvdO+gAAAABJRU5ErkJggg==',
+  'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACElEQVR4nAMAAAAAAUgGidIAAAAASUVORK5CYII=',
   'base64',
 );
-export const CORRUPT_IDAT_PNG_SHA256 = '4b99f23aeeb5ff8a1eb717ef3de41d7fef60f55d4802536c2ffbf63c03459768';
+export const CORRUPT_IDAT_PNG_SHA256 = 'e94bd68580b034f70df40abf099d81c4bf4fdee52d0005fe8a49da175c8f9dbc';
 
 // Fixed 9,000 x 1 IHDR with a valid CRC; exceeds the adapter dimension cap.
 export const OVERSIZED_DIMENSION_PNG = Buffer.from(

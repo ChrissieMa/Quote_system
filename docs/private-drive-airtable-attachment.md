@@ -12,7 +12,7 @@ The adapter never creates or deletes a Drive file, changes Drive permissions, ma
 2. Verify the Airtable PAT user, exact table, `multipleAttachments` field, and exact record identity using read-only API calls.
 3. Verify the Google OAuth owner and requested file metadata. The file must be owner-only/private, untrashed, in one allowlisted staging folder, within 5 MB, and declared as PNG or JPEG.
 4. Download bytes only through authenticated `GET /drive/v3/files/{fileId}?alt=media`. View, export, web-content, public-share, and permission endpoints are not used.
-5. Check declared size, response length, MIME, complete PNG/JPEG structure, and the SHA-256 of every byte. The computed digest must equal the caller's full expected SHA-256 and, when supplied, Drive's SHA-256 metadata.
+5. Check declared size, response length, MIME, complete PNG/JPEG structure, bounded dimensions/pixel count, a full image decode, and the SHA-256 of every byte. PNG IDAT is independently inflated and checked for the exact scanline length before the bounded decoder runs. The computed digest must equal the caller's full expected SHA-256 and, when supplied, Drive's SHA-256 metadata.
 6. Derive `sha256:<digest>` from versioned canonical JSON containing `file_id`, full file SHA-256, `record_id`, and `field_id`. Base/table are already isolated by the exact target namespace. The deterministic Airtable filename contains only this digest and an allowlisted extension, never source filenames or PII.
 7. Reconcile that filename before upload. One attachment is downloaded and verified as `deduped`; more than one, or any content mismatch, fails closed.
 8. Upload raw bytes directly with Airtable's attachment upload API as base64 (`content.airtable.com/.../uploadAttachment`). No Drive/public URL is passed to Airtable. The append write is issued once and is never blindly retried.
@@ -24,7 +24,8 @@ The direct upload request follows Airtable's [Upload attachment API](https://air
 
 - Google and Airtable reads can retry bounded transient failures.
 - Airtable attachment POST never retries automatically because a lost response can hide a successful append.
-- An ambiguous POST is reconciled by deterministic filename plus a fresh, full-byte readback. Zero matches stays `ambiguous/manual_review`; one verified match is `deduped`; multiple matches fail closed.
+- An ambiguous POST is reconciled by deterministic filename plus a fresh, full-byte readback. Zero matches stays `ambiguous/manual_review`; one verified new match is `created` with `writeResolution: ambiguous_reconciled`; multiple matches fail closed.
+- Once an upload may have happened, later record/readback failures preserve `ambiguous/manual_review` or exact `attachment_created/eligible_after_reread` evidence; they are never downgraded to a zero-mutation error.
 - Every identity, schema, MIME, size, image-structure, or SHA mismatch fails before `processed`.
 - Errors contain only stable codes, IDs already supplied by the caller, and lifecycle state. Tokens, file bytes, source filenames, attachment URLs, and response bodies are excluded.
 

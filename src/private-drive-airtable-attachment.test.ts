@@ -124,10 +124,12 @@ test('strict image validation rejects truncation, trailing data, forged CRC, and
 });
 
 test('full decode rejects corrupt IDAT with a valid CRC and oversized declared dimensions', () => {
-  assert.equal(CORRUPT_IDAT_PNG.length, 70);
+  assert.equal(CORRUPT_IDAT_PNG.length, 65);
   assert.equal(fullSha256(CORRUPT_IDAT_PNG), CORRUPT_IDAT_PNG_SHA256);
-  assert.throws(() => assertSafeImage(CORRUPT_IDAT_PNG, 'image/png'),
-    (error: AttachmentTransferError) => error.audit.code === 'image_decode_failed');
+  for (let attempt = 0; attempt < 25; attempt += 1) {
+    assert.throws(() => assertSafeImage(CORRUPT_IDAT_PNG, 'image/png'),
+      (error: AttachmentTransferError) => error.audit.code === 'invalid_png_data');
+  }
 
   assert.throws(() => assertSafeImage(OVERSIZED_DIMENSION_PNG, 'image/png'),
     (error: AttachmentTransferError) => error.audit.code === 'invalid_png');
