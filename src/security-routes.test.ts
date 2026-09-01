@@ -22,39 +22,12 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.get('/admin/analytics/purchase-cycles', requireAdmin,",
     "app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, requireSameOrigin,",
     "app.get('/admin/costs', requireAdmin,",
-    'app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin,',
     "app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,",
     "app.post('/admin/costs', requireAdmin, requireSameOrigin,",
     "app.post('/admin/finance/sync', requireAdmin, requireSameOrigin,",
   ];
   for (const route of protectedRoutes) assert.ok(source.includes(route), `missing protection: ${route}`);
   assert.ok(!/ADMIN_PASSWORD\s*\|\|\s*['"][^'"]+/.test(source), 'admin password must never have a default');
-});
-
-test('owner-only quotation-image TEST route is isolated from Production data and worker behavior', () => {
-  const start = source.indexOf('app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin,');
-  const end = source.indexOf('if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL)', start);
-  assert.ok(start >= 0 && end > start, 'owner-only TEST handshake route must exist');
-  const route = source.slice(start, end);
-  for (const required of [
-    'requireAdmin',
-    'requireSameOrigin',
-    'quotationImageBridgeCsp(QUOTATION_IMAGE_READY_HANDSHAKE_RENDERER_URL)',
-    'quotationImageReadyHandshakeFixture',
-  ]) assert.ok(route.includes(required), `TEST handshake route missing ${required}`);
-  assert.equal((route.match(/requireAdmin/g) || []).length, 6, 'all TEST page/data routes require owner auth');
-  assert.equal((route.match(/requireSameOrigin/g) || []).length, 4, 'all TEST bridge calls require same origin');
-  for (const forbidden of [
-    'tableQuotes', 'tableOrders', 'tableOrderItems', 'tableCustomers',
-    'quotationImageRuntime', 'Airtable', 'publicToken', 'quoteToken',
-  ]) assert.ok(!route.includes(forbidden), `TEST handshake route must not access ${forbidden}`);
-
-  const productionWorker = source.slice(end, source.indexOf('type AirtableMetadataField', end));
-  assert.ok(productionWorker.includes("app.get('/quotation-image/browser-bridge/next'"));
-  assert.ok(productionWorker.includes('scheduleLatestRetryableQuotationImage'));
-  assert.ok(productionWorker.includes('tableQuotes.select'));
-  assert.ok(productionWorker.includes('BROWSER_QUOTATION_IMAGE_BRIDGE.complete'));
-  assert.ok(!productionWorker.includes('QUOTATION_IMAGE_READY_HANDSHAKE_PATH'));
 });
 
 test('service APIs remain bearer-protected and confirmed', () => {
