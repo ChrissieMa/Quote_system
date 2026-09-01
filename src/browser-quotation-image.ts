@@ -242,6 +242,7 @@ let rendererReady = false;
 let activeJob = null;
 let pollTimer = null;
 let responseTimer = null;
+let recoverLatest = true;
 const rendererReadinessGraceMs = 1000;
 const rendererResponseTimeoutMs = 6000;
 const schedulePoll = (delay = 300) => { clearTimeout(pollTimer); pollTimer = setTimeout(poll, delay); };
@@ -263,7 +264,9 @@ const waitForPersistence = async requestId => {
 const poll = async () => {
   if (!rendererReady || activeJob) return schedulePoll();
   try {
-    const response = await fetch('/quotation-image/browser-bridge/next', { cache: 'no-store' });
+    const recoveryQuery = recoverLatest ? '?recover_latest=1' : '';
+    recoverLatest = false;
+    const response = await fetch('/quotation-image/browser-bridge/next' + recoveryQuery, { cache: 'no-store' });
     if (response.status === 204) { status.textContent = '3D 圖片已處理完成'; return schedulePoll(1000); }
     if (!response.ok) throw new Error('bridge-next-failed');
     const job = await response.json();
