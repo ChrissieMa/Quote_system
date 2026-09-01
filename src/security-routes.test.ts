@@ -24,6 +24,7 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.get('/admin/costs', requireAdmin,",
     'app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin,',
     "app.get('/quotation-image/browser-bridge/preflight', requireAdmin,",
+    "app.get('/test-only/quotation-image-preflight', requireAdmin,",
     "app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,",
     "app.post('/admin/costs', requireAdmin, requireSameOrigin,",
     "app.post('/admin/finance/sync', requireAdmin, requireSameOrigin,",
@@ -59,14 +60,20 @@ test('owner-only quotation-image TEST route is isolated from Production data and
 });
 
 test('owner-only quotation-image preflight reports runtime aggregates without consuming or scheduling work', () => {
-  const start = source.indexOf("app.get('/quotation-image/browser-bridge/preflight', requireAdmin,");
+  const start = source.indexOf('const quotationImageBridgePreflight = () => ({');
   const end = source.indexOf('const scheduleLatestRetryableQuotationImage', start);
-  assert.ok(start >= 0 && end > start, 'owner-only browser bridge preflight route must exist');
+  assert.ok(start >= 0 && end > start, 'owner-only browser bridge preflight routes must exist');
   const route = source.slice(start, end);
   for (const required of [
     'pending_count: BROWSER_QUOTATION_IMAGE_BRIDGE.pendingCount',
     'recovery_in_flight: recoveryScanInFlight !== null',
     "measurement: 'runtime-memory-only'",
+    "app.get('/quotation-image/browser-bridge/preflight', requireAdmin,",
+    "app.get('/test-only/quotation-image-preflight', requireAdmin,",
+    'res.json(quotationImageBridgePreflight())',
+    'pending_count=${snapshot.pending_count}',
+    'recovery_in_flight=${snapshot.recovery_in_flight}',
+    'measurement=${snapshot.measurement}',
   ]) assert.ok(route.includes(required), `browser bridge preflight missing ${required}`);
   for (const forbidden of [
     'tableQuotes', 'select(', 'takeNext(', 'scheduleLatestRetryableQuotationImage(',

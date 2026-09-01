@@ -744,12 +744,23 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
   });
   const recoveryClaims = new InMemoryQuotationImageRecoveryClaims();
   let recoveryScanInFlight: Promise<number> | null = null;
+  const quotationImageBridgePreflight = () => ({
+    pending_count: BROWSER_QUOTATION_IMAGE_BRIDGE.pendingCount,
+    recovery_in_flight: recoveryScanInFlight !== null,
+    measurement: 'runtime-memory-only' as const,
+  });
   app.get('/quotation-image/browser-bridge/preflight', requireAdmin, (_req: Request, res: Response) => {
-    return res.json({
-      pending_count: BROWSER_QUOTATION_IMAGE_BRIDGE.pendingCount,
-      recovery_in_flight: recoveryScanInFlight !== null,
-      measurement: 'runtime-memory-only',
-    });
+    return res.json(quotationImageBridgePreflight());
+  });
+  app.get('/test-only/quotation-image-preflight', requireAdmin, (_req: Request, res: Response) => {
+    const snapshot = quotationImageBridgePreflight();
+    return res.type('html').send(`<!doctype html>
+<meta charset="utf-8">
+<meta name="robots" content="noindex,nofollow">
+<title>Quotation image preflight</title>
+<pre id="quotation-image-preflight">pending_count=${snapshot.pending_count}
+recovery_in_flight=${snapshot.recovery_in_flight}
+measurement=${snapshot.measurement}</pre>`);
   });
   const scheduleLatestRetryableQuotationImage = async (): Promise<number> => {
     if (recoveryScanInFlight) return recoveryScanInFlight;
