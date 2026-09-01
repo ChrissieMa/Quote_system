@@ -744,6 +744,13 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
   });
   const recoveryClaims = new InMemoryQuotationImageRecoveryClaims();
   let recoveryScanInFlight: Promise<number> | null = null;
+  app.get('/quotation-image/browser-bridge/preflight', requireAdmin, (_req: Request, res: Response) => {
+    return res.json({
+      pending_count: BROWSER_QUOTATION_IMAGE_BRIDGE.pendingCount,
+      recovery_in_flight: recoveryScanInFlight !== null,
+      measurement: 'runtime-memory-only',
+    });
+  });
   const scheduleLatestRetryableQuotationImage = async (): Promise<number> => {
     if (recoveryScanInFlight) return recoveryScanInFlight;
     recoveryScanInFlight = (async () => {

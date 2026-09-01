@@ -23,6 +23,7 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, requireSameOrigin,",
     "app.get('/admin/costs', requireAdmin,",
     'app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin,',
+    "app.get('/quotation-image/browser-bridge/preflight', requireAdmin,",
     "app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,",
     "app.post('/admin/costs', requireAdmin, requireSameOrigin,",
     "app.post('/admin/finance/sync', requireAdmin, requireSameOrigin,",
@@ -55,6 +56,22 @@ test('owner-only quotation-image TEST route is isolated from Production data and
   assert.ok(productionWorker.includes('tableQuotes.select'));
   assert.ok(productionWorker.includes('BROWSER_QUOTATION_IMAGE_BRIDGE.complete'));
   assert.ok(!productionWorker.includes('QUOTATION_IMAGE_READY_HANDSHAKE_PATH'));
+});
+
+test('owner-only quotation-image preflight reports runtime aggregates without consuming or scheduling work', () => {
+  const start = source.indexOf("app.get('/quotation-image/browser-bridge/preflight', requireAdmin,");
+  const end = source.indexOf('const scheduleLatestRetryableQuotationImage', start);
+  assert.ok(start >= 0 && end > start, 'owner-only browser bridge preflight route must exist');
+  const route = source.slice(start, end);
+  for (const required of [
+    'pending_count: BROWSER_QUOTATION_IMAGE_BRIDGE.pendingCount',
+    'recovery_in_flight: recoveryScanInFlight !== null',
+    "measurement: 'runtime-memory-only'",
+  ]) assert.ok(route.includes(required), `browser bridge preflight missing ${required}`);
+  for (const forbidden of [
+    'tableQuotes', 'select(', 'takeNext(', 'scheduleLatestRetryableQuotationImage(',
+    'recover_latest', '.create(', '.update(', '.destroy(', 'app.post(',
+  ]) assert.ok(!route.includes(forbidden), `browser bridge preflight must not use ${forbidden}`);
 });
 
 test('service APIs remain bearer-protected and confirmed', () => {
