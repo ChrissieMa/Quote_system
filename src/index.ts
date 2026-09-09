@@ -1,7 +1,8 @@
-import express, { Request, Response } from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import Airtable, { FieldSet } from 'airtable';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
+import multer from 'multer';
 import {
   buildPilotPreview,
   calculatePilotItem,
@@ -119,6 +120,20 @@ import {
   validateAggregateDateRange,
 } from './purchase-cycle-aggregate';
 import {
+  detectExpenseReceiptFile,
+  expenseReceiptSha256,
+  EXPENSE_RECEIPT_FIELD,
+  EXPENSE_RECEIPT_MAX_BYTES,
+  EXPENSE_RECEIPT_SHA_FIELD,
+  EXPENSE_RECEIPT_UPLOAD_ID_FIELD,
+  RECEIPT_PAYMENT_METHODS,
+  safeExpenseReceiptFilename,
+  safeExpenseReceiptNote,
+  uploadExpenseReceiptToAirtable,
+  validateExpenseReceiptUploadId,
+  validateReceiptPaymentMethod,
+} from './expense-receipt-upload';
+import {
   calculateOwnerOrderCostBreakdown,
   calculateOwnerFinanceSummary,
   getOrderAmountReceived,
@@ -156,6 +171,22 @@ app.use((_req: Request, res: Response, next: () => void) => {
 });
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
+
+const expenseReceiptUploadParser = multer({
+  storage: multer.memoryStorage(),
+  limits: { files: 1, fileSize: EXPENSE_RECEIPT_MAX_BYTES },
+});
+
+const acceptExpenseReceiptUpload = (req: Request, res: Response, next: NextFunction): void => {
+  expenseReceiptUploadParser.single('receipt_file')(req, res, error => {
+    if (error) {
+      logSafeError('Expense receipt upload was rejected before processing.', error);
+      res.status(400).send(renderPage('Upload rejected', '<div class="alert alert-danger">單據未有上傳；只接受5MB或以下嘅圖片／PDF。</div><a href="/admin/dashboard" class="btn btn-secondary">返回</a>'));
+      return;
+    }
+    next();
+  });
+};
 
 const PORT = process.env.PORT || 3000;
 const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
@@ -836,6 +867,7 @@ if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL) {
 }
 
 type AirtableMetadataField = {
+  id?: string;
   name: string;
   type: string;
   options?: {
@@ -3238,6 +3270,9 @@ const SHARED_CSS = `
   .quote-card-title { font-size: 16px; font-weight: 700; }
   .quote-card-meta { font-size: 12px; color: #6b7280; margin-top: 2px; }
   .quote-card-actions { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 12px; padding-top: 10px; border-top: 1px solid #f3f4f6; }
+  .receipt-create-form { display: inline-flex; flex-wrap: wrap; gap: 6px; align-items: end; }
+  .receipt-payment-method span { display: block; font-size: 10px; font-weight: 700; color: #6b7280; margin-bottom: 2px; }
+  .receipt-payment-method select { min-width: 120px; padding: 5px 8px; border: 1.5px solid #d1d5db; border-radius: 5px; background: #fff; font: inherit; }
 
   /* ── Search / Filter Bar ── */
   .filter-bar { display: flex; gap: 10px; margin-bottom: 20px; flex-wrap: wrap; align-items: center; }
@@ -4265,9 +4300,13 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
           if (invoiceToken && !receiptIssued) {
             const paymentRequestId = `recv_${crypto.randomBytes(16).toString('hex')}`;
             actions += `
-              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" style="display:inline;" onsubmit="return confirm('建立收據並確認已全數收款？系統會以Invoice總額一次過記錄實收，毋須再輸入金額。')">
+              <form method="POST" action="/admin/invoice/${invoiceToken}/mark-paid" class="receipt-create-form" onsubmit="return confirm('建立收據並確認已全數收款？系統會以Invoice總額一次過記錄實收，毋須再輸入金額。')">
                 <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
                 <input type="hidden" name="payment_request_id" value="${paymentRequestId}">
+                <label class="receipt-payment-method"><span>付款方法</span><select name="payment_method" required>
+                  <option value="" selected disabled>請選擇</option>
+                  ${RECEIPT_PAYMENT_METHODS.map(method => `<option value="${escapeHtml(method)}">${escapeHtml(method)}</option>`).join('')}
+                </select></label>
                 <button type="submit" class="btn btn-primary btn-sm">建立收據＝確認全數收款</button>
               </form>`;
           }
@@ -6880,6 +6919,7 @@ const requireOrderPaymentSchema = async (): Promise<void> => {
     [ORDER_AMOUNT_RECEIVED_FIELD, 'currency'],
     [ORDER_OUTSTANDING_FIELD, 'formula'],
     [ORDER_PAYMENT_AUDIT_FIELD, 'multilineText'],
+    ['Payment Method', 'singleLineText'],
   ]);
   for (const [name, type] of expected) {
     const field = table.fields.find(candidate => candidate.name === name);
@@ -6892,11 +6932,33 @@ const requireOrderPaymentSchema = async (): Promise<void> => {
   }
 };
 
+type ExpenseReceiptSchema = { attachmentFieldId: string };
+const expenseReceiptUploadLock = new InProcessQuoteItemsLock();
+
+const requireExpenseReceiptSchema = async (): Promise<ExpenseReceiptSchema> => {
+  const tables = await getAirtableMetadataTables();
+  const table = findMetadataTable(tables, process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES, 'Business Expenses');
+  if (!table) throw new Error('expense-receipt-schema-missing-table');
+  const expected = new Map<string, string>([
+    [EXPENSE_RECEIPT_FIELD, 'multipleAttachments'],
+    [EXPENSE_RECEIPT_SHA_FIELD, 'singleLineText'],
+    [EXPENSE_RECEIPT_UPLOAD_ID_FIELD, 'singleLineText'],
+  ]);
+  for (const [name, type] of expected) {
+    const field = table.fields.find(candidate => candidate.name === name);
+    if (!field || field.type !== type) throw new Error(`expense-receipt-schema-invalid-${name}`);
+  }
+  const attachment = table.fields.find(candidate => candidate.name === EXPENSE_RECEIPT_FIELD)!;
+  if (!attachment.id && !LOCAL_QUOTE_FIXTURE) throw new Error('expense-receipt-schema-missing-field-id');
+  return { attachmentFieldId: attachment.id || 'fld_local_expense_receipt' };
+};
+
 app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
   try {
     if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
       return res.status(403).type('text/plain').send('Invalid form token.');
     }
+    const paymentMethod = validateReceiptPaymentMethod(req.body.payment_method);
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
@@ -6930,6 +6992,7 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
         [ORDER_AMOUNT_RECEIVED_FIELD]: plan.receivedCents / 100,
         [ORDER_PAYMENT_AUDIT_FIELD]: plan.log,
         'Pay Date': payDate,
+        'Payment Method': paymentMethod,
         'Status': 'Paid',
         'Receipt Number': receiptNumber,
         'Receipt Public Token': receiptToken,
@@ -6941,6 +7004,7 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
         toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== plan.receivedCents
         || String(verified.fields['Status'] || '') !== 'Paid'
         || String(verified.fields['Pay Date'] || '') !== payDate
+        || String(verified.fields['Payment Method'] || '') !== paymentMethod
         || String(verified.fields['Receipt Number'] || '') !== receiptNumber
         || String(verified.fields['Receipt Public Token'] || '') !== receiptToken
         || !paymentLogHasRequest(verified.fields[ORDER_PAYMENT_AUDIT_FIELD], paymentRequestId)
@@ -7316,6 +7380,14 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
   try {
     const selectedMonth = String(req.query.month || getHongKongMonth());
     monthBounds(selectedMonth);
+    const expenseReceiptState = String(req.query.expenseReceipt || '');
+    const expenseReceiptNotice = expenseReceiptState === 'saved'
+      ? '<div class="owner-ok">單據已安全存入Airtable待整理；金額暫為HK$0，未影響損益。</div>'
+      : expenseReceiptState === 'duplicate'
+        ? '<div class="owner-ok">同一張單據已存在，今次冇重複新增。</div>'
+        : expenseReceiptState === 'error'
+          ? '<div class="owner-alert">單據未有上傳，資料冇改動。請確認檔案係5MB或以下嘅圖片／PDF後再試。</div>'
+          : '';
 
     // Refresh Airtable's Monthly Finance row before presenting the live figures.
     await syncMonthlyFinance(selectedMonth);
@@ -7610,6 +7682,16 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       </div>
       <div class="owner-grid">
         <section class="owner-panel"><div class="owner-panel-head"><h2>每月固定及公司支出</h2><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+          ${expenseReceiptNotice}
+          <form class="owner-expense-upload" method="POST" action="/admin/expenses/receipts" enctype="multipart/form-data">
+            <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
+            <input type="hidden" name="month" value="${escapeHtml(selectedMonth)}">
+            <input type="hidden" name="upload_request_id" value="exp_${crypto.randomBytes(16).toString('hex')}">
+            <label><span>上傳支出單據（圖片／PDF，最多5MB）</span><input name="receipt_file" type="file" accept=".pdf,.png,.jpg,.jpeg,.heic,.heif,application/pdf,image/png,image/jpeg,image/heic,image/heif" required></label>
+            <label><span>備註（可留空）</span><input name="receipt_note" type="text" maxlength="300" placeholder="例如：文具／供應商單據"></label>
+            <button class="btn btn-primary" type="submit">上傳單據待整理</button>
+          </form>
+          <p class="owner-note">原檔直接存入Airtable。待核對金額及分類前會以HK$0標記，唔會計入損益；之後可按月份下載到桌面「稅務單據」。</p>
           ${missingExpenses.length ? `<div class="owner-alert">未見本月記錄：${missingExpenses.map(escapeHtml).join('、')}</div>` : '<div class="owner-ok">固定支出已按排程自動記錄，毋須逐張單據再入。</div>'}
           ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>日期</th><th>金額</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
           ${unallocatedMarketingRows ? `<h3 class="owner-subhead">Marketing待分配</h3><div class="owner-table-wrap"><table><thead><tr><th>項目</th><th>金額</th><th>狀態</th></tr></thead><tbody>${unallocatedMarketingRows}</tbody></table></div>` : ''}
@@ -7623,7 +7705,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     </div>`;
 
     const extraHead = `<style>
-      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-lines small{color:#64748b}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}.owner-cost-detail{border:1px solid #e5e0d8;border-radius:12px;margin-top:10px;overflow:hidden}.owner-cost-detail summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 15px;background:#f8f6f2;font-size:13px}.owner-cost-detail summary small{display:block;color:#64748b;margin-top:3px}.owner-cost-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#eeeae4;border-top:1px solid #e5e0d8}.owner-cost-grid>div{background:#fff;padding:12px}.owner-cost-grid span,.owner-cost-grid small{display:block;color:#64748b;font-size:11px}.owner-cost-grid strong{display:block;margin-top:5px}.owner-cost-profit{background:#fff7ed!important}.owner-cost-warning,.owner-cost-complete{padding:10px 13px;font-size:12px;font-weight:700}.owner-cost-warning{background:#fff1e7;color:#9a3412}.owner-cost-complete{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-cost-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-cost-detail summary{align-items:flex-start;flex-direction:column}.owner-cost-grid{grid-template-columns:1fr 1fr}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
+      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-lines small{color:#64748b}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}.owner-expense-upload{display:grid;grid-template-columns:1.25fr 1fr auto;gap:8px;align-items:end;padding:13px;border:1px solid #e5e0d8;border-radius:10px;background:#f8fafc;margin-bottom:8px}.owner-expense-upload label span{display:block;font-size:11px;font-weight:800;color:#64748b;margin-bottom:5px}.owner-expense-upload input{width:100%}.owner-cost-detail{border:1px solid #e5e0d8;border-radius:12px;margin-top:10px;overflow:hidden}.owner-cost-detail summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 15px;background:#f8f6f2;font-size:13px}.owner-cost-detail summary small{display:block;color:#64748b;margin-top:3px}.owner-cost-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#eeeae4;border-top:1px solid #e5e0d8}.owner-cost-grid>div{background:#fff;padding:12px}.owner-cost-grid span,.owner-cost-grid small{display:block;color:#64748b;font-size:11px}.owner-cost-grid strong{display:block;margin-top:5px}.owner-cost-profit{background:#fff7ed!important}.owner-cost-warning,.owner-cost-complete{padding:10px 13px;font-size:12px;font-weight:700}.owner-cost-warning{background:#fff1e7;color:#9a3412}.owner-cost-complete{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-cost-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}.owner-expense-upload{grid-template-columns:1fr}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-cost-detail summary{align-items:flex-start;flex-direction:column}.owner-cost-grid{grid-template-columns:1fr 1fr}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
     </style><script>
       function confirmDriverPayment(form) {
         var input = form.querySelector('input[name="payment_amount"]');
@@ -7653,6 +7735,114 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
   } catch (error: any) {
     console.error('Unable to render owner dashboard:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
+app.post('/admin/expenses/receipts', requireAdmin, requireSameOrigin, acceptExpenseReceiptUpload, async (req: Request, res: Response) => {
+  const selectedMonth = String(req.body.month || getHongKongMonth());
+  const redirect = (state: 'saved' | 'duplicate' | 'error') =>
+    res.redirect(303, `/admin/dashboard?month=${encodeURIComponent(selectedMonth)}&expenseReceipt=${state}`);
+  let createdRecordId = '';
+  try {
+    if (!safeEqual(String(req.body.csrf || ''), getOwnerFormToken())) {
+      return res.status(403).type('text/plain').send('Invalid form token.');
+    }
+    monthBounds(selectedMonth);
+    const uploadId = validateExpenseReceiptUploadId(req.body.upload_request_id);
+    const file = req.file;
+    if (!file?.buffer) throw new Error('expense-receipt-file-missing');
+    const detected = detectExpenseReceiptFile(file.buffer);
+    const digest = expenseReceiptSha256(file.buffer);
+    const filename = safeExpenseReceiptFilename(file.originalname, detected.extension);
+    const note = safeExpenseReceiptNote(req.body.receipt_note);
+    const schema = await requireExpenseReceiptSchema();
+
+    const outcome = await expenseReceiptUploadLock.run(digest, async (): Promise<'saved' | 'duplicate'> => {
+      const byUploadId = await tableBusinessExpenses.select({
+        filterByFormula: `{${EXPENSE_RECEIPT_UPLOAD_ID_FIELD}} = '${safeFormulaLiteral(uploadId)}'`,
+        maxRecords: 1,
+      }).firstPage();
+      if (byUploadId.length) return 'duplicate';
+      const byDigest = await tableBusinessExpenses.select({
+        filterByFormula: `{${EXPENSE_RECEIPT_SHA_FIELD}} = '${digest}'`,
+        maxRecords: 1,
+      }).firstPage();
+      if (byDigest.length) return 'duplicate';
+
+      const notes = ['由老闆Dashboard上傳；待核對金額及分類。', note].filter(Boolean).join(' ');
+      const [created] = await tableBusinessExpenses.create([{
+        fields: {
+          'Expense Name': `待整理單據｜${filename}`,
+          'Expense Date': getHongKongDate(),
+          'Month': selectedMonth,
+          'Category': 'Receipt Inbox',
+          'Amount HKD': 0,
+          'Status': 'Pending Review',
+          'Notes': notes,
+          [EXPENSE_RECEIPT_SHA_FIELD]: digest,
+          [EXPENSE_RECEIPT_UPLOAD_ID_FIELD]: uploadId,
+        },
+      }]);
+      createdRecordId = created.id;
+
+      if (LOCAL_QUOTE_FIXTURE) {
+        await tableBusinessExpenses.update([{
+          id: created.id,
+          fields: {
+            [EXPENSE_RECEIPT_FIELD]: [{
+              id: `att_local_${digest.slice(0, 12)}`,
+              filename,
+              type: detected.contentType,
+              size: file.size,
+              url: `http://127.0.0.1/__test-only/expense-receipts/${digest}`,
+            }],
+          },
+        }]);
+      } else {
+        await uploadExpenseReceiptToAirtable({
+          apiKey: String(process.env.AIRTABLE_API_KEY || ''),
+          baseId: String(process.env.AIRTABLE_BASE_ID || ''),
+          recordId: created.id,
+          attachmentFieldId: schema.attachmentFieldId,
+          filename,
+          contentType: detected.contentType,
+          bytes: file.buffer,
+        });
+      }
+
+      let verified: any;
+      for (let attempt = 0; attempt < 4; attempt += 1) {
+        verified = await tableBusinessExpenses.find(created.id);
+        const attachments = Array.isArray(verified.fields[EXPENSE_RECEIPT_FIELD])
+          ? verified.fields[EXPENSE_RECEIPT_FIELD] as Array<Record<string, unknown>>
+          : [];
+        if (attachments.some(attachment =>
+          String(attachment.filename || '') === filename
+          && (!attachment.size || Number(attachment.size) === file.size)
+        )) break;
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+      const attachments = Array.isArray(verified?.fields?.[EXPENSE_RECEIPT_FIELD])
+        ? verified.fields[EXPENSE_RECEIPT_FIELD] as Array<Record<string, unknown>>
+        : [];
+      if (
+        String(verified?.fields?.[EXPENSE_RECEIPT_SHA_FIELD] || '') !== digest
+        || String(verified?.fields?.[EXPENSE_RECEIPT_UPLOAD_ID_FIELD] || '') !== uploadId
+        || !attachments.some(attachment => String(attachment.filename || '') === filename)
+      ) throw new Error('expense-receipt-write-verification-failed');
+      return 'saved';
+    });
+    return redirect(outcome);
+  } catch (error) {
+    if (createdRecordId) {
+      try {
+        await tableBusinessExpenses.destroy([createdRecordId]);
+      } catch (rollbackError) {
+        logSafeError('Expense receipt rollback needs manual review.', rollbackError);
+      }
+    }
+    logSafeError('Expense receipt upload failed closed.', error);
+    return redirect('error');
   }
 });
 
