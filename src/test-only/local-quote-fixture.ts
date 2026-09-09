@@ -72,7 +72,7 @@ const matchesFormula = (fixtureRecord: FixtureRecord, formula: unknown): boolean
   if (!text) return true;
   const equalityFields = [
     'Public Token', 'Invoice Public Token', 'Quote Number', 'Source Quote Ref',
-    'Phone', 'Customer Phone', 'Campaign Name',
+    'Phone', 'Customer Phone', 'Campaign Name', 'Receipt Upload ID', 'Receipt SHA-256',
   ];
   for (const field of equalityFields) {
     const expected = quotedValue(text, field);
@@ -353,11 +353,21 @@ export const createLocalQuoteFixture = (): {
         { name: 'Amount Received HKD', type: 'currency' },
         { name: 'Outstanding HKD', type: 'formula' },
         { name: 'Payment Audit Log', type: 'multilineText' },
+        { name: 'Payment Method', type: 'singleLineText' },
         choices('Status', ['Unpaid', 'Partially Paid', 'Paid']),
       ],
     },
     { id: 'tbl_local_items', name: 'Order Items', fields: [] },
     { id: 'tbl_local_customers', name: 'Customers', fields: [] },
+    {
+      id: 'tbl_local_business_expenses',
+      name: 'Business Expenses',
+      fields: [
+        { id: 'fld_local_expense_receipt', name: 'Receipt / Invoice', type: 'multipleAttachments' },
+        { id: 'fld_local_expense_sha', name: 'Receipt SHA-256', type: 'singleLineText' },
+        { id: 'fld_local_expense_upload_id', name: 'Receipt Upload ID', type: 'singleLineText' },
+      ],
+    },
     {
       id: 'tbl_local_china_shipments',
       name: 'China Shipments',

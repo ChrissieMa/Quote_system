@@ -16,6 +16,7 @@ test('all owner pages and owner data APIs require the admin session', () => {
     "app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin,",
     "app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin,",
     "app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin,",
+    "app.post('/admin/expenses/receipts', requireAdmin, requireSameOrigin, acceptExpenseReceiptUpload,",
     "app.get('/admin/receipts/audit', requireAdmin,",
     "app.post('/admin/receipts/backfill', requireAdmin, requireSameOrigin,",
     "app.get('/admin/dashboard', requireAdmin,",
@@ -102,19 +103,40 @@ test('Receipt creation route requires no payment evidence and remains CSRF-prote
     assert.ok(!route.includes(forbidden), `Receipt creation must not depend on ${forbidden}`);
   }
   assert.ok(!route.includes('req.body.amount_received'), 'Receipt creation must not accept a second payment amount');
-  for (const field of ["'Receipt Number'", "'Receipt Public Token'", "'Pay Date'", "'Status'"]) {
+  for (const field of ["'Receipt Number'", "'Receipt Public Token'", "'Pay Date'", "'Payment Method'", "'Status'"]) {
     assert.ok(route.includes(field), `atomic Receipt update missing ${field}`);
   }
+  assert.ok(route.includes('validateReceiptPaymentMethod'));
 });
 
 test('Receipt dashboard has one full-settlement action and signed Quote images fetch eagerly', () => {
   assert.ok(source.includes('建立收據＝確認全數收款'));
+  assert.ok(source.includes('name="payment_method" required'));
+  assert.ok(source.includes('RECEIPT_PAYMENT_METHODS.map'));
   assert.ok(!source.includes('placeholder="今次實收HK$"'));
   assert.ok(!source.includes('>記錄實收</button>'));
   assert.ok(source.includes('loading="eager" fetchpriority="high"'));
   assert.ok(!source.includes('loading="lazy"'));
   assert.ok(source.includes("paidInFull: isEnglish ? 'Paid in full' : '已全數付款'"));
   assert.ok(!source.includes("paidInFull: isEnglish ? '${R.paidInFull}'"));
+});
+
+test('expense receipt inbox is owner-only, direct-to-Airtable, idempotent and excluded from P&L until review', () => {
+  const start = source.indexOf("app.post('/admin/expenses/receipts'");
+  const end = source.indexOf("app.post('/admin/china-shipments/:shipmentId/driver-payments'", start);
+  assert.ok(start >= 0 && end > start, 'expense receipt upload route must exist');
+  const route = source.slice(start, end);
+  for (const required of [
+    'requireAdmin', 'requireSameOrigin', 'acceptExpenseReceiptUpload',
+    'validateExpenseReceiptUploadId', 'detectExpenseReceiptFile', 'expenseReceiptSha256',
+    'uploadExpenseReceiptToAirtable', 'EXPENSE_RECEIPT_UPLOAD_ID_FIELD', 'EXPENSE_RECEIPT_SHA_FIELD',
+    "'Amount HKD': 0", "'Status': 'Pending Review'", 'tableBusinessExpenses.destroy',
+  ]) assert.ok(route.includes(required), `expense receipt route missing ${required}`);
+  for (const forbidden of ['Dropbox', 'Google Drive', 'Payment Evidence', 'syncMonthlyFinance(']) {
+    assert.ok(!route.includes(forbidden), `expense receipt route must not use ${forbidden}`);
+  }
+  assert.ok(source.includes('enctype="multipart/form-data"'));
+  assert.ok(source.includes('name="receipt_file"'));
 });
 
 test('public document routes validate native aliases and legacy tokens before Airtable lookup', () => {
