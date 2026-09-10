@@ -137,6 +137,12 @@ test('expense receipt inbox is owner-only, direct-to-Airtable, idempotent and ex
   }
   assert.ok(source.includes('enctype="multipart/form-data"'));
   assert.ok(source.includes('name="receipt_file"'));
+  assert.ok(source.includes('window.showDirectoryPicker'));
+  assert.ok(source.includes("getDirectoryHandle('00 待整理（所有單據先放這裡）', { create: true })"));
+  assert.ok(source.includes("getFileHandle('單據自動同步記錄.csv', { create: true })"));
+  assert.ok(source.includes("crypto.subtle.digest('SHA-256'"));
+  assert.ok(source.includes("'duplicate-skipped'"));
+  assert.ok(source.includes("uploadForm.setAttribute('data-local-saved', '1')"));
 });
 
 test('public document routes validate native aliases and legacy tokens before Airtable lookup', () => {
