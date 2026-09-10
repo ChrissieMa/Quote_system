@@ -7691,7 +7691,11 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
             <label><span>備註（可留空）</span><input name="receipt_note" type="text" maxlength="300" placeholder="例如：文具／供應商單據"></label>
             <button class="btn btn-primary" type="submit">上傳單據待整理</button>
           </form>
-          <p class="owner-note">原檔直接存入Airtable。待核對金額及分類前會以HK$0標記，唔會計入損益；之後可按月份下載到桌面「稅務單據」。</p>
+          <div class="owner-expense-folder-row">
+            <button class="btn btn-outline" id="owner-expense-folder-button" type="button">連接桌面「稅務單據」（只需一次）</button>
+            <span id="owner-expense-folder-status">正在檢查本機資料夾…</span>
+          </div>
+          <p class="owner-note">原檔會直接存入Airtable；已連接桌面「稅務單據」後，同一原檔亦會自動存到「00 待整理（所有單據先放這裡）」並寫入同步記錄。待核對金額及分類前會以HK$0標記，唔會計入損益。</p>
           ${missingExpenses.length ? `<div class="owner-alert">未見本月記錄：${missingExpenses.map(escapeHtml).join('、')}</div>` : '<div class="owner-ok">固定支出已按排程自動記錄，毋須逐張單據再入。</div>'}
           ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>日期</th><th>金額</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
           ${unallocatedMarketingRows ? `<h3 class="owner-subhead">Marketing待分配</h3><div class="owner-table-wrap"><table><thead><tr><th>項目</th><th>金額</th><th>狀態</th></tr></thead><tbody>${unallocatedMarketingRows}</tbody></table></div>` : ''}
@@ -7705,8 +7709,143 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     </div>`;
 
     const extraHead = `<style>
-      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-lines small{color:#64748b}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}.owner-expense-upload{display:grid;grid-template-columns:1.25fr 1fr auto;gap:8px;align-items:end;padding:13px;border:1px solid #e5e0d8;border-radius:10px;background:#f8fafc;margin-bottom:8px}.owner-expense-upload label span{display:block;font-size:11px;font-weight:800;color:#64748b;margin-bottom:5px}.owner-expense-upload input{width:100%}.owner-cost-detail{border:1px solid #e5e0d8;border-radius:12px;margin-top:10px;overflow:hidden}.owner-cost-detail summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 15px;background:#f8f6f2;font-size:13px}.owner-cost-detail summary small{display:block;color:#64748b;margin-top:3px}.owner-cost-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#eeeae4;border-top:1px solid #e5e0d8}.owner-cost-grid>div{background:#fff;padding:12px}.owner-cost-grid span,.owner-cost-grid small{display:block;color:#64748b;font-size:11px}.owner-cost-grid strong{display:block;margin-top:5px}.owner-cost-profit{background:#fff7ed!important}.owner-cost-warning,.owner-cost-complete{padding:10px 13px;font-size:12px;font-weight:700}.owner-cost-warning{background:#fff1e7;color:#9a3412}.owner-cost-complete{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-cost-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}.owner-expense-upload{grid-template-columns:1fr}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-cost-detail summary{align-items:flex-start;flex-direction:column}.owner-cost-grid{grid-template-columns:1fr 1fr}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
+      body{background:#f4f1ec;color:#172033}.page-wrap{max-width:1220px}.owner-dashboard{padding:12px 0 42px}.owner-topbar,.owner-controls,.owner-panel-head,.owner-footer-nav{display:flex;justify-content:space-between;align-items:center;gap:16px}.owner-topbar{margin-bottom:22px}.owner-topbar h1{font-size:32px;margin:3px 0}.owner-topbar p{margin:0;color:#64748b}.owner-eyebrow{font-size:11px;font-weight:800;letter-spacing:.18em;color:#d8833b}.owner-actions{display:flex;gap:8px}.owner-controls{background:#fff;border:1px solid #e5e0d8;border-radius:14px;padding:14px 16px;margin-bottom:16px}.owner-controls form{display:flex;align-items:end;gap:10px}.owner-controls label{font-size:12px;font-weight:700;color:#64748b}.owner-controls input{display:block;margin-top:5px}.owner-status{font-size:13px;font-weight:800;padding:8px 12px;border-radius:999px}.owner-status.complete,.owner-ok{color:#166534;background:#dcfce7}.owner-status.warning,.owner-alert{color:#9a3412;background:#ffedd5}.owner-kpis{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px}.owner-kpi,.owner-panel{background:#fff;border:1px solid #e5e0d8;border-radius:14px;box-shadow:0 4px 18px rgba(15,23,42,.04)}.owner-kpi{padding:18px}.owner-kpi span,.owner-kpi small{display:block;color:#64748b}.owner-kpi strong{display:block;font-size:25px;margin:8px 0}.owner-kpi-highlight{background:#172033;color:#fff}.owner-kpi-highlight span,.owner-kpi-highlight small{color:#cbd5e1}.owner-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}.owner-panel{padding:20px;min-width:0}.owner-panel h2{font-size:17px;margin:0 0 15px}.owner-panel h3.owner-subhead{font-size:14px;margin:18px 0 8px}.owner-panel-head h2{margin:0}.owner-panel-head{margin-bottom:15px}.owner-panel-head a{font-size:13px;color:#c66f28}.owner-payment-summary{display:flex;flex-wrap:wrap;gap:8px;margin-bottom:12px}.owner-payment-summary span{padding:7px 10px;border-radius:999px;background:#eef2f7;color:#334155;font-size:12px;font-weight:800}.owner-lines>div{display:flex;justify-content:space-between;padding:9px 0;border-bottom:1px solid #f1eee9}.owner-lines small{color:#64748b}.owner-line-total{font-size:16px;border-top:2px solid #172033!important;border-bottom:0!important;margin-top:5px}.owner-table-wrap{overflow-x:auto}.owner-panel table{width:100%;border-collapse:collapse;font-size:13px}.owner-panel th,.owner-panel td{text-align:left;padding:9px 7px;border-bottom:1px solid #eeeae4;vertical-align:top}.owner-panel td small{display:block;color:#64748b;margin-top:3px}.owner-bar{width:100px;height:7px;border-radius:9px;background:#eeeae4;display:inline-block;margin-right:7px;overflow:hidden}.owner-bar span{display:block;height:100%;background:#d8833b}.owner-ok,.owner-alert{padding:10px 12px;border-radius:8px;font-size:13px;margin-bottom:12px}.owner-pending{margin:0;padding-left:19px}.owner-pending li{margin:8px 0}.owner-note,.owner-empty{color:#64748b;font-size:13px}.owner-footer-nav{padding:7px 4px}.owner-footer-nav a{color:#c66f28;font-weight:700}.owner-payment-form{display:flex;align-items:end;gap:7px;min-width:250px}.owner-payment-form label{font-size:11px;font-weight:700;color:#64748b}.owner-payment-form input{display:block;width:105px;margin-top:4px}.owner-payment-form .btn{white-space:nowrap}.owner-payment-status,.owner-paid-chip{display:inline-block;padding:5px 8px;border-radius:999px;background:#e8eef5;font-weight:800;white-space:nowrap}.owner-integrity-warning{color:#b91c1c!important}.owner-paid-chip{background:#dcfce7;color:#166534}.owner-expense-upload{display:grid;grid-template-columns:1.25fr 1fr auto;gap:8px;align-items:end;padding:13px;border:1px solid #e5e0d8;border-radius:10px;background:#f8fafc;margin-bottom:8px}.owner-expense-upload label span{display:block;font-size:11px;font-weight:800;color:#64748b;margin-bottom:5px}.owner-expense-upload input{width:100%}.owner-expense-folder-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin:8px 0}.owner-expense-folder-row span{font-size:12px;font-weight:700;color:#64748b}.owner-cost-detail{border:1px solid #e5e0d8;border-radius:12px;margin-top:10px;overflow:hidden}.owner-cost-detail summary{cursor:pointer;display:flex;justify-content:space-between;align-items:center;gap:16px;padding:13px 15px;background:#f8f6f2;font-size:13px}.owner-cost-detail summary small{display:block;color:#64748b;margin-top:3px}.owner-cost-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:1px;background:#eeeae4;border-top:1px solid #e5e0d8}.owner-cost-grid>div{background:#fff;padding:12px}.owner-cost-grid span,.owner-cost-grid small{display:block;color:#64748b;font-size:11px}.owner-cost-grid strong{display:block;margin-top:5px}.owner-cost-profit{background:#fff7ed!important}.owner-cost-warning,.owner-cost-complete{padding:10px 13px;font-size:12px;font-weight:700}.owner-cost-warning{background:#fff1e7;color:#9a3412}.owner-cost-complete{background:#dcfce7;color:#166534}@media(max-width:850px){.owner-kpis{grid-template-columns:1fr 1fr}.owner-grid{grid-template-columns:1fr}.owner-cost-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.owner-topbar{align-items:flex-start;flex-direction:column}.owner-controls{align-items:flex-start;flex-direction:column}.owner-expense-upload{grid-template-columns:1fr}}@media(max-width:520px){.owner-kpis{grid-template-columns:1fr}.owner-actions{width:100%;flex-wrap:wrap}.owner-controls form{width:100%;flex-wrap:wrap}.owner-kpi strong{font-size:23px}.owner-cost-detail summary{align-items:flex-start;flex-direction:column}.owner-cost-grid{grid-template-columns:1fr 1fr}.owner-payment-form{min-width:190px;align-items:stretch;flex-direction:column}.owner-payment-form input{width:100%}}
     </style><script>
+      var lksTaxFolderHandle = null;
+      var lksTaxFolderDbName = 'lks-tax-receipt-folder-v1';
+      function setTaxFolderStatus(text, ok) {
+        var status = document.getElementById('owner-expense-folder-status');
+        if (!status) return;
+        status.textContent = text;
+        status.style.color = ok ? '#166534' : '#9a3412';
+      }
+      function openTaxFolderDb() {
+        return new Promise(function(resolve, reject) {
+          var request = indexedDB.open(lksTaxFolderDbName, 1);
+          request.onupgradeneeded = function() {
+            if (!request.result.objectStoreNames.contains('settings')) request.result.createObjectStore('settings');
+          };
+          request.onsuccess = function() { resolve(request.result); };
+          request.onerror = function() { reject(request.error); };
+        });
+      }
+      async function readTaxFolderHandle() {
+        var db = await openTaxFolderDb();
+        return await new Promise(function(resolve, reject) {
+          var request = db.transaction('settings').objectStore('settings').get('tax-root');
+          request.onsuccess = function() { resolve(request.result || null); };
+          request.onerror = function() { reject(request.error); };
+        });
+      }
+      async function storeTaxFolderHandle(handle) {
+        var db = await openTaxFolderDb();
+        await new Promise(function(resolve, reject) {
+          var request = db.transaction('settings', 'readwrite').objectStore('settings').put(handle, 'tax-root');
+          request.onsuccess = function() { resolve(); };
+          request.onerror = function() { reject(request.error); };
+        });
+      }
+      async function hasTaxFolderPermission(handle, requestAccess) {
+        var options = { mode: 'readwrite' };
+        if (await handle.queryPermission(options) === 'granted') return true;
+        return Boolean(requestAccess && await handle.requestPermission(options) === 'granted');
+      }
+      async function chooseTaxReceiptFolder() {
+        if (!window.showDirectoryPicker) {
+          setTaxFolderStatus('此瀏覽器唔支援自動存檔；Airtable上載仍可照常使用。', false);
+          return null;
+        }
+        var handle = await window.showDirectoryPicker({ id: 'lks-tax-receipts', mode: 'readwrite' });
+        if (!await hasTaxFolderPermission(handle, true)) throw new Error('tax-folder-permission-denied');
+        await storeTaxFolderHandle(handle);
+        lksTaxFolderHandle = handle;
+        setTaxFolderStatus('已連接：' + handle.name + '；之後會自動存檔。', true);
+        return handle;
+      }
+      function safeLocalReceiptFilename(value) {
+        return String(value || 'receipt').normalize('NFKC').replace(/[\\/:*?"<>|]/g, '-').replace(/^\.+/, '').slice(0, 120) || 'receipt';
+      }
+      async function receiptFileSha256(file) {
+        var digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer());
+        return Array.from(new Uint8Array(digest)).map(function(value) { return value.toString(16).padStart(2, '0'); }).join('');
+      }
+      async function existingReceiptSha256(handle) {
+        return receiptFileSha256(await handle.getFile());
+      }
+      async function appendReceiptSyncLog(root, values) {
+        var logFolder = await root.getDirectoryHandle('_系統記錄', { create: true });
+        var logHandle = await logFolder.getFileHandle('單據自動同步記錄.csv', { create: true });
+        var existing = await logHandle.getFile();
+        var text = await existing.text();
+        var csv = values.map(function(value) { return '"' + String(value).replace(/"/g, '""') + '"'; }).join(',') + '\\n';
+        var writable = await logHandle.createWritable();
+        await writable.write((text || '時間,月份,檔名,SHA-256,結果,Upload ID\\n') + csv);
+        await writable.close();
+      }
+      async function saveExpenseReceiptToTaxFolder(file, month, uploadId) {
+        var root = lksTaxFolderHandle;
+        if (!root) throw new Error('tax-folder-not-connected');
+        if (!await hasTaxFolderPermission(root, true)) throw new Error('tax-folder-permission-denied');
+        var inbox = await root.getDirectoryHandle('00 待整理（所有單據先放這裡）', { create: true });
+        var filename = safeLocalReceiptFilename(file.name);
+        var digest = await receiptFileSha256(file);
+        var target = null;
+        try { target = await inbox.getFileHandle(filename); } catch (error) {
+          if (!error || error.name !== 'NotFoundError') throw error;
+        }
+        var result = 'saved';
+        if (target && await existingReceiptSha256(target) === digest) {
+          result = 'duplicate-skipped';
+        } else {
+          if (target) {
+            var dot = filename.lastIndexOf('.');
+            filename = (dot > 0 ? filename.slice(0, dot) : filename) + '--' + digest.slice(0, 8) + (dot > 0 ? filename.slice(dot) : '');
+          }
+          target = await inbox.getFileHandle(filename, { create: true });
+          var writable = await target.createWritable();
+          await writable.write(file);
+          await writable.close();
+          if (await existingReceiptSha256(target) !== digest) throw new Error('tax-folder-write-verification-failed');
+        }
+        await appendReceiptSyncLog(root, [new Date().toISOString(), month, filename, digest, result, uploadId]);
+        return result;
+      }
+      window.addEventListener('DOMContentLoaded', function() {
+        var folderButton = document.getElementById('owner-expense-folder-button');
+        var uploadForm = document.querySelector('.owner-expense-upload');
+        if (!folderButton || !uploadForm) return;
+        if (!window.showDirectoryPicker) {
+          setTaxFolderStatus('此瀏覽器唔支援自動存檔；Airtable上載仍可照常使用。', false);
+          return;
+        }
+        readTaxFolderHandle().then(async function(handle) {
+          lksTaxFolderHandle = handle;
+          if (!handle) return setTaxFolderStatus('未連接；首次上載前選擇一次「稅務單據」資料夾。', false);
+          var permitted = await hasTaxFolderPermission(handle, false);
+          setTaxFolderStatus(permitted ? '已連接：' + handle.name + '；之後會自動存檔。' : '已記住資料夾；下次上載會要求重新授權。', permitted);
+        }).catch(function() { setTaxFolderStatus('未能讀取資料夾設定，請重新連接一次。', false); });
+        folderButton.addEventListener('click', function() {
+          chooseTaxReceiptFolder().catch(function() { setTaxFolderStatus('未有更改資料夾。', false); });
+        });
+        uploadForm.addEventListener('submit', async function(event) {
+          if (uploadForm.getAttribute('data-local-saved') === '1') return;
+          event.preventDefault();
+          var fileInput = uploadForm.querySelector('input[name="receipt_file"]');
+          var monthInput = uploadForm.querySelector('input[name="month"]');
+          var uploadInput = uploadForm.querySelector('input[name="upload_request_id"]');
+          var file = fileInput && fileInput.files && fileInput.files[0];
+          if (!file) return;
+          try {
+            if (!lksTaxFolderHandle) await chooseTaxReceiptFolder();
+            var outcome = await saveExpenseReceiptToTaxFolder(file, monthInput ? monthInput.value : '', uploadInput ? uploadInput.value : '');
+            setTaxFolderStatus(outcome === 'duplicate-skipped' ? '本機已有同一檔案，已略過重複；正在上載Airtable…' : '已自動存入稅務單據；正在上載Airtable…', true);
+            uploadForm.setAttribute('data-local-saved', '1');
+            uploadForm.submit();
+          } catch (error) {
+            setTaxFolderStatus('本機未能存檔；Airtable尚未上載。請重新連接「稅務單據」。', false);
+          }
+        });
+      });
       function confirmDriverPayment(form) {
         var input = form.querySelector('input[name="payment_amount"]');
         var amount = Number(input && input.value);
