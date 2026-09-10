@@ -4850,8 +4850,15 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var isStair = itemType === '階梯';
-      var enteredLevels = parseInt((row.querySelector('.f-lv') || {}).value, 10);
-      var levels = Math.max(1, enteredLevels || 1);
+      var levelInput = row.querySelector('.f-lv');
+      var enteredLevels = parseInt((levelInput || {}).value, 10);
+      var levels = isDisplayCase
+        ? Math.max(2, enteredLevels || 2)
+        : Math.max(1, enteredLevels || 1);
+      if (levelInput) {
+        levelInput.min = isDisplayCase ? '2' : '1';
+        if (isDisplayCase && (!(enteredLevels >= 2))) levelInput.value = '2';
+      }
       var editor = row.querySelector('.f-level-heights-editor');
       var hidden = row.querySelector('.f-lh');
       var interHInput = row.querySelector('.f-ih');
@@ -5560,9 +5567,10 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
           var itemType = ((row.querySelector('.f-type') || {}).value || '');
           var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
           var innerHeight = parseNum((row.querySelector('.f-ih') || {}).value);
-          if (itemType.indexOf('Display Case') !== -1 && levels >= 2
-            && !getLevelHeightsForCalculation(row, levels, innerHeight) && !invalidLevelHeightInput) {
-            invalidLevelHeightInput = row.querySelector('.f-level-height-input');
+          if (itemType.indexOf('Display Case') !== -1
+            && (!(levels >= 2) || !getLevelHeightsForCalculation(row, levels, innerHeight))
+            && !invalidLevelHeightInput) {
+            invalidLevelHeightInput = row.querySelector('.f-level-height-input') || row.querySelector('.f-lv');
           }
           if (itemType === '階梯' && !invalidStairInput) {
             var outerL = parseNum((row.querySelector('.f-ol') || {}).value);

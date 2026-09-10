@@ -549,7 +549,7 @@ export const quotationImageDisclaimer = (
 
 const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1['cabinet_layers'] => {
   const count = Number(item.noOfLevels);
-  if (!Number.isInteger(count) || count < 1 || !String(item.itemType || '').includes('Display Case')) return [];
+  if (!Number.isInteger(count) || count < 2 || count > 6 || !String(item.itemType || '').includes('Display Case')) return [];
   const segments = String(item.levelHeights || '')
     .split(/[|｜,，、;；/／\n]+/)
     .map(segment => (segment.match(/-?\d+(?:\.\d+)?/g) || []).map(Number).filter(Number.isFinite))
@@ -562,10 +562,14 @@ const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1
       ? Array.from({ length: count }, () => fallback)
       : [];
   if (heights.length !== count || heights.some(height => height <= 0)) return [];
+  // Quote stores each layer's customer-facing inner height.  The 3D render
+  // contract intentionally carries the physical outer height for each
+  // cabinet layer, which includes the 1cm top/bottom panel allowance used by
+  // the Configurator sizing model.
   return heights.map((height, index) => ({
     layer_id: `layer-${index + 1}`,
     position: index + 1,
-    actual_height: height,
+    actual_height: height + 1,
   }));
 };
 
@@ -596,6 +600,15 @@ export const buildQuotationRenderRequestFromQuoteItem = (
   if (!productType || Object.values(inner).some(value => value === null) || Object.values(outer).some(value => value === null)) {
     return null;
   }
+  const cabinetLayers = storedCabinetLayers(item);
+  if (productType === 'stacked_cabinet') {
+    if (cabinetLayers.length < 2) return null;
+    // A stacked cabinet has one shared inner length/depth and a separate inner
+    // height per layer.  Comparing only Inter H (the legacy first-layer
+    // compatibility field) against the Configurator's summed inner height made
+    // every multi-layer request fail the materialization guard.
+    inner.height = cabinetLayers.reduce((sum, layer) => sum + layer.actual_height - 1, 0);
+  }
   const accessories = storedAccessories(item);
   if (!accessories) return null;
   const request: RenderRequestV1 = {
@@ -608,7 +621,7 @@ export const buildQuotationRenderRequestFromQuoteItem = (
       outer: outer as DimensionSet,
       actual: outer as DimensionSet,
     },
-    cabinet_layers: storedCabinetLayers(item),
+    cabinet_layers: cabinetLayers,
     accessories,
     colours: { body: 'clear_acrylic', background: 'light_blue_gray' },
     camera_preset: 'quotation_square_three_quarter_v2',

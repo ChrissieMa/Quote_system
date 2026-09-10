@@ -355,14 +355,23 @@ test('Quote item type mapping matches 3D applicator canonical fixtures and rejec
   const stacked = buildQuotationRenderRequestFromQuoteItem({
     ...storedQuoteItem(),
     itemType: 'Display Case 疊高展示櫃',
+    outerH: '57',
     noOfLevels: 2,
     levelHeights: '第1層：25 cm｜第2層：30 cm',
   });
   assert.equal(stacked?.product_type, 'stacked_cabinet');
+  assert.deepEqual(stacked?.dimensions.inner, { length: 30, depth: 20, height: 55 });
+  assert.equal(stacked?.dimensions.outer.height, 57);
   assert.deepEqual(stacked?.cabinet_layers, [
-    { layer_id: 'layer-1', position: 1, actual_height: 25 },
-    { layer_id: 'layer-2', position: 2, actual_height: 30 },
+    { layer_id: 'layer-1', position: 1, actual_height: 26 },
+    { layer_id: 'layer-2', position: 2, actual_height: 31 },
   ]);
+  assert.equal(buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    itemType: 'Display Case 疊高展示櫃',
+    noOfLevels: 1,
+    levelHeights: '第1層：25 cm',
+  }), null);
   assert.equal(buildQuotationRenderRequestFromQuoteItem({
     ...storedQuoteItem(),
     itemType: '階梯',
