@@ -29,6 +29,9 @@ test('expense receipt identifiers, names, notes and digest are normalized', () =
   assert.equal(validateExpenseReceiptUploadId(`exp_${'a'.repeat(32)}`), `exp_${'a'.repeat(32)}`);
   assert.throws(() => validateExpenseReceiptUploadId('../bad'), /upload-id-invalid/);
   assert.equal(safeExpenseReceiptFilename('../../七月 單據.exe', '.pdf'), '七月 單據.pdf');
+  const browserEncodedChinese = Buffer.from('交易', 'utf8').toString('latin1');
+  assert.equal(safeExpenseReceiptFilename(`2026-08-01 ${browserEncodedChinese}.pdf`, '.pdf'), '2026-08-01 交易.pdf');
+  assert.equal(safeExpenseReceiptFilename('Caf\u00e9 receipt.pdf', '.pdf'), 'Caf\u00e9 receipt.pdf');
   assert.equal(safeExpenseReceiptNote('  公司\n單據\u0000  '), '公司 單據');
   assert.equal(expenseReceiptSha256(Buffer.from('abc')), 'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad');
 });

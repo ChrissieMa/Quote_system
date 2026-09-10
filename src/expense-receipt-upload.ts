@@ -49,8 +49,14 @@ export const validateExpenseReceiptUploadId = (value: unknown): string => {
   return normalized;
 };
 
+const repairMultipartUtf8Filename = (value: string): string => {
+  if (!/[\u00c2-\u00f4]/.test(value)) return value;
+  const decoded = Buffer.from(value, 'latin1').toString('utf8');
+  return decoded.includes('\ufffd') ? value : decoded;
+};
+
 export const safeExpenseReceiptFilename = (value: unknown, extension: ExpenseReceiptFile['extension']): string => {
-  const stem = String(value || 'receipt')
+  const stem = repairMultipartUtf8Filename(String(value || 'receipt'))
     .normalize('NFKC')
     .replace(/\.[^.]+$/, '')
     .replace(/[^\p{L}\p{N}._ -]+/gu, '-')
