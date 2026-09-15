@@ -181,6 +181,10 @@ test('owner dashboard exposes auditable Order cost breakdown without calling pro
     '截至目前現金毛利',
     '預計／權責毛利（上限）',
     'blank／0顯示未付款',
+    '本月營運盈利',
+    '本月營運現金流出',
+    '過往年度遲付只放呢度',
+    '計入本月營運盈利',
   ]) assert.ok(source.includes(label), `missing cost breakdown label: ${label}`);
 });
 

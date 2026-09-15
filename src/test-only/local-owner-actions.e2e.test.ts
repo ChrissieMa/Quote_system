@@ -91,6 +91,12 @@ test('owner can choose a payment method and upload one idempotent expense receip
   assert.ok(receiptHtml.includes('FPS'));
 
   const dashboardHtml = await (await fetch(`${origin}/admin/dashboard?month=2026-09`, { headers: { Cookie: cookie } })).text();
+  for (const label of [
+    '本月營運盈利',
+    '本月營運現金流出',
+    '每月營運開支／實付現金',
+    '計入本月營運盈利',
+  ]) assert.ok(dashboardHtml.includes(label), `dashboard is missing ${label}`);
   const uploadId = capture(dashboardHtml, /name="upload_request_id" value="(exp_[a-f0-9]{32})"/, 'upload id');
   const uploadCsrf = capture(dashboardHtml, /name="csrf" value="([a-f0-9]{64})"/, 'upload csrf');
   const form = new FormData();

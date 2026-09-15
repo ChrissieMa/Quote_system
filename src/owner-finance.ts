@@ -15,6 +15,7 @@ export type OwnerFinanceSummary = {
   allocatedMarketing: OwnerFinanceRecord[];
   unallocatedMarketing: OwnerFinanceRecord[];
   operatingExpenses: OwnerFinanceRecord[];
+  cashExpenses: OwnerFinanceRecord[];
   capitalItems: OwnerFinanceRecord[];
   revenue: number;
   issuedInvoiceTotal: number;
@@ -33,8 +34,11 @@ export type OwnerFinanceSummary = {
   marketingSpend: number;
   unallocatedMarketingSpend: number;
   businessExpenses: number;
+  cashBusinessExpenses: number;
   capitalItemsTotal: number;
   netProfit: number;
+  currentMonthOperatingProfit: number;
+  currentMonthCashOutflow: number;
   cashNetProfit: number;
   margin: number;
   provisional: boolean;
@@ -280,6 +284,92 @@ export const isCapitalBusinessExpense = (fields: OwnerFinanceFields): boolean =>
   return /(?:^|[\s/|_-])(capital equipment|capital asset|fixed asset|資本項目|資本設備)(?:$|[\s/|_-])/.test(category);
 };
 
+export const isDepreciationBusinessExpense = (fields: OwnerFinanceFields): boolean =>
+  /depreciation|折舊/i.test(businessExpenseText(fields));
+
+const BUSINESS_REGISTRATION_PATTERN = /business\s*registration|商業登記/i;
+
+const businessExpenseText = (fields: OwnerFinanceFields): string => [
+  fields['Expense Name'], fields['Category'], fields['Notes'],
+].map(value => String(value || '')).join(' ');
+
+export const isBusinessRegistrationExpense = (fields: OwnerFinanceFields): boolean =>
+  BUSINESS_REGISTRATION_PATTERN.test(businessExpenseText(fields));
+
+const yearFromValue = (value: unknown): number | null => {
+  const match = String(value || '').match(/(?:19|20)\d{2}/);
+  return match ? Number(match[0]) : null;
+};
+
+// This deliberately checks a dedicated accounting-year field before the free
+// text fallback. A late payment must keep its original registration year even
+// when its cash payment date is in a later year.
+export const resolveBusinessExpenseApplicableYear = (fields: OwnerFinanceFields): number | null => {
+  for (const field of ['Applicable Year', 'Expense Year', 'Accounting Year', 'Registration Year']) {
+    const year = yearFromValue(fields[field]);
+    if (year !== null) return year;
+  }
+  const namedYear = yearFromValue(`${fields['Expense Name'] || ''} ${fields['Notes'] || ''}`);
+  if (namedYear !== null) return namedYear;
+  return yearFromValue(fields['Month']) || yearFromValue(fields['Expense Date']);
+};
+
+const monthFromDateValue = (value: unknown): string | null => {
+  const month = String(value || '').trim().slice(0, 7);
+  return VALID_MONTH.test(month) ? month : null;
+};
+
+export const isBusinessExpensePaid = (fields: OwnerFinanceFields): boolean => {
+  const status = String(fields['Payment Status'] || fields['Status'] || '').trim().toLowerCase();
+  // Blank is retained as a legacy-paid record. Auto-accrued / review rows stay
+  // in operating planning but never claim to be a cash payment.
+  return ![
+    'pending', 'pending review', 'auto-accrued', 'unpaid', 'refunded', 'cancelled',
+    '待核對', '待實扣', '未付款', '退款', '取消',
+  ].includes(status);
+};
+
+export const resolveBusinessExpenseCashMonth = (fields: OwnerFinanceFields): string | null => {
+  for (const field of ['Cash Paid Date', 'Paid Date', 'Payment Date', 'Expense Date', 'Month']) {
+    const month = monthFromDateValue(fields[field]);
+    if (month) return month;
+  }
+  return null;
+};
+
+export const getBusinessExpenseOperatingAmount = (fields: OwnerFinanceFields, month: string): number => {
+  if (!VALID_MONTH.test(month) || isCapitalBusinessExpense(fields) || isDepreciationBusinessExpense(fields)) return 0;
+  const amount = numberField(fields, 'Amount HKD');
+  if (amount <= 0) return 0;
+  const applicableYear = resolveBusinessExpenseApplicableYear(fields);
+  // A late Business Registration payment belongs to its original year. It is
+  // still a real cash outflow in the payment month, but is never invented as a
+  // later-year cost.
+  if (isBusinessRegistrationExpense(fields)
+    && applicableYear !== null
+    && applicableYear < Number(month.slice(0, 4))) return 0;
+  return resolveBusinessExpenseMonth(fields) === month ? amount : 0;
+};
+
+export const getBusinessExpenseCashAmount = (fields: OwnerFinanceFields, month: string): number =>
+  !isCapitalBusinessExpense(fields)
+    && !isDepreciationBusinessExpense(fields)
+    && isBusinessExpensePaid(fields)
+    && resolveBusinessExpenseCashMonth(fields) === month
+    ? numberField(fields, 'Amount HKD')
+    : 0;
+
+export const getBusinessExpenseDashboardLabel = (fields: OwnerFinanceFields, month: string): string => {
+  const applicableYear = resolveBusinessExpenseApplicableYear(fields);
+  if (isBusinessRegistrationExpense(fields)
+    && applicableYear !== null
+    && applicableYear < Number(month.slice(0, 4))
+    && getBusinessExpenseCashAmount(fields, month) > 0) {
+    return `補交${applicableYear}年商業登記費`;
+  }
+  return String(fields['Expense Name'] || '-');
+};
+
 export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFinanceSummary => {
   const monthOrders = options.orders.filter(record => options.getOrderMonth(record.fields) === options.month);
   const confirmedOrders = monthOrders.filter(record => getOrderAmountReceived(record.fields) > 0);
@@ -294,7 +384,12 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
   });
   const monthExpenses = options.expenses.filter(record => resolveBusinessExpenseMonth(record.fields) === options.month);
   const capitalItems = monthExpenses.filter(record => isCapitalBusinessExpense(record.fields));
-  const operatingExpenses = monthExpenses.filter(record => !isCapitalBusinessExpense(record.fields));
+  const operatingExpenses = options.expenses.filter(record =>
+    getBusinessExpenseOperatingAmount(record.fields, options.month) > 0,
+  );
+  const cashExpenses = options.expenses.filter(record =>
+    getBusinessExpenseCashAmount(record.fields, options.month) > 0,
+  );
 
   const orderTotals = confirmedOrders.reduce((sum, record) => {
     const fields = record.fields;
@@ -338,7 +433,10 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     (sum, record) => sum + numberField(record.fields, 'Spend Amount HKD'), 0,
   );
   const businessExpenses = operatingExpenses.reduce(
-    (sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0,
+    (sum, record) => sum + getBusinessExpenseOperatingAmount(record.fields, options.month), 0,
+  );
+  const cashBusinessExpenses = cashExpenses.reduce(
+    (sum, record) => sum + getBusinessExpenseCashAmount(record.fields, options.month), 0,
   );
   const capitalItemsTotal = capitalItems.reduce(
     (sum, record) => sum + numberField(record.fields, 'Amount HKD'), 0,
@@ -351,7 +449,8 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
   const cashOrderCosts = orderTotals.supplier + orderTotals.china + orderTotals.deliveryPaid + orderTotals.reissue;
   const cashOrderGrossProfit = orderTotals.revenue - cashOrderCosts;
   const netProfit = orderGrossProfit - marketingSpend - businessExpenses;
-  const cashNetProfit = cashOrderGrossProfit - marketingSpend - businessExpenses;
+  const currentMonthOperatingProfit = cashOrderGrossProfit - marketingSpend - businessExpenses;
+  const currentMonthCashOutflow = cashOrderCosts + cashBusinessExpenses;
 
   return {
     monthOrders,
@@ -361,6 +460,7 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     allocatedMarketing,
     unallocatedMarketing,
     operatingExpenses,
+    cashExpenses,
     capitalItems,
     ...orderTotals,
     issuedInvoiceTotal,
@@ -372,10 +472,15 @@ export const calculateOwnerFinanceSummary = (options: SummaryOptions): OwnerFina
     marketingSpend,
     unallocatedMarketingSpend,
     businessExpenses,
+    cashBusinessExpenses,
     capitalItemsTotal,
     netProfit,
-    cashNetProfit,
-    margin: orderTotals.revenue > 0 ? (cashNetProfit / orderTotals.revenue) * 100 : 0,
+    currentMonthOperatingProfit,
+    currentMonthCashOutflow,
+    // Retained for callers that still consume the old summary field. It now
+    // means operating profit, not an ambiguous cash-flow total.
+    cashNetProfit: currentMonthOperatingProfit,
+    margin: orderTotals.revenue > 0 ? (currentMonthOperatingProfit / orderTotals.revenue) * 100 : 0,
     provisional: orderTotals.pendingCostOrders > 0,
   };
 };

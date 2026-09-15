@@ -9,6 +9,9 @@ import {
   getOrderOutstandingAmount,
   getMacbookInstallmentNumber,
   getDriverSettlement,
+  getBusinessExpenseCashAmount,
+  getBusinessExpenseDashboardLabel,
+  getBusinessExpenseOperatingAmount,
   parseDriverPaymentAmountCents,
   planDriverPayment,
   planFullReceipt,
@@ -92,6 +95,120 @@ test('MacBook instalment schedule starts in August 2026 and stops after 24 uniqu
   assert.equal(getMacbookInstallmentNumber('2026-08'), 1);
   assert.equal(getMacbookInstallmentNumber('2028-07'), 24);
   assert.equal(getMacbookInstallmentNumber('2028-08'), null);
+});
+
+test('August operating profit excludes the late 2025 BR payment while cash flow keeps it', () => {
+  const sixPaidOrders = Array.from({ length: 6 }, (_, index) => record(`paid-${index + 1}`, {
+    'Internal 1 Order No': `AUG-PAID-${index + 1}`,
+    Status: 'Paid',
+    'Final Amount': 1000,
+    'Amount Received HKD': 1000,
+  }));
+  const lateBr2025 = {
+    'Expense Name': 'Business Registration — late payment',
+    'Applicable Year': '2025',
+    'Expense Date': '2026-08-22',
+    'Status': 'Paid',
+    'Amount HKD': 2500,
+  };
+  const macbookPaid = {
+    'Expense Name': 'Apple MacBook Pro — monthly instalment',
+    'Month': '2026-08',
+    'Paid Date': '2026-08-18',
+    'Status': 'Paid',
+    'Category': 'Computer / Monthly Instalment',
+    'Amount HKD': 1236.39,
+  };
+  const verifiedOpenAi = {
+    'Expense Name': 'OpenAI API',
+    'Month': '2026-08',
+    'Paid Date': '2026-08-28',
+    'Status': 'Paid',
+    'Category': 'Software',
+    'Amount HKD': 1085.37,
+  };
+  const macbookAssetOriginal = {
+    'Expense Name': 'Apple MacBook Pro asset original',
+    'Month': '2026-08',
+    'Paid Date': '2026-08-01',
+    'Status': 'Paid',
+    'Category': 'Computer / Capital Equipment',
+    'Amount HKD': 27374,
+  };
+  const macbookDepreciation = {
+    'Expense Name': 'MacBook depreciation',
+    'Month': '2026-08',
+    'Status': 'Paid',
+    'Category': 'Depreciation',
+    'Amount HKD': 1140.58,
+  };
+  const summary = calculateOwnerFinanceSummary({
+    ...baseOptions,
+    getOutstandingFinanceStatus: fields => /(?:1|2)$/.test(String(fields['Internal 1 Order No'] || ''))
+      ? '⏳ 尚欠成本'
+      : '',
+    orders: sixPaidOrders,
+    marketing: [],
+    expenses: [
+      record('late-br-2025', lateBr2025),
+      record('macbook-paid', macbookPaid),
+      record('openai-verified', verifiedOpenAi),
+      record('macbook-asset-original', macbookAssetOriginal),
+      record('macbook-depreciation', macbookDepreciation),
+    ],
+  });
+
+  assert.equal(getBusinessExpenseOperatingAmount(lateBr2025, '2026-08'), 0);
+  assert.equal(getBusinessExpenseCashAmount(lateBr2025, '2026-08'), 2500);
+  assert.equal(getBusinessExpenseDashboardLabel(lateBr2025, '2026-08'), '補交2025年商業登記費');
+  assert.equal(getBusinessExpenseOperatingAmount(macbookPaid, '2026-08'), 1236.39);
+  assert.equal(getBusinessExpenseCashAmount(macbookPaid, '2026-08'), 1236.39);
+  assert.equal(getBusinessExpenseOperatingAmount(verifiedOpenAi, '2026-08'), 1085.37);
+  assert.equal(getBusinessExpenseCashAmount(verifiedOpenAi, '2026-08'), 1085.37);
+  assert.equal(getBusinessExpenseOperatingAmount(macbookAssetOriginal, '2026-08'), 0);
+  assert.equal(getBusinessExpenseCashAmount(macbookAssetOriginal, '2026-08'), 0);
+  assert.equal(getBusinessExpenseOperatingAmount(macbookDepreciation, '2026-08'), 0);
+  assert.equal(getBusinessExpenseCashAmount(macbookDepreciation, '2026-08'), 0);
+
+  assert.equal(summary.confirmedOrders.length, 6, 'six paid August Orders stay unchanged');
+  assert.equal(summary.pendingCostOrders, 2, 'the two existing pending-cost warnings stay visible');
+  assert.equal(summary.businessExpenses, 2321.76);
+  assert.equal(summary.cashBusinessExpenses, 4821.76);
+  assert.equal(summary.currentMonthOperatingProfit, 3678.24);
+  assert.equal(summary.currentMonthCashOutflow, 4821.76);
+  assert.equal(summary.capitalItemsTotal, 27374);
+  assert.equal(summary.cashNetProfit, summary.currentMonthOperatingProfit);
+});
+
+test('AUG2601-06 preserve six paid Orders, new supplier costs and two China/Delivery warnings', () => {
+  const supplierCosts: Record<string, number> = {
+    AUG2601: 5152,
+    AUG2602: 700,
+    AUG2603: 516,
+    AUG2604: 48,
+    AUG2605: 555,
+    AUG2606: 666,
+  };
+  const orders = Object.entries(supplierCosts).map(([orderNo, supplier]) => record(orderNo, {
+    'Internal 1 Order No': orderNo,
+    Status: 'Paid',
+    'Final Amount': 1000,
+    'Amount Received HKD': 1000,
+    'Supplier Cost Used HKD': supplier,
+  }));
+  const summary = calculateOwnerFinanceSummary({
+    ...baseOptions,
+    orders,
+    marketing: [],
+    expenses: [],
+    getOutstandingFinanceStatus: fields => ['AUG2601', 'AUG2602'].includes(String(fields['Internal 1 Order No'] || ''))
+      ? '⏳ 尚欠中國運費／Delivery資料'
+      : '',
+  });
+
+  assert.equal(summary.confirmedOrders.length, 6);
+  assert.equal(summary.supplier, 7637, 'AUG2605/06 supplier costs are retained');
+  assert.equal(summary.pendingCostOrders, 2, 'two China/Delivery warnings stay pending');
 });
 
 test('valid Marketing Month wins and blank Month falls back to Spend Date', () => {

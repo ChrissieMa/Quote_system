@@ -136,6 +136,9 @@ import {
 import {
   calculateOwnerOrderCostBreakdown,
   calculateOwnerFinanceSummary,
+  getBusinessExpenseCashAmount,
+  getBusinessExpenseDashboardLabel,
+  getBusinessExpenseOperatingAmount,
   getOrderAmountReceived,
   hasIssuedReceipt,
   getOrderOutstandingAmount,
@@ -7429,7 +7432,9 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     const monthOrders = finance.confirmedOrders
       .sort((a, b) => String(a.fields['Internal 1 Order No'] || a.fields['Internal Order No'])
         .localeCompare(String(b.fields['Internal 1 Order No'] || b.fields['Internal Order No'])));
-    const monthExpenses = finance.operatingExpenses;
+    const monthExpenses = Array.from(new Map(
+      [...finance.operatingExpenses, ...finance.cashExpenses].map(record => [record.id, record]),
+    ).values());
     const totals = {
       revenue: finance.revenue,
       supplier: finance.supplier,
@@ -7442,9 +7447,11 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
     };
     const marketingSpend = finance.marketingSpend;
     const businessExpenses = finance.businessExpenses;
+    const cashBusinessExpenses = finance.cashBusinessExpenses;
     const orderCosts = finance.cashOrderCosts;
     const grossProfit = finance.cashOrderGrossProfit;
-    const netProfit = finance.cashNetProfit;
+    const operatingProfit = finance.currentMonthOperatingProfit;
+    const cashOutflow = finance.currentMonthCashOutflow;
     const accrualGrossProfit = finance.orderGrossProfit;
     const accrualNetProfit = finance.netProfit;
     const margin = finance.margin;
@@ -7540,7 +7547,9 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
             : rawStatus === 'auto-accrued'
               ? '待實扣'
               : String(fields['Status'] || '待核對');
-        return `<tr><td>${escapeHtml(fields['Expense Name'] || '-')}</td><td>${escapeHtml(fields['Expense Date'] || selectedMonth)}</td><td>${formatOwnerMoney(numberField(fields as FieldSet, 'Amount HKD'))}</td><td>${escapeHtml(status)}</td></tr>`;
+        const operatingAmount = getBusinessExpenseOperatingAmount(fields, selectedMonth);
+        const cashAmount = getBusinessExpenseCashAmount(fields, selectedMonth);
+        return `<tr><td>${escapeHtml(getBusinessExpenseDashboardLabel(fields, selectedMonth))}</td><td>${escapeHtml(fields['Expense Date'] || selectedMonth)}</td><td>${formatOwnerMoney(operatingAmount)}</td><td>${formatOwnerMoney(cashAmount)}</td><td>${escapeHtml(status)}</td></tr>`;
       }).join('');
     const unallocatedMarketingRows = finance.unallocatedMarketing
       .map(record => `<tr><td>${escapeHtml(record.fields['Campaign Name'] || 'Marketing支出')}</td><td>${formatOwnerMoney(numberField(record.fields as FieldSet, 'Spend Amount HKD'))}</td><td>月份待分配</td></tr>`)
@@ -7648,7 +7657,8 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         <div class="owner-kpi"><span>本月已收收入</span><strong>${formatOwnerMoney(totals.revenue)}</strong><small>${monthOrders.length} 張已收款 Order</small></div>
         <div class="owner-kpi"><span>未收Invoice／應收</span><strong>${formatOwnerMoney(finance.outstandingRevenue)}</strong><small>${finance.receivableOrders.length} 張未全數收款</small></div>
         <div class="owner-kpi"><span>截至目前現金毛利</span><strong>${formatOwnerMoney(grossProfit)}</strong><small>實收收入 − 已輸入實付訂單成本</small></div>
-        <div class="owner-kpi owner-kpi-highlight"><span>本月暫計現金淨利</span><strong>${formatOwnerMoney(netProfit)}</strong><small>${googleAdsStatementPending ? '8月Google Ads月結待到｜' : ''}現金淨利率 ${margin.toFixed(1)}%</small></div>
+        <div class="owner-kpi owner-kpi-highlight"><span>本月營運盈利</span><strong>${formatOwnerMoney(operatingProfit)}</strong><small>${googleAdsStatementPending ? '8月Google Ads月結待到｜' : ''}實收收入 − 已付訂單成本 − 本月營運開支</small></div>
+        <div class="owner-kpi"><span>本月營運現金流出</span><strong>${formatOwnerMoney(cashOutflow)}</strong><small>已付訂單成本＋本月實付公司開支；過往年度遲付只放呢度</small></div>
         <div class="owner-kpi"><span>預計／權責毛利（上限）</span><strong>${formatOwnerMoney(accrualGrossProfit)}</strong><small>包括已知應付，唔等於實付現金</small></div>
         <div class="owner-kpi"><span>預計／權責淨利（上限）</span><strong>${formatOwnerMoney(accrualNetProfit)}</strong><small>${totals.pending > 0 ? `尚欠${totals.pending}張Order成本｜` : ''}只供預計</small></div>
       </div>
@@ -7669,7 +7679,9 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
           <div><span>補寄成本</span><strong>${formatOwnerMoney(totals.reissue)}</strong></div>
           <div class="owner-line-total"><span>實付訂單成本合計</span><strong>${formatOwnerMoney(orderCosts)}</strong></div>
           <div><span>Meta／Marketing</span><strong>${formatOwnerMoney(marketingSpend)}</strong></div>
-          <div><span>公司每月／現金支出</span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+          <div><span>本月營運開支 <small>（計入營運盈利）</small></span><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+          <div><span>本月實付公司開支 <small>（計入現金流出）</small></span><strong>${formatOwnerMoney(cashBusinessExpenses)}</strong></div>
+          <div><span>資產原值 <small>（另列；唔會同分期／折舊重複扣）</small></span><strong>${formatOwnerMoney(finance.capitalItemsTotal)}</strong></div>
           ${finance.unallocatedMarketingSpend > 0 ? `<div><span>Marketing待分配（不計入淨利）</span><strong>${formatOwnerMoney(finance.unallocatedMarketingSpend)}</strong></div>` : ''}
         </div></section>
         <section class="owner-panel"><h2>已收款 Order 來自邊個 Ads／來源</h2><p class="owner-note">廣告帶來已收款Order：${totals.adOrders}／${monthOrders.length}</p>
@@ -7689,7 +7701,7 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         </section>
       </div>
       <div class="owner-grid">
-        <section class="owner-panel"><div class="owner-panel-head"><h2>每月固定及公司支出</h2><strong>${formatOwnerMoney(businessExpenses)}</strong></div>
+        <section class="owner-panel"><div class="owner-panel-head"><h2>每月營運開支／實付現金</h2><strong>營運 ${formatOwnerMoney(businessExpenses)}｜現金 ${formatOwnerMoney(cashBusinessExpenses)}</strong></div>
           ${expenseReceiptNotice}
           <form class="owner-expense-upload" method="POST" action="/admin/expenses/receipts" enctype="multipart/form-data">
             <input type="hidden" name="csrf" value="${getOwnerFormToken()}">
@@ -7705,7 +7717,8 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
           </div>
           <p class="owner-note">原檔會直接存入Airtable；已連接桌面「稅務單據」後，同一原檔亦會自動存到「00 待整理（所有單據先放這裡）」並寫入同步記錄。待核對金額及分類前會以HK$0標記，唔會計入損益。</p>
           ${missingExpenses.length ? `<div class="owner-alert">未見本月記錄：${missingExpenses.map(escapeHtml).join('、')}</div>` : '<div class="owner-ok">固定支出已按排程自動記錄，毋須逐張單據再入。</div>'}
-          ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>日期</th><th>金額</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
+          <p class="owner-note">「計入本月營運盈利」按所屬年度／月份分攤；「本月現金流出」只計實際已付。過往年度遲付唔會壓低本月營運盈利。</p>
+          ${expenseRows ? `<div class="owner-table-wrap"><table><thead><tr><th>支出</th><th>付款／記錄日期</th><th>計入本月營運盈利</th><th>本月現金流出</th><th>狀態</th></tr></thead><tbody>${expenseRows}</tbody></table></div>` : '<div class="owner-empty">本月未有公司支出記錄。</div>'}
           ${unallocatedMarketingRows ? `<h3 class="owner-subhead">Marketing待分配</h3><div class="owner-table-wrap"><table><thead><tr><th>項目</th><th>金額</th><th>狀態</th></tr></thead><tbody>${unallocatedMarketingRows}</tbody></table></div>` : ''}
         </section>
         <section class="owner-panel"><div class="owner-panel-head"><h2>尚欠資料提醒</h2><a href="/admin/costs?month=${encodeURIComponent(selectedMonth)}">前往補資料 →</a></div>
