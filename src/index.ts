@@ -120,6 +120,14 @@ import {
   validateAggregateDateRange,
 } from './purchase-cycle-aggregate';
 import {
+  buildLegacyCustomerMergeFields,
+  extractCustomerId,
+  nonBlankCustomerUpdates,
+  normalizePhone,
+  reconcileCustomerSearchResults,
+  selectCanonicalCustomerId,
+} from './customer-identity';
+import {
   detectExpenseReceiptFile,
   expenseReceiptSha256,
   EXPENSE_RECEIPT_FIELD,
@@ -1153,14 +1161,6 @@ const buildDeliveryWaiverText = (
   return lines.join('\n');
 };
 
-// Normalize Hong Kong phone numbers so formats such as
-// 68983722, 6898 3722 and +852 6898 3722 are treated as the same number.
-const normalizePhone = (value: unknown): string => {
-  let digits = String(value ?? '').replace(/\D/g, '');
-  if (digits.length === 11 && digits.startsWith('852')) digits = digits.slice(3);
-  return digits;
-};
-
 const findCustomerByPhone = async (phone: unknown) => {
   const normalized = normalizePhone(phone);
   if (!normalized) return null;
@@ -1169,6 +1169,33 @@ const findCustomerByPhone = async (phone: unknown) => {
     fields: ['Phone', 'Customer Name', 'Customer ID', 'Email', 'Address'],
   }).all();
   return customers.find((customer: any) => normalizePhone(customer.fields['Phone']) === normalized) || null;
+};
+
+const findCustomerByCustomerId = async (customerId: unknown) => {
+  const normalized = extractCustomerId(customerId);
+  if (!normalized) return null;
+
+  const customers = await tableCustomers.select({
+    fields: ['Phone', 'Customer Name', 'Customer ID', 'Email', 'Address'],
+  }).all();
+  return customers.find((customer: any) => extractCustomerId(customer.fields['Customer ID']) === normalized) || null;
+};
+
+const findLegacyCustomerByPhone = async (phone: unknown) => {
+  const normalized = normalizePhone(phone);
+  if (!normalized) return null;
+
+  const customers = await tableCustomersActive.select({
+    fields: [
+      'Customer Display', 'Company Name', 'Last Name', 'Shipping Address',
+      'Shipping Phone', 'EmailID', 'MobilePhone', 'CF.Find Us', 'CF.Social Media',
+      'CF.Keyword', 'CF.Why choose us', 'Department', 'Designation',
+    ],
+  }).all();
+  return customers.find((customer: any) => [
+    customer.fields['MobilePhone'],
+    customer.fields['Shipping Phone'],
+  ].some(value => normalizePhone(value) === normalized)) || null;
 };
 
 const getLinkedRecordId = (value: unknown): string | null => {
@@ -2595,12 +2622,18 @@ const activateLegacyCustomer = async (legacyRecordId: string) => {
   const address = getCustomerText(f, 'Shipping Address');
   const legacyNotes = buildLegacyNotes(f);
 
+  const existingByLegacyId = legacyCustomerId
+    ? await findCustomerByCustomerId(legacyCustomerId)
+    : null;
   const existingByPrimary = await findCustomerByPhone(primaryPhone);
   const existingByAlternate = !existingByPrimary && alternatePhone ? await findCustomerByPhone(alternatePhone) : null;
-  const existing = existingByPrimary || existingByAlternate;
+  const existing = existingByLegacyId || existingByPrimary || existingByAlternate;
+  const existingCustomerId = existing ? extractCustomerId(existing.fields['Customer ID']) : '';
+  let canonicalCustomerId = selectCanonicalCustomerId(legacyCustomerId, existingCustomerId, '');
+  if (!canonicalCustomerId) canonicalCustomerId = await getNextCustomerId();
 
   const legacyFields: FieldSet = {
-    'Customer ID': legacyCustomerId || await getNextCustomerId(),
+    'Customer ID': canonicalCustomerId,
     'Customer Name': name,
     'Phone': primaryPhone,
     'Email': email,
@@ -2613,17 +2646,12 @@ const activateLegacyCustomer = async (legacyRecordId: string) => {
   };
 
   if (existing) {
-    const existingCustomerId = extractCustomerId(existing.fields['Customer ID']);
     await tableCustomers.update([{
       id: existing.id,
-      fields: {
-        ...(!existingCustomerId ? { 'Customer ID': legacyCustomerId || await getNextCustomerId() } : {}),
-        'Customer Status': 'Legacy Activated',
-        'Legacy Customer Ref': legacyRef,
-        'Alternate Phone': alternatePhone,
-        'Company Name': companyName,
-        'Legacy Notes': legacyNotes,
-      } as FieldSet
+      fields: buildLegacyCustomerMergeFields(
+        existing.fields as Record<string, unknown>,
+        legacyFields as Record<string, unknown>,
+      ) as FieldSet,
     }]);
     const updated = await tableCustomers.find(existing.id);
     return updated;
@@ -2631,6 +2659,12 @@ const activateLegacyCustomer = async (legacyRecordId: string) => {
 
   const created = await tableCustomers.create([{ fields: legacyFields }]);
   return created[0];
+};
+
+const resolveCustomerByPhone = async (phone: unknown) => {
+  const legacy = await findLegacyCustomerByPhone(phone);
+  if (legacy) return activateLegacyCustomer(legacy.id);
+  return findCustomerByPhone(phone);
 };
 
 const searchCustomers = async (query: unknown) => {
@@ -2661,7 +2695,7 @@ const searchCustomers = async (query: unknown) => {
     .map((record: any) => {
       const f = record.fields;
       return {
-        source: 'customers',
+        source: 'customers' as const,
         id: record.id,
         display: buildCustomerSearchDisplay(f),
         customerId: getCustomerText(f, 'Customer ID'),
@@ -2700,7 +2734,7 @@ const searchCustomers = async (query: unknown) => {
       const mobilePhone = getCustomerText(f, 'MobilePhone');
       const shippingPhone = getCustomerText(f, 'Shipping Phone');
       return {
-        source: 'legacy',
+        source: 'legacy' as const,
         id: record.id,
         display: buildLegacyCustomerSearchDisplay(f),
         customerId: getCustomerText(f, 'Customer Display'),
@@ -2713,7 +2747,7 @@ const searchCustomers = async (query: unknown) => {
       };
     });
 
-  return [...officialResults, ...legacyResults].slice(0, 20);
+  return reconcileCustomerSearchResults(officialResults, legacyResults).slice(0, 20);
 };
 
 // ─── Owner finance helpers ─────────────────────────────────────────────────
@@ -2964,11 +2998,6 @@ const getHongKongDate = (): string =>
     month: '2-digit',
     day: '2-digit',
   }).format(new Date());
-
-const extractCustomerId = (value: unknown): string => {
-  const match = String(value ?? '').trim().toUpperCase().match(/^L(\d{1,4})$/);
-  return match ? `L${match[1].padStart(4, '0')}` : '';
-};
 
 const getNextCustomerId = async (): Promise<string> => {
   const [officialCustomers, legacyCustomers] = await Promise.all([
@@ -3784,7 +3813,7 @@ app.post('/api/quote-pilot/create', requireQuotePilotApi, async (req: Request, r
         terms: DEFAULT_TERMS,
         __pilotPublicToken: publicToken,
       };
-      const officialCustomer = await findCustomerByPhone(preview.phone);
+      const officialCustomer = await resolveCustomerByPhone(preview.phone);
       if (officialCustomer) {
         body.customerRecordId = officialCustomer.id;
         body.customerSource = 'customers';
@@ -6427,7 +6456,7 @@ app.post(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request,
     const linkedCustomerId = getLinkedRecordId(record.fields['Customer']);
     const existingCustomer = linkedCustomerId
       ? await tableCustomers.find(linkedCustomerId)
-      : await findCustomerByPhone(customerPhone);
+      : await resolveCustomerByPhone(customerPhone);
 
     let customerRecordId = '';
     if (existingCustomer) {
@@ -6435,10 +6464,12 @@ app.post(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request,
       await tableCustomers.update([{
         id: existingCustomer.id,
         fields: {
-          'Customer Name': customerName,
-          'Phone': customerPhone,
-          'Email': customerEmail,
-          'Address': chineseDeliveryAddress,
+          ...nonBlankCustomerUpdates({
+            'Customer Name': customerName,
+            'Phone': customerPhone,
+            'Email': customerEmail,
+            'Address': chineseDeliveryAddress,
+          }),
           ...(howKnowUsValue ? { 'How did you know us?': howKnowUsValue } : {}),
         } as FieldSet
       }]);
@@ -6524,19 +6555,19 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       }
     }
     if (!existingCustomer) {
-      existingCustomer = await findCustomerByPhone(lookupPhone);
+      existingCustomer = await resolveCustomerByPhone(lookupPhone);
     }
 
     if (existingCustomer) {
       customerRecordId = existingCustomer.id;
       await tableCustomers.update([{
         id: existingCustomer.id,
-        fields: {
+        fields: nonBlankCustomerUpdates({
           'Customer Name': submittedName,
           'Phone': lookupPhone,
           'Email': submittedEmail,
           'Address': submittedAddress,
-        } as FieldSet
+        }) as FieldSet
       }]);
     } else {
       const newCustomerId = await getNextCustomerId();
