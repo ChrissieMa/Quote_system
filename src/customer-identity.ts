@@ -11,6 +11,22 @@ export type CustomerSearchResult = {
   alternatePhone?: string;
 };
 
+export type CustomerResolutionCandidate<T> = {
+  source: 'legacy' | 'linked' | 'phone';
+  record: T;
+};
+
+export const selectCustomerResolutionCandidate = <T>(
+  legacyRecord: T | null,
+  linkedRecord: T | null,
+  phoneRecord: T | null,
+): CustomerResolutionCandidate<T> | null => {
+  if (legacyRecord) return { source: 'legacy', record: legacyRecord };
+  if (linkedRecord) return { source: 'linked', record: linkedRecord };
+  if (phoneRecord) return { source: 'phone', record: phoneRecord };
+  return null;
+};
+
 export const normalizePhone = (value: unknown): string => {
   let digits = String(value ?? '').replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('852')) digits = digits.slice(3);

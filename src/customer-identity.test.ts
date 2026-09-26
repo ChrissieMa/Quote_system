@@ -6,6 +6,7 @@ import {
   nonBlankCustomerUpdates,
   normalizePhone,
   reconcileCustomerSearchResults,
+  selectCustomerResolutionCandidate,
   selectCanonicalCustomerId,
 } from './customer-identity';
 
@@ -99,4 +100,19 @@ test('phone-matched official and legacy rows collapse to one legacy activation c
   assert.equal(results[0].customerId, 'L0795');
   assert.equal(results[0].name, 'Current Name');
   assert.equal(results[0].address, 'FICTIONAL ADDRESS');
+});
+
+test('legacy phone match takes precedence over an already-linked provisional customer', () => {
+  const legacy = { id: 'rec-legacy' };
+  const linked = { id: 'rec-linked-provisional' };
+  const phone = { id: 'rec-phone-match' };
+
+  assert.deepEqual(selectCustomerResolutionCandidate(legacy, linked, phone), {
+    source: 'legacy',
+    record: legacy,
+  });
+  assert.deepEqual(selectCustomerResolutionCandidate(null, linked, phone), {
+    source: 'linked',
+    record: linked,
+  });
 });

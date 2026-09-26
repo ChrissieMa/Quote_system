@@ -125,6 +125,7 @@ import {
   nonBlankCustomerUpdates,
   normalizePhone,
   reconcileCustomerSearchResults,
+  selectCustomerResolutionCandidate,
   selectCanonicalCustomerId,
 } from './customer-identity';
 import {
@@ -2665,6 +2666,26 @@ const resolveCustomerByPhone = async (phone: unknown) => {
   const legacy = await findLegacyCustomerByPhone(phone);
   if (legacy) return activateLegacyCustomer(legacy.id);
   return findCustomerByPhone(phone);
+};
+
+// A Quote may already point at a provisional/duplicate Customers record created by
+// the old flow. A matching Legacy row remains authoritative so its original
+// Customer ID and missing profile data can be restored before conversion.
+const resolveCustomerForQuote = async (linkedCustomerRecordId: string | null, phone: unknown) => {
+  const legacyRecord = await findLegacyCustomerByPhone(phone);
+  let linkedRecord: any = null;
+  if (linkedCustomerRecordId) {
+    try {
+      linkedRecord = await tableCustomers.find(linkedCustomerRecordId);
+    } catch {
+      linkedRecord = null;
+    }
+  }
+  const phoneRecord = linkedRecord ? null : await findCustomerByPhone(phone);
+  const selected = selectCustomerResolutionCandidate(legacyRecord, linkedRecord, phoneRecord);
+  if (!selected) return null;
+  if (selected.source === 'legacy') return activateLegacyCustomer(selected.record.id);
+  return selected.record;
 };
 
 const searchCustomers = async (query: unknown) => {
@@ -6454,9 +6475,7 @@ app.post(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request,
     // Upsert customer master. If the Quote is already linked to a Customer,
     // update that exact Customer first. Otherwise use normalized phone matching.
     const linkedCustomerId = getLinkedRecordId(record.fields['Customer']);
-    const existingCustomer = linkedCustomerId
-      ? await tableCustomers.find(linkedCustomerId)
-      : await resolveCustomerByPhone(customerPhone);
+    const existingCustomer = await resolveCustomerForQuote(linkedCustomerId, customerPhone);
 
     let customerRecordId = '';
     if (existingCustomer) {
@@ -6546,17 +6565,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
     const submittedAddress = (qf['Chinese Delivery Address'] as string) || '';
     const linkedCustomerId = getLinkedRecordId(qf['Customer']);
 
-    let existingCustomer: any = null;
-    if (linkedCustomerId) {
-      try {
-        existingCustomer = await tableCustomers.find(linkedCustomerId);
-      } catch {
-        existingCustomer = null;
-      }
-    }
-    if (!existingCustomer) {
-      existingCustomer = await resolveCustomerByPhone(lookupPhone);
-    }
+    const existingCustomer = await resolveCustomerForQuote(linkedCustomerId, lookupPhone);
 
     if (existingCustomer) {
       customerRecordId = existingCustomer.id;
