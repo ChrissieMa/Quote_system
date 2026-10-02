@@ -73,6 +73,12 @@ test('owner can choose a payment method and upload one idempotent expense receip
   const cookie = String(login.headers.get('set-cookie') || '').split(';')[0];
   assert.ok(cookie.includes('='));
 
+  const boundaryBefore = await (await fetch(`${origin}/__test-only/order-boundary`)).json() as any;
+  assert.equal(boundaryBefore.orders, 1);
+  assert.equal(boundaryBefore.orderItems, 1);
+  assert.equal(boundaryBefore.pendingQuote.invoiceToken, '');
+  assert.equal(boundaryBefore.pendingQuote.orderRef, '');
+
   const quotesHtml = await (await fetch(`${origin}/quotes`, { headers: { Cookie: cookie } })).text();
   for (const method of ['銀行轉帳', 'FPS', 'PayMe', '支票']) assert.ok(quotesHtml.includes(`value="${method}"`));
   const receiptAction = capture(quotesHtml, /action="([^"]+\/mark-paid)"/, 'Receipt action');
@@ -121,4 +127,56 @@ test('owner can choose a payment method and upload one idempotent expense receip
   });
   assert.equal(duplicate.status, 303);
   assert.match(String(duplicate.headers.get('location')), /expenseReceipt=duplicate/);
+
+  // Converting a Quote now issues only an unpaid Invoice. No Order or Order
+  // Item may exist until the owner confirms full payment and creates Receipt.
+  const convertAction = capture(quotesHtml, /action="([^\"]+\/convert)"/, 'Convert action');
+  const converted = await fetch(`${origin}${convertAction}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { Origin: origin, Cookie: cookie },
+  });
+  assert.equal(converted.status, 302);
+  assert.match(String(converted.headers.get('location')), /converted=INV-2026-/);
+
+  const boundaryAfterInvoice = await (await fetch(`${origin}/__test-only/order-boundary`)).json() as any;
+  assert.equal(boundaryAfterInvoice.orders, 1);
+  assert.equal(boundaryAfterInvoice.orderItems, 1);
+  assert.ok(boundaryAfterInvoice.pendingQuote.invoiceToken);
+  assert.ok(boundaryAfterInvoice.pendingQuote.invoiceNumber);
+  assert.equal(boundaryAfterInvoice.pendingQuote.orderRef, '');
+
+  const unpaidInvoice = await fetch(`${origin}/invoice/${boundaryAfterInvoice.pendingQuote.invoiceToken}`);
+  assert.equal(unpaidInvoice.status, 200);
+  const unpaidInvoiceHtml = await unpaidInvoice.text();
+  assert.ok(unpaidInvoiceHtml.includes(boundaryAfterInvoice.pendingQuote.invoiceNumber));
+
+  const convertedQuotesHtml = await (await fetch(`${origin}/quotes`, { headers: { Cookie: cookie } })).text();
+  assert.ok(!convertedQuotesHtml.includes(`action="${convertAction}"`));
+  const pendingReceiptAction = `/admin/invoice/${boundaryAfterInvoice.pendingQuote.invoiceToken}/mark-paid`;
+  assert.ok(convertedQuotesHtml.includes(`action="${pendingReceiptAction}"`));
+  const pendingFormStart = convertedQuotesHtml.indexOf(`action="${pendingReceiptAction}"`);
+  const pendingFormHtml = convertedQuotesHtml.slice(pendingFormStart, pendingFormStart + 1400);
+  const pendingCsrf = capture(pendingFormHtml, /name="csrf" value="([a-f0-9]{64})"/, 'pending csrf');
+  const pendingRequestId = capture(pendingFormHtml, /name="payment_request_id" value="(recv_[a-f0-9]{32})"/, 'pending payment request id');
+  const confirmPaid = await fetch(`${origin}${pendingReceiptAction}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ csrf: pendingCsrf, payment_request_id: pendingRequestId, payment_method: '銀行轉帳' }),
+  });
+  assert.equal(confirmPaid.status, 302);
+
+  const boundaryAfterPayment = await (await fetch(`${origin}/__test-only/order-boundary`)).json() as any;
+  assert.equal(boundaryAfterPayment.orders, 2);
+  assert.equal(boundaryAfterPayment.orderItems, 2);
+  assert.ok(boundaryAfterPayment.pendingQuote.orderRef);
+
+  const replay = await fetch(`${origin}${pendingReceiptAction}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({ csrf: pendingCsrf, payment_request_id: pendingRequestId, payment_method: '銀行轉帳' }),
+  });
+  assert.equal(replay.status, 302);
+  const boundaryAfterReplay = await (await fetch(`${origin}/__test-only/order-boundary`)).json() as any;
+  assert.equal(boundaryAfterReplay.orders, 2);
+  assert.equal(boundaryAfterReplay.orderItems, 2);
 });
