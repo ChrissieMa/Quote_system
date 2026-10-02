@@ -399,6 +399,7 @@ const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST 
 const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
 const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
 const quoteItemsMutationLock = new InProcessQuoteItemsLock();
+const invoiceConversionLock = new InProcessQuoteItemsLock();
 if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER && BROWSER_QUOTATION_IMAGE_BRIDGE) {
   quotationImageRuntime.coordinator = new QuotationImageCoordinator(
     BROWSER_QUOTATION_IMAGE_BRIDGE,
@@ -451,6 +452,9 @@ if (LOCAL_QUOTE_FIXTURE) {
   }
 }
 if (LOCAL_QUOTE_FIXTURE) {
+  app.get('/__test-only/order-boundary', async (_req: Request, res: Response) => {
+    res.json(await LOCAL_QUOTE_FIXTURE.orderBoundarySnapshot());
+  });
   app.get(`${LOCAL_QUOTE_FIXTURE.assetStore.pathPrefix}:digest.png`, (req: Request, res: Response) => {
     const bytes = LOCAL_QUOTE_FIXTURE.assetStore.resolve(String(req.params.digest || ''));
     if (!bytes) return res.status(404).type('text/plain').send('Local test image not found.');
@@ -3012,6 +3016,29 @@ const getNextNumber = async (
   return `${prefix}-2026-0001`;
 };
 
+const nextNumberFromValues = (values: unknown[], prefix: string): string => {
+  const numbers = values
+    .map(value => String(value || '').trim().match(new RegExp(`^${prefix}-2026-(\\d+)$`)))
+    .filter(Boolean)
+    .map(match => parseInt((match as RegExpMatchArray)[1], 10))
+    .filter(Number.isFinite);
+  const next = (numbers.length ? Math.max(...numbers) : 0) + 1;
+  return `${prefix}-2026-${String(next).padStart(4, '0')}`;
+};
+
+// Unpaid invoices now live on Quotes until payment. Invoice numbering must
+// therefore consider both legacy/paid Orders and not-yet-paid Quotes.
+const getNextInvoiceNumber = async (): Promise<string> => {
+  const [orders, quotes] = await Promise.all([
+    tableOrders.select({ fields: ['Invoice Number'] }).all(),
+    tableQuotes.select({ fields: ['Converted Invoice No'] }).all(),
+  ]);
+  return nextNumberFromValues([
+    ...orders.map(record => record.fields['Invoice Number']),
+    ...quotes.map(record => record.fields['Converted Invoice No']),
+  ], 'INV');
+};
+
 const getHongKongDate = (): string =>
   new Intl.DateTimeFormat('en-CA', {
     timeZone: 'Asia/Hong_Kong',
@@ -3019,6 +3046,17 @@ const getHongKongDate = (): string =>
     month: '2-digit',
     day: '2-digit',
   }).format(new Date());
+
+const getHongKongDateFromTimestamp = (value: unknown): string => {
+  const parsed = new Date(String(value || ''));
+  if (Number.isNaN(parsed.getTime())) return getHongKongDate();
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Hong_Kong',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(parsed);
+};
 
 const getNextCustomerId = async (): Promise<string> => {
   const [officialCustomers, legacyCustomers] = await Promise.all([
@@ -3090,6 +3128,89 @@ const itemSuffixFromIndex = (index: number): string => {
   }
   return suffix;
 };
+
+const buildOrderFieldsFromQuote = (input: {
+  quoteFields: FieldSet;
+  customerRecordId: string;
+  internalOrderNo: string;
+  internalOrderCode: string;
+  invoiceNumber: string;
+  invoicePublicToken: string;
+  invoiceDate: string;
+  orderMonthSelect: string;
+}): FieldSet => {
+  const qf = input.quoteFields;
+  return {
+    'Internal Order No': input.internalOrderNo,
+    'Internal 1 Order No': input.internalOrderCode,
+    'Invoice Number': input.invoiceNumber,
+    'Order Month & Year': input.orderMonthSelect,
+    'Invoice Public Token': input.invoicePublicToken,
+    'Customer': [input.customerRecordId],
+    'Product Amount': qf['Sub Total'],
+    'Discount': qf['Discount'],
+    'Promotion / Offer Type': qf['Promotion / Offer Type'] || undefined,
+    'Discount Type': qf['Discount Type'] || '無折扣',
+    'Discount Multiplier': (qf['Discount Multiplier'] as number | undefined) || undefined,
+    'Discount Amount HKD': qf['Discount Amount HKD'] || 0,
+    'Discount Reason': qf['Discount Reason'] || undefined,
+    'Discount Value HKD': qf['Discount Value HKD'] || Math.max(0, Number(qf['Sub Total'] || 0) - Number(qf['Total'] || 0)),
+    'Discount Display Text': qf['Discount Display Text'] || '',
+    'Delivery Charge Mode': qf['Delivery Charge Mode'] || '',
+    'Delivery Offer Reason': qf['Delivery Offer Reason'] || undefined,
+    'Delivery Display Text': qf['Delivery Display Text'] || '',
+    ...(qf['Quote Source / Channel'] ? { 'Order Source / Channel': qf['Quote Source / Channel'] } : {}),
+    ...(qf['Campaign / Source Detail'] ? { 'Campaign / Source Detail': qf['Campaign / Source Detail'] } : {}),
+    ...(Array.isArray(qf['Inquiry']) && qf['Inquiry'].length ? { 'Inquiry': qf['Inquiry'] } : {}),
+    ...(Array.isArray(qf['Performance Month']) && qf['Performance Month'].length ? { 'Performance Month': qf['Performance Month'] } : {}),
+    'Payment Method': qf['Payment Method'] || '',
+    'Invoice Date': input.invoiceDate,
+    'Notes': qf['Notes'] || '',
+    'Terms and Conditions': qf['Terms and Conditions'] || '',
+    'Source Quote Ref': (qf['Quote Number'] as string) || '',
+  };
+};
+
+const buildOrderItemsPayload = (
+  items: any[],
+  orderRecordId: string,
+  internalOrderCode: string,
+  itemMonthSelect: string,
+): Array<{ fields: FieldSet }> => items.map((item: any, itemIndex: number) => {
+  const rawAccArray: string[] = Array.isArray(item.accessories)
+    ? item.accessories.filter(Boolean)
+    : (item.accessories ? String(item.accessories).split(',').map((value: string) => value.trim()).filter(Boolean) : []);
+  const accArray = Array.from(new Set(
+    rawAccArray.map(value => value.replace(/\s*x\d+$/i, '').trim()).filter(Boolean),
+  ));
+  const safeStr = (value: any) => (value != null && value !== '') ? String(value) : '';
+  const fields: FieldSet = {
+    'Item No': `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`,
+    'Month': itemMonthSelect,
+    'Order': [orderRecordId],
+    'Description': safeStr(item.description),
+    'QTY': item.qty || 1,
+    'Product Amount': item.amount || 0,
+    'Quoted China Freight HKD': Number(item.freight) || 0,
+    'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
+    'Quoted Profit HKD': Number(item.profit) || 0,
+    'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
+    'Local Delivery Override': Boolean(item.localDeliveryOverride),
+    'Local Delivery Notes': safeStr(item.localDeliveryNotes),
+    'Item Type': safeStr(item.itemType),
+    'For What': safeStr(item.forWhat),
+    'Inter L': safeStr(item.interL),
+    'Inter D': safeStr(item.interD),
+    'Inter H': safeStr(item.interH),
+    'No. of Levels': item.noOfLevels || null,
+    'Level Heights': safeStr(item.levelHeights),
+  };
+  if (accArray.length > 0) fields['Accessories'] = accArray;
+  if (item.outerL) fields['Outer L'] = safeStr(item.outerL);
+  if (item.outerD) fields['Outer D'] = safeStr(item.outerD);
+  if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
+  return { fields };
+});
 
 // ─── Shared CSS ─────────────────────────────────────────────────────────────
 const SHARED_CSS = `
@@ -4336,11 +4457,14 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
           // 2. Copy Customer Info Link
           actions += ` <button type="button" class="btn btn-secondary btn-sm" onclick="copyLink('${customerInfoLink}', this)">Copy Customer Info Form Link</button>`;
 
-          // 3. Convert to Invoice (always shown)
-          actions += `
-            <form method="POST" action="/admin/quote/${token}/convert" style="display:inline;" onsubmit="return confirm('Convert this quote to Invoice?')">
-              <button type="submit" class="btn btn-primary btn-sm">Convert to Invoice</button>
-            </form>`;
+          // 3. Convert to Invoice once. Replaying this action must never issue a
+          // second Invoice number/token or create a duplicate business record.
+          if (!invoiceToken) {
+            actions += `
+              <form method="POST" action="/admin/quote/${token}/convert" style="display:inline;" onsubmit="return confirm('Convert this quote to Invoice?')">
+                <button type="submit" class="btn btn-primary btn-sm">Convert to Invoice</button>
+              </form>`;
+          }
 
           // 4. View Invoice (only if token exists)
           if (invoiceToken) {
@@ -6592,139 +6716,26 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       customerRecordId = newCustomer[0].id;
     }
 
-    // B. Order_2026
-    const internalOrderNo = await getNextNumber(tableOrders, 'Internal Order No', 'ORD');
-    const invoiceNumber = await getNextNumber(tableOrders, 'Invoice Number', 'INV');
-    const invoicePublicToken = generateToken();
-    const invoiceDate = getHongKongDate();
-    const internalOrderCode = await getNextInternalOrderCode(invoiceDate);
-    const { orderMonthSelect, itemMonthSelect } = getOrderMonthDetails(invoiceDate);
-
-    const orderFields: FieldSet = {
-      'Internal Order No': internalOrderNo,
-      'Internal 1 Order No': internalOrderCode,
-      'Invoice Number': invoiceNumber,
-      'Order Month & Year': orderMonthSelect,
-      'Invoice Public Token': invoicePublicToken,
-      'Customer': [customerRecordId],
-      'Product Amount': qf['Sub Total'],
-      'Discount': qf['Discount'],
-      'Promotion / Offer Type': qf['Promotion / Offer Type'] || undefined,
-      'Discount Type': qf['Discount Type'] || '無折扣',
-      'Discount Multiplier': (qf['Discount Multiplier'] as number | undefined) || undefined,
-      'Discount Amount HKD': qf['Discount Amount HKD'] || 0,
-      'Discount Reason': qf['Discount Reason'] || undefined,
-      'Discount Value HKD': qf['Discount Value HKD'] || Math.max(0, Number(qf['Sub Total'] || 0) - Number(qf['Total'] || 0)),
-      'Discount Display Text': qf['Discount Display Text'] || '',
-      'Delivery Charge Mode': qf['Delivery Charge Mode'] || '',
-      'Delivery Offer Reason': qf['Delivery Offer Reason'] || undefined,
-      'Delivery Display Text': qf['Delivery Display Text'] || '',
-      ...(qf['Quote Source / Channel'] ? { 'Order Source / Channel': qf['Quote Source / Channel'] } : {}),
-      ...(qf['Campaign / Source Detail'] ? { 'Campaign / Source Detail': qf['Campaign / Source Detail'] } : {}),
-      ...(Array.isArray(qf['Inquiry']) && qf['Inquiry'].length ? { 'Inquiry': qf['Inquiry'] } : {}),
-      ...(Array.isArray(qf['Performance Month']) && qf['Performance Month'].length ? { 'Performance Month': qf['Performance Month'] } : {}),
-      // 'Final Amount' is computed — do NOT write
-      // 'Description' is computed — do NOT write
-      'Payment Method': qf['Payment Method'] || '',
-      'Invoice Date': invoiceDate,
-      'Notes': qf['Notes'] || '',
-      'Terms and Conditions': qf['Terms and Conditions'] || '',
-      'Source Quote Ref': (qf['Quote Number'] as string) || '',
-    };
-    const newOrder = await tableOrders.create([{ fields: orderFields }]);
-    const orderRecordId = newOrder[0].id;
-
-    // V13: When a Quote converts to Invoice, mark the linked Inquiry as Converted and link the Order.
-    try {
-      const linkedInquiryId = getLinkedRecordId(qf['Inquiry']);
-      if (linkedInquiryId) {
-        await tableInquiries.update([{
-          id: linkedInquiryId,
-          fields: {
-            'Inquiry Status': 'Converted',
-            'Order': [orderRecordId],
-          } as FieldSet,
-        }]);
-      }
-    } catch (inquiryUpdateError) {
-      console.error('V13 inquiry conversion update failed:', inquiryUpdateError);
-      // Do not block invoice conversion if Inquiry update fails.
-    }
-
-    // C. Order Items
-    let items: any[] = [];
-    items = parseQuoteItems(qf['Quote Items JSON']);
-    let itemsWithOrderItemIdentity = items;
-
-    if (items.length > 0) {
-      const orderItemsPayload = items.map((item: any, itemIndex: number) => {
-        // Accessories: Airtable Multiple Select requires an array of strings
-        const rawAccArray: string[] = Array.isArray(item.accessories)
-          ? item.accessories.filter(Boolean)
-          : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-        const accArray: string[] = Array.from(new Set(rawAccArray.map((s: string) => s.replace(/\s*x\d+$/i, '').trim()).filter(Boolean)));
-
-        const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
-        const itemNo = `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`;
-        const fields: FieldSet = {
-          'Item No': itemNo,
-          'Month': itemMonthSelect,
-          'Order': [orderRecordId],
-          // Item Type and For What already have their own Airtable fields.
-          // Description must remain the customer's Quote Description only so
-          // production notes and Package Detail do not repeat product data.
-          'Description': safeStr(item.description),
-          'QTY': item.qty || 1,
-          'Product Amount': item.amount || 0,
-          'Quoted China Freight HKD': Number(item.freight) || 0,
-          'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
-          'Quoted Profit HKD': Number(item.profit) || 0,
-          'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
-          'Local Delivery Override': Boolean(item.localDeliveryOverride),
-          'Local Delivery Notes': safeStr(item.localDeliveryNotes),
-          'Item Type': safeStr(item.itemType),
-          'For What': safeStr(item.forWhat),
-          'Inter L': safeStr(item.interL),
-          'Inter D': safeStr(item.interD),
-          'Inter H': safeStr(item.interH),
-          'No. of Levels': item.noOfLevels || null,
-          'Level Heights': safeStr(item.levelHeights),
-        };
-        if (accArray.length > 0) fields['Accessories'] = accArray;
-        if (item.outerL) fields['Outer L'] = safeStr(item.outerL);
-        if (item.outerD) fields['Outer D'] = safeStr(item.outerD);
-        if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
-        return { fields };
-      });
-      const createdOrderItems = await tableOrderItems.create(orderItemsPayload);
-      itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
-    }
-
-    // D. Update Quote. Serialize this Quote Items JSON write with image metadata
-    // persistence and re-read the latest items so a just-finished image cannot
-    // overwrite order identity (or vice versa).
-    await quoteItemsMutationLock.run(quote.id, async () => {
+    // B. Issue the Invoice on the Quote only. An Order and its Order Items are
+    // business records for paid work, so they are materialized later by the
+    // full-payment action instead of being created for an unpaid Invoice.
+    let invoiceNumber = '';
+    await invoiceConversionLock.run('invoice-sequence', async () => {
       const latestQuote = await tableQuotes.find(quote.id);
-      const latestItems = parseQuoteItems(latestQuote.fields['Quote Items JSON']);
-      const linkedByItemId = new Map(itemsWithOrderItemIdentity
-        .filter(item => isImmutableItemId(item.item_id))
-        .map(item => [String(item.item_id).toLowerCase(), item.order_item_identity]));
-      const mergedItems = latestItems.map((latestItem, index) => {
-        const linkedIdentity = isImmutableItemId(latestItem.item_id)
-          ? linkedByItemId.get(String(latestItem.item_id).toLowerCase())
-          : itemsWithOrderItemIdentity[index]?.order_item_identity;
-        return linkedIdentity ? { ...latestItem, order_item_identity: linkedIdentity } : latestItem;
-      });
+      const existingInvoiceToken = String(latestQuote.fields['Invoice Public Token'] || '').trim();
+      const existingInvoiceNumber = String(latestQuote.fields['Converted Invoice No'] || '').trim();
+      if (existingInvoiceToken && existingInvoiceNumber) {
+        invoiceNumber = existingInvoiceNumber;
+        return;
+      }
+      invoiceNumber = await getNextInvoiceNumber();
       await tableQuotes.update([{
         id: quote.id,
         fields: {
-          'Converted Order No': internalOrderNo,
           'Converted Invoice No': invoiceNumber,
-          'Order Ref': orderRecordId,
           'Customer': [customerRecordId],
           'Converted At': new Date().toISOString(),
-          'Invoice Public Token': invoicePublicToken,
-          'Quote Items JSON': JSON.stringify(mergedItems),
+          'Invoice Public Token': generateToken(),
           'Status': 'Mark as Paid',
         }
       }]);
@@ -6745,12 +6756,31 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return publicDocumentNotFound(res);
-
-    const order = records[0];
-    const of = order.fields;
+    const order = records[0] || null;
+    let sourceQuoteRecord: any = null;
+    let of: FieldSet;
+    if (order) {
+      of = order.fields;
+    } else {
+      const quoteRecords = await tableQuotes.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
+      if (quoteRecords.length === 0) return publicDocumentNotFound(res);
+      sourceQuoteRecord = quoteRecords[0];
+      const qf = sourceQuoteRecord.fields as FieldSet;
+      const invoiceDate = getHongKongDateFromTimestamp(qf['Converted At'] || qf['Quote Date']);
+      of = {
+        ...qf,
+        'Invoice Number': qf['Converted Invoice No'],
+        'Invoice Date': invoiceDate,
+        'Status': 'Unpaid',
+        'Product Amount': qf['Sub Total'],
+        'Final Amount': qf['Total'],
+        'Source Quote Ref': qf['Quote Number'],
+      };
+    }
     const status = (of['Status'] as string) || 'Unpaid';
-    const orderLanguage = await getOrderLanguageFromSourceQuote(of);
+    const orderLanguage = sourceQuoteRecord
+      ? normalizeQuoteLanguage(sourceQuoteRecord.fields['Quote Language'])
+      : await getOrderLanguageFromSourceQuote(of);
     const isEnglish = orderLanguage === 'English';
     const I = {
       invoiceTitle: isEnglish ? 'Invoice' : '發票',
@@ -6798,16 +6828,16 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
 
     // Items — read from Source Quote's Quote Items JSON (same as Quote view)
     let items: any[] = [];
-    let sourceQuoteFields: FieldSet | null = null;
+    let sourceQuoteFields: FieldSet | null = sourceQuoteRecord?.fields || null;
     const sourceQuoteRef = (of['Source Quote Ref'] as string) || '';
-    if (sourceQuoteRef) {
+    if (!sourceQuoteFields && sourceQuoteRef) {
       const quoteRecords = await tableQuotes.select({ filterByFormula: `{Quote Number} = '${sourceQuoteRef}'` }).firstPage();
       if (quoteRecords.length > 0) {
         sourceQuoteFields = quoteRecords[0].fields;
-        items = parseQuoteItems(sourceQuoteFields['Quote Items JSON']);
       }
     }
-    items = await getConfirmedOrderItems(order.id, items);
+    if (sourceQuoteFields) items = parseQuoteItems(sourceQuoteFields['Quote Items JSON']);
+    if (order) items = await getConfirmedOrderItems(order.id, items);
     const quotationImagePresentations = await resolveQuotationImagePresentations(items, {
       enabled: QUOTATION_IMAGE_ENABLED,
       resolver: quotationImageRuntime.presentationResolver,
@@ -7013,33 +7043,109 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
     const { token } = req.params;
     if (!acceptedPublicToken(token)) return publicDocumentNotFound(res);
     const records = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
-    if (records.length === 0) return publicDocumentNotFound(res);
+    const pendingQuoteRecords = records.length > 0
+      ? []
+      : await tableQuotes.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
+    if (records.length === 0 && pendingQuoteRecords.length === 0) return publicDocumentNotFound(res);
     const paymentRequestId = validateOrderPaymentRequestId(req.body.payment_request_id);
     await requireOrderPaymentSchema();
-    const initialOrder = records[0];
-    await receiptSequenceLock.run('receipt-sequence', () => orderPaymentLock.run(initialOrder.id, async () => {
-      const order = await tableOrders.find(initialOrder.id);
-      const fields = order.fields as FieldSet;
-      if (isCancelledOrder(fields)) throw new Error('order-payment-cancelled');
-      // A stale/replayed dashboard form cannot create another Receipt or add a
-      // second revenue event, even when it carries a different request ID.
-      if (hasIssuedReceipt(fields)) return;
+    const initialRecordId = records[0]?.id || pendingQuoteRecords[0].id;
+    await receiptSequenceLock.run('receipt-sequence', () => orderPaymentLock.run(initialRecordId, async () => {
+      // Re-read by Invoice token inside the lock. A replay after a successful
+      // payment will now find the newly materialized Order and no-op safely.
+      const currentOrders = await tableOrders.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
+      if (currentOrders.length > 0) {
+        const order = await tableOrders.find(currentOrders[0].id);
+        const fields = order.fields as FieldSet;
+        if (isCancelledOrder(fields)) throw new Error('order-payment-cancelled');
+        // A stale/replayed dashboard form cannot create another Receipt or add a
+        // second revenue event, even when it carries a different request ID.
+        if (hasIssuedReceipt(fields)) return;
+
+        const paidAt = new Date().toISOString();
+        const payDate = getHongKongDate();
+        const plan = planFullReceipt({
+          total: fields['Final Amount'],
+          log: fields[ORDER_PAYMENT_AUDIT_FIELD],
+          requestId: paymentRequestId,
+          paidAt,
+        });
+        const receiptNumber = String(fields['Receipt Number'] || '').trim()
+          || await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
+        const receiptToken = String(fields['Receipt Public Token'] || '').trim() || generateToken();
+
+        // Airtable applies one record update atomically: Receipt identity, full
+        // received total, paid status/date and idempotency log share one write.
+        const updates: FieldSet = {
+          [ORDER_AMOUNT_RECEIVED_FIELD]: plan.receivedCents / 100,
+          [ORDER_PAYMENT_AUDIT_FIELD]: plan.log,
+          'Pay Date': payDate,
+          'Payment Method': paymentMethod,
+          'Status': 'Paid',
+          'Receipt Number': receiptNumber,
+          'Receipt Public Token': receiptToken,
+        };
+        await tableOrders.update([{ id: order.id, fields: updates }]);
+
+        const verified = await tableOrders.find(order.id);
+        if (
+          toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== plan.receivedCents
+          || String(verified.fields['Status'] || '') !== 'Paid'
+          || String(verified.fields['Pay Date'] || '') !== payDate
+          || String(verified.fields['Payment Method'] || '') !== paymentMethod
+          || String(verified.fields['Receipt Number'] || '') !== receiptNumber
+          || String(verified.fields['Receipt Public Token'] || '') !== receiptToken
+          || !paymentLogHasRequest(verified.fields[ORDER_PAYMENT_AUDIT_FIELD], paymentRequestId)
+        ) throw new Error('order-payment-write-verification-failed');
+
+        const orderMonth = getOrderFinanceMonth(
+          verified.fields['Internal 1 Order No'] || verified.fields['Internal Order No']
+        );
+        if (orderMonth) {
+          try {
+            await syncMonthlyFinance(orderMonth);
+          } catch (error) {
+            logSafeError('Receipt was recorded but Monthly Finance refresh will retry.', error);
+          }
+        }
+        return;
+      }
+
+      const quoteRecords = await tableQuotes.select({ filterByFormula: `{Invoice Public Token} = '${token}'` }).firstPage();
+      if (quoteRecords.length === 0) throw new Error('invoice-source-quote-not-found');
+      const quote = quoteRecords[0];
+      const qf = quote.fields as FieldSet;
+      const customerRecordId = getLinkedRecordId(qf['Customer']);
+      const invoiceNumber = String(qf['Converted Invoice No'] || '').trim();
+      if (!customerRecordId || !invoiceNumber) throw new Error('invoice-source-quote-incomplete');
 
       const paidAt = new Date().toISOString();
       const payDate = getHongKongDate();
+      const invoiceDate = getHongKongDateFromTimestamp(qf['Converted At'] || qf['Quote Date']);
+      const internalOrderNo = await getNextNumber(tableOrders, 'Internal Order No', 'ORD');
+      // Order and Item month belong to the date full payment is confirmed,
+      // while the Invoice keeps its original issue date.
+      const internalOrderCode = await getNextInternalOrderCode(payDate);
+      const { orderMonthSelect, itemMonthSelect } = getOrderMonthDetails(payDate);
       const plan = planFullReceipt({
-        total: fields['Final Amount'],
-        log: fields[ORDER_PAYMENT_AUDIT_FIELD],
+        total: qf['Total'],
+        log: '',
         requestId: paymentRequestId,
         paidAt,
       });
-      const receiptNumber = String(fields['Receipt Number'] || '').trim()
-        || await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
-      const receiptToken = String(fields['Receipt Public Token'] || '').trim() || generateToken();
-
-      // Airtable applies one record update atomically: Receipt identity, full
-      // received total, paid status/date and idempotency log share one write.
-      const updates: FieldSet = {
+      const receiptNumber = await getNextNumber(tableOrders, 'Receipt Number', 'RCPT');
+      const receiptToken = generateToken();
+      const orderFields: FieldSet = {
+        ...buildOrderFieldsFromQuote({
+          quoteFields: qf,
+          customerRecordId,
+          internalOrderNo,
+          internalOrderCode,
+          invoiceNumber,
+          invoicePublicToken: token,
+          invoiceDate,
+          orderMonthSelect,
+        }),
         [ORDER_AMOUNT_RECEIVED_FIELD]: plan.receivedCents / 100,
         [ORDER_PAYMENT_AUDIT_FIELD]: plan.log,
         'Pay Date': payDate,
@@ -7048,22 +7154,83 @@ app.post('/admin/invoice/:token/mark-paid', requireAdmin, requireSameOrigin, asy
         'Receipt Number': receiptNumber,
         'Receipt Public Token': receiptToken,
       };
-      await tableOrders.update([{ id: order.id, fields: updates }]);
 
-      const verified = await tableOrders.find(order.id);
-      if (
-        toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== plan.receivedCents
-        || String(verified.fields['Status'] || '') !== 'Paid'
-        || String(verified.fields['Pay Date'] || '') !== payDate
-        || String(verified.fields['Payment Method'] || '') !== paymentMethod
-        || String(verified.fields['Receipt Number'] || '') !== receiptNumber
-        || String(verified.fields['Receipt Public Token'] || '') !== receiptToken
-        || !paymentLogHasRequest(verified.fields[ORDER_PAYMENT_AUDIT_FIELD], paymentRequestId)
-      ) throw new Error('order-payment-write-verification-failed');
+      const newOrder = await tableOrders.create([{ fields: orderFields }]);
+      const orderRecordId = newOrder[0].id;
+      let quoteLinked = false;
+      try {
+        const items = parseQuoteItems(qf['Quote Items JSON']);
+        const createdOrderItems = items.length > 0
+          ? await tableOrderItems.create(buildOrderItemsPayload(items, orderRecordId, internalOrderCode, itemMonthSelect))
+          : [];
+        const itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
 
-      const orderMonth = getOrderFinanceMonth(
-        verified.fields['Internal 1 Order No'] || verified.fields['Internal Order No']
-      );
+        const verified = await tableOrders.find(orderRecordId);
+        if (
+          toHkdCents(verified.fields[ORDER_AMOUNT_RECEIVED_FIELD]) !== plan.receivedCents
+          || String(verified.fields['Status'] || '') !== 'Paid'
+          || String(verified.fields['Pay Date'] || '') !== payDate
+          || String(verified.fields['Payment Method'] || '') !== paymentMethod
+          || String(verified.fields['Receipt Number'] || '') !== receiptNumber
+          || String(verified.fields['Receipt Public Token'] || '') !== receiptToken
+          || !paymentLogHasRequest(verified.fields[ORDER_PAYMENT_AUDIT_FIELD], paymentRequestId)
+        ) throw new Error('paid-order-write-verification-failed');
+
+        // Serialize the final Quote linkage with image metadata persistence so
+        // a just-finished image cannot overwrite Order Item identity.
+        await quoteItemsMutationLock.run(quote.id, async () => {
+          const latestQuote = await tableQuotes.find(quote.id);
+          const latestItems = parseQuoteItems(latestQuote.fields['Quote Items JSON']);
+          const linkedByItemId = new Map(itemsWithOrderItemIdentity
+            .filter(item => isImmutableItemId(item.item_id))
+            .map(item => [String(item.item_id).toLowerCase(), item.order_item_identity]));
+          const mergedItems = latestItems.map((latestItem, index) => {
+            const linkedIdentity = isImmutableItemId(latestItem.item_id)
+              ? linkedByItemId.get(String(latestItem.item_id).toLowerCase())
+              : itemsWithOrderItemIdentity[index]?.order_item_identity;
+            return linkedIdentity ? { ...latestItem, order_item_identity: linkedIdentity } : latestItem;
+          });
+          await tableQuotes.update([{
+            id: quote.id,
+            fields: {
+              'Converted Order No': internalOrderNo,
+              'Order Ref': orderRecordId,
+              'Quote Items JSON': JSON.stringify(mergedItems),
+            }
+          }]);
+        });
+        quoteLinked = true;
+      } catch (materializationError) {
+        if (!quoteLinked) {
+          try {
+            const allOrderItems = await tableOrderItems.select({ fields: ['Order'] }).all();
+            const linkedItemIds = allOrderItems
+              .filter(item => Array.isArray(item.fields['Order']) && (item.fields['Order'] as string[]).includes(orderRecordId))
+              .map(item => item.id);
+            if (linkedItemIds.length > 0) await tableOrderItems.destroy(linkedItemIds);
+            await tableOrders.destroy([orderRecordId]);
+          } catch (rollbackError) {
+            logSafeError('Paid Order materialization rollback needs manual review.', rollbackError);
+          }
+        }
+        throw materializationError;
+      }
+
+      // The Inquiry becomes converted only after the paid Order and Items are
+      // durable. A failed optional linkage must not undo a valid Receipt.
+      try {
+        const linkedInquiryId = getLinkedRecordId(qf['Inquiry']);
+        if (linkedInquiryId) {
+          await tableInquiries.update([{
+            id: linkedInquiryId,
+            fields: { 'Inquiry Status': 'Converted', 'Order': [orderRecordId] } as FieldSet,
+          }]);
+        }
+      } catch (inquiryUpdateError) {
+        logSafeError('Paid Order saved; Inquiry linkage will need retry.', inquiryUpdateError);
+      }
+
+      const orderMonth = getOrderFinanceMonth(internalOrderCode);
       if (orderMonth) {
         try {
           await syncMonthlyFinance(orderMonth);
