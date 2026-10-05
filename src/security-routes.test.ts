@@ -121,6 +121,22 @@ test('Receipt dashboard has one full-settlement action and signed Quote images f
   assert.ok(!source.includes("paidInFull: isEnglish ? '${R.paidInFull}'"));
 });
 
+test('public Quote uses a mobile card layout without removing the desktop table width safeguard', () => {
+  for (const required of [
+    '.quote-items-table { table-layout: fixed; min-width: 836px; }',
+    'class="quote-items-wrap"',
+    '.quote-items-wrap { overflow: visible; min-width: 0; max-width: 100%; }',
+    '.quote-items-table colgroup,',
+    '.quote-items-table thead { display: none; }',
+    '.quote-items-table .item-main-row td::before',
+    'content: attr(data-label);',
+    'class="item-cell-type" data-label="${L.itemType}"',
+    'class="item-cell-for" data-label="${L.forWhat}"',
+    'class="item-sub-accessories"',
+    '.quote-items-table .quotation-image img { width: 100%; max-width: 420px; }',
+  ]) assert.ok(source.includes(required), `missing mobile Quote layout safeguard: ${required}`);
+});
+
 test('expense receipt inbox is owner-only, direct-to-Airtable, idempotent and excluded from P&L until review', () => {
   const start = source.indexOf("app.post('/admin/expenses/receipts'");
   const end = source.indexOf("app.post('/admin/china-shipments/:shipmentId/driver-payments'", start);
