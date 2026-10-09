@@ -51,6 +51,7 @@ const fixtureToken = (label: string): string => formatDeterministicPublicToken(
 
 export const LOCAL_QUOTE_TOKEN = fixtureToken('quote');
 export const LOCAL_INVOICE_TOKEN = fixtureToken('invoice');
+export const LOCAL_UNPAID_QUOTE_TOKEN = fixtureToken('unpaid-quote');
 export const LOCAL_ITEM_ID = '9e4f6e72-d31a-4d1a-8d15-730282c1b102';
 const LOCAL_SECOND_ITEM_ID = 'd91ddcb5-d230-4f2b-91ae-e45fd1583cc0';
 
@@ -166,6 +167,16 @@ export const createLocalQuoteFixture = (): {
     pathPrefix: string;
     resolve(digest: string): Uint8Array | undefined;
   };
+  orderBoundarySnapshot(): Promise<{
+    orders: number;
+    orderItems: number;
+    pendingQuote: {
+      publicToken: string;
+      invoiceToken: string;
+      invoiceNumber: string;
+      orderRef: string;
+    };
+  }>;
   browserBridge?: {
     rendererOrigin: string;
     clientHtml: string;
@@ -258,6 +269,19 @@ export const createLocalQuoteFixture = (): {
     'Order Ref': 'rec_local_order_1',
     'Invoice Public Token': LOCAL_INVOICE_TOKEN,
   };
+  const pendingItem: Record<string, unknown> = { ...item };
+  delete pendingItem.order_item_identity;
+  const pendingQuoteFields: FieldSet = {
+    ...quoteFields,
+    'Quote Number': 'QT-2026-9099',
+    'Public Token': LOCAL_UNPAID_QUOTE_TOKEN,
+    'Quote Date': '2026-10-02',
+    'Valid Until': '2026-11-01',
+    'Quote Items JSON': JSON.stringify([pendingItem]),
+    'Status': 'Ready to Convert',
+    'Order Ref': undefined,
+    'Invoice Public Token': undefined,
+  };
   const orderFields: FieldSet = {
     'Internal Order No': 'ORD-2026-9001',
     'Internal 1 Order No': 'AUG2699',
@@ -289,7 +313,10 @@ export const createLocalQuoteFixture = (): {
     const table = createTable(names[0], seed, onCreate);
     names.forEach(name => tables.set(name, table));
   };
-  const quoteRecords = [record('rec_local_quote_1', quoteFields)];
+  const quoteRecords = [
+    record('rec_local_quote_1', quoteFields),
+    record('rec_local_quote_2', pendingQuoteFields),
+  ];
   register(['Quotes'], quoteRecords);
   register(['Customers'], [record('rec_local_customer_1', {
     'Customer ID': 'L9001',
@@ -471,6 +498,23 @@ export const createLocalQuoteFixture = (): {
         if (dynamic) return dynamic;
         return resolvedAssetKey === assetKey ? new Uint8Array(png) : undefined;
       },
+    },
+    async orderBoundarySnapshot() {
+      const [orders, orderItems] = await Promise.all([
+        tables.get('Order_2026')!.select().all(),
+        tables.get('Order Items')!.select().all(),
+      ]);
+      const pendingQuote = await tables.get('Quotes')!.find('rec_local_quote_2');
+      return {
+        orders: orders.length,
+        orderItems: orderItems.length,
+        pendingQuote: {
+          publicToken: String(pendingQuote.fields['Public Token'] || ''),
+          invoiceToken: String(pendingQuote.fields['Invoice Public Token'] || ''),
+          invoiceNumber: String(pendingQuote.fields['Converted Invoice No'] || ''),
+          orderRef: String(pendingQuote.fields['Order Ref'] || ''),
+        },
+      };
     },
     ...(browserBridge ? { browserBridge } : {}),
     urls: {

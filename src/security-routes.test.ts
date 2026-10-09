@@ -109,6 +109,27 @@ test('Receipt creation route requires no payment evidence and remains CSRF-prote
   assert.ok(route.includes('validateReceiptPaymentMethod'));
 });
 
+test('unpaid Invoice conversion creates no Order or Order Items until full payment', () => {
+  const convertStart = source.indexOf("app.post('/admin/quote/:token/convert'");
+  const convertEnd = source.indexOf("app.get(['/invoice/:token'", convertStart);
+  assert.ok(convertStart >= 0 && convertEnd > convertStart, 'Invoice conversion route must exist');
+  const convertRoute = source.slice(convertStart, convertEnd);
+  assert.ok(convertRoute.includes("tableQuotes.update"));
+  assert.ok(convertRoute.includes("'Converted Invoice No'"));
+  assert.ok(convertRoute.includes("'Invoice Public Token'"));
+  for (const forbidden of ['tableOrders.create', 'tableOrderItems.create', "'Converted Order No'", "'Order Ref'"]) {
+    assert.ok(!convertRoute.includes(forbidden), `unpaid Invoice conversion must not write ${forbidden}`);
+  }
+
+  const paymentStart = source.indexOf("app.post('/admin/invoice/:token/mark-paid'");
+  const paymentEnd = source.indexOf("app.get(['/receipt/:token'", paymentStart);
+  const paymentRoute = source.slice(paymentStart, paymentEnd);
+  for (const required of [
+    'tableOrders.create', 'tableOrderItems.create', 'buildOrderItemsPayload',
+    "'Converted Order No'", "'Order Ref'", "'Status': 'Paid'",
+  ]) assert.ok(paymentRoute.includes(required), `full payment route missing ${required}`);
+});
+
 test('Receipt dashboard has one full-settlement action and signed Quote images fetch eagerly', () => {
   assert.ok(source.includes('建立收據＝確認全數收款'));
   assert.ok(source.includes('name="payment_method" required'));
