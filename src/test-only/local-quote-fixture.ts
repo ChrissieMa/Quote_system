@@ -52,6 +52,7 @@ const fixtureToken = (label: string): string => formatDeterministicPublicToken(
 export const LOCAL_QUOTE_TOKEN = fixtureToken('quote');
 export const LOCAL_INVOICE_TOKEN = fixtureToken('invoice');
 export const LOCAL_ITEM_ID = '9e4f6e72-d31a-4d1a-8d15-730282c1b102';
+const LOCAL_SECOND_ITEM_ID = 'd91ddcb5-d230-4f2b-91ae-e45fd1583cc0';
 
 const record = (id: string, fields: FieldSet): FixtureRecord => ({
   id,
@@ -198,8 +199,8 @@ export const createLocalQuoteFixture = (): {
     outerL: '30', outerD: '20', outerH: '22',
     noOfLevels: null,
     levelHeights: '',
-    accessories: ['背板鏡面'],
-    description: 'TEST-ONLY quotation image acceptance fixture',
+    accessories: ['背板鏡面', '磁石門', '可調校層板（加長測試文字）'],
+    description: 'TEST-ONLY long description for mobile layout verification. This fictional item checks that a detailed custom-product description wraps fully inside the phone viewport without horizontal scrolling.',
     qty: 1,
     amount: 1280,
     ...(automaticQuotationImage ? {} : {
@@ -214,6 +215,22 @@ export const createLocalQuoteFixture = (): {
     }),
     order_item_identity: { item_id: LOCAL_ITEM_ID, record_id: 'rec_local_order_item_1' },
   };
+  const secondItem = {
+    item_id: LOCAL_SECOND_ITEM_ID,
+    itemType: 'Display Case 疊高展示櫃',
+    forWhat: 'TEST-ONLY second fictional product for multi-item mobile QA',
+    interL: '45', interD: '32', interH: '60',
+    outerL: '47', outerD: '34', outerH: '64',
+    noOfLevels: 3,
+    levelHeights: '20 / 20 / 20',
+    accessories: ['LED 燈板', '活動層板', '加長配件名稱用作手機換行驗證'],
+    description: 'TEST-ONLY second item with a deliberately long description so the responsive Quote card can be checked with multiple products, long text and a separate amount.',
+    qty: 2,
+    amount: 2377,
+    order_item_identity: { item_id: LOCAL_SECOND_ITEM_ID, record_id: 'rec_local_order_item_2' },
+  };
+  const quoteItems = [item, secondItem];
+  const fixtureTotal = quoteItems.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
   const quoteFields: FieldSet = {
     'Quote Number': 'QT-2026-9001',
     'Quote Date': '2026-08-22',
@@ -224,14 +241,14 @@ export const createLocalQuoteFixture = (): {
     'Phone': '00000000',
     'Contact Method': 'Fixture',
     'Contact Handle / Reference': 'NO PRODUCTION DATA',
-    'Sub Total': 1280,
+    'Sub Total': fixtureTotal,
     'Discount': 1,
-    'Total': 1280,
+    'Total': fixtureTotal,
     'Discount Value HKD': 0,
     'Delivery Charge Mode': '已包本地送貨',
     'Delivery Display Text': 'Local fixture only',
-    'Quote Items JSON': JSON.stringify([item]),
-    'Description Summary': 'TEST-ONLY quotation image acceptance fixture',
+    'Quote Items JSON': JSON.stringify(quoteItems),
+    'Description Summary': 'TEST-ONLY multi-item mobile Quote fixture with long accessories, long descriptions, amounts and one quotation image.',
     // Non-empty test-only values exercise the genuine conditional sections.
     // English Quote rendering intentionally uses the application's canonical
     // DEFAULT_QUOTE_NOTES_EN and DEFAULT_TERMS_EN text when these fields exist.
@@ -249,9 +266,9 @@ export const createLocalQuoteFixture = (): {
     'Invoice Date': '2026-08-22',
     'Status': 'Unpaid',
     'Customer': ['rec_local_customer_1'],
-    'Product Amount': 1280,
+    'Product Amount': fixtureTotal,
     'Discount': 1,
-    'Final Amount': 1280,
+    'Final Amount': fixtureTotal,
     'Discount Value HKD': 0,
     'Delivery Charge Mode': '已包本地送貨',
     'Delivery Display Text': 'Local fixture only',
@@ -293,22 +310,42 @@ export const createLocalQuoteFixture = (): {
       ? { ...fields, 'Final Amount': sourceQuote.fields['Total'] }
       : fields;
   });
-  register(['Order Items'], [record('rec_local_order_item_1', {
-    'Item No': 'AUG2699-A',
-    'Order': ['rec_local_order_1'],
-    'Description': item.description,
-    'QTY': 1,
-    'Product Amount': 1280,
-    'Item Type': item.itemType,
-    'For What': item.forWhat,
-    'Inter L': item.interL,
-    'Inter D': item.interD,
-    'Inter H': item.interH,
-    'Outer L': item.outerL,
-    'Outer D': item.outerD,
-    'Outer H': item.outerH,
-    'Accessories': item.accessories,
-  })]);
+  register(['Order Items'], [
+    record('rec_local_order_item_1', {
+      'Item No': 'AUG2699-A',
+      'Order': ['rec_local_order_1'],
+      'Description': item.description,
+      'QTY': item.qty,
+      'Product Amount': item.amount,
+      'Item Type': item.itemType,
+      'For What': item.forWhat,
+      'Inter L': item.interL,
+      'Inter D': item.interD,
+      'Inter H': item.interH,
+      'Outer L': item.outerL,
+      'Outer D': item.outerD,
+      'Outer H': item.outerH,
+      'Accessories': item.accessories,
+    }),
+    record('rec_local_order_item_2', {
+      'Item No': 'AUG2699-B',
+      'Order': ['rec_local_order_1'],
+      'Description': secondItem.description,
+      'QTY': secondItem.qty,
+      'Product Amount': secondItem.amount,
+      'Item Type': secondItem.itemType,
+      'For What': secondItem.forWhat,
+      'Inter L': secondItem.interL,
+      'Inter D': secondItem.interD,
+      'Inter H': secondItem.interH,
+      'Outer L': secondItem.outerL,
+      'Outer D': secondItem.outerD,
+      'Outer H': secondItem.outerH,
+      'No. of Levels': secondItem.noOfLevels,
+      'Level Heights': secondItem.levelHeights,
+      'Accessories': secondItem.accessories,
+    }),
+  ]);
   register(['Inquiries'], [], fields => {
     const productInterest = String(fields['Product Interest'] || '').trim();
     if (productInterest && !INQUIRY_PRODUCT_INTEREST_OPTIONS.includes(productInterest as any)) {
