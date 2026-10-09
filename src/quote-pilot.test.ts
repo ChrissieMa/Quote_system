@@ -1,6 +1,10 @@
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
+  ACCESSORY_DISPLAY_LABELS,
+  accessoryOrderItemName,
+  accessoryStorageName,
   buildPilotPreview,
   calculatePilotItem,
   formatDimensionValue,
@@ -8,10 +12,24 @@ import {
   idempotencyPublicToken,
   issueConfirmationId,
   PILOT_CONFIRMATION_TEXT,
+  RGB_LIGHT_WARNING,
   resolveAuthoritativeOffer,
   resolveDisplayCaseLevelHeights,
   verifyConfirmationId,
 } from './quote-pilot';
+
+const displayBoxItem = (
+  accessories: Record<string, number>,
+  innerDimensions = { length: 27, depth: 27, height: 36 },
+) => calculatePilotItem({
+  itemType: 'Display box 展示盒',
+  innerDimensions,
+  quantity: 1,
+  accessories,
+  chinaFreight: 0,
+  hongKongDelivery: 0,
+  profit: 0,
+});
 
 const baselineInput = {
   customer: 'DRY RUN CUSTOMER',
@@ -56,6 +74,90 @@ test('dimension display adds cm after actual values only', () => {
   assert.equal(formatDimensionWithUnit('35 cm'), '35 cm');
   assert.equal(formatDimensionWithUnit('-'), '-');
   assert.equal(formatDimensionWithUnit(''), '');
+});
+
+test('舊三圈燈保留 internal keys 並只改客人顯示名稱', () => {
+  assert.deepEqual(ACCESSORY_DISPLAY_LABELS, {
+    '獨立燈板 - 上燈': '三圈燈｜獨立上燈板',
+    '獨立燈板 - 下燈': '三圈燈｜獨立下燈板',
+    '獨立燈板 - 上下燈': '三圈燈｜獨立上下燈板',
+    '上下燈': '三圈上下燈',
+  });
+  const item = displayBoxItem({ '獨立燈板 - 上燈': 1 });
+  assert.deepEqual(item.accessoryQty, { '獨立燈板 - 上燈': 1 });
+  assert.deepEqual(item.accessories, ['三圈燈｜獨立上燈板 x1']);
+  assert.equal(accessoryStorageName('三圈燈｜獨立上燈板'), '獨立燈板 - 上燈');
+  assert.equal(accessoryOrderItemName('三圈燈｜獨立上燈板 x2'), '獨立燈板 - 上燈');
+  assert.equal(accessoryOrderItemName('彩燈｜上下燈 x2'), '彩燈｜上下燈');
+  assert.equal(item.accessoriesAmountHkd, 144.12);
+});
+
+test('普通 Display Box 非一體磁吸保留舊尺寸規則', () => {
+  const item = displayBoxItem({ '獨立燈板 - 上燈': 1 });
+  assert.deepEqual(
+    { l: item.outerL, d: item.outerD, h: item.outerH },
+    { l: '29', d: '29', h: '39.5' },
+  );
+});
+
+test('一體磁吸結構尺寸按無燈、單燈、上下燈及背燈組合計算', () => {
+  const cases: Array<[Record<string, number>, [string, string, string]]> = [
+    [{ '一體磁吸結構': 1 }, ['28', '28', '37']],
+    [{ '一體磁吸結構': 1, '獨立燈板 - 上燈': 1 }, ['28', '28', '38.3']],
+    [{ '一體磁吸結構': 1, '獨立燈板 - 下燈': 1 }, ['28', '28', '38.3']],
+    [{ '一體磁吸結構': 1, '獨立燈板 - 上下燈': 1 }, ['28', '28', '40.6']],
+    [{ '一體磁吸結構': 1, '獨立燈板 - 上燈': 1, '獨立燈板 - 下燈': 1 }, ['28', '28', '40.6']],
+    [{ '一體磁吸結構': 1, '彩燈｜上下燈': 1 }, ['28', '28', '40.6']],
+    [{ '一體磁吸結構': 1, '背燈': 1 }, ['28', '29.8', '37']],
+    [{ '一體磁吸結構': 1, '獨立燈板 - 上燈': 1, '背燈': 1 }, ['28', '29.8', '38.3']],
+    [{ '一體磁吸結構': 1, '獨立燈板 - 上下燈': 1, '背燈': 1 }, ['28', '29.8', '40.6']],
+  ];
+  for (const [accessories, expected] of cases) {
+    const item = displayBoxItem(accessories);
+    assert.deepEqual([item.outerL, item.outerD, item.outerH], expected);
+  }
+});
+
+test('彩燈客人加價按 accessory quantity，不按米數', () => {
+  const topOne = displayBoxItem({ '彩燈｜獨立上燈板': 1 });
+  const topTwo = displayBoxItem({ '彩燈｜獨立上燈板': 2 });
+  const independentBothTwo = displayBoxItem({ '彩燈｜獨立上下燈板': 2 });
+  const standardBothOne = displayBoxItem({ '彩燈｜上下燈': 1 });
+  assert.equal(topOne.rgbCustomerSurchargeHkd, 100);
+  assert.equal(topTwo.rgbCustomerSurchargeHkd, 200);
+  assert.equal(independentBothTwo.rgbCustomerSurchargeHkd, 200);
+  assert.equal(standardBothOne.rgbCustomerSurchargeHkd, 100);
+});
+
+test('25x25 彩燈米數、供應商追加成本及原燈成本累加正確', () => {
+  const dimensions = { length: 25, depth: 25, height: 30 };
+  const legacyTop = displayBoxItem({ '獨立燈板 - 上燈': 1 }, dimensions);
+  const rgbTop = displayBoxItem({ '彩燈｜獨立上燈板': 1 }, dimensions);
+  const rgbBoth = displayBoxItem({ '彩燈｜獨立上下燈板': 1 }, dimensions);
+  assert.equal(rgbTop.rgbLightMetres, 1);
+  assert.equal(rgbTop.rgbSupplierSurchargeRmb, 10);
+  assert.equal(rgbBoth.rgbLightMetres, 2);
+  assert.equal(rgbBoth.rgbSupplierSurchargeRmb, 20);
+  assert.equal(rgbTop.accessoriesAmountHkd, 245.12);
+  assert.ok(rgbTop.accessoriesAmountHkd > legacyTop.accessoriesAmountHkd + 100);
+});
+
+test('彩燈單組燈帶超過 5m 只顯示 internal warning，不阻擋報價', () => {
+  const item = displayBoxItem(
+    { '彩燈｜獨立上燈板': 1 },
+    { length: 200, depth: 60, height: 40 },
+  );
+  assert.equal(item.rgbLightMetres, 5.2);
+  assert.deepEqual(item.internalWarnings, [RGB_LIGHT_WARNING]);
+  assert.ok(item.amount > 0);
+});
+
+test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /> 一體磁吸結構<\/label>/);
+  assert.match(source, /三圈燈｜獨立上燈板<\/label><input[^>]+data-name="獨立燈板 - 上燈"/);
+  assert.match(source, /data-name="彩燈｜獨立上下燈板"/);
+  assert.match(source, /購買任何展示盒或展示櫃，附送趟門或一體磁吸結構/);
 });
 
 test('a signed confirmation locks the exact preview and creates a stable idempotency token', () => {
