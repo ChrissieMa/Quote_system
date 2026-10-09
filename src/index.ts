@@ -3398,6 +3398,100 @@ const SHARED_CSS = `
     .doc-body { padding: 16px; }
     .items-input-table { font-size: 11px; }
     .items-input-table th, .items-input-table td { padding: 4px 4px; }
+    .quote-items-wrap { overflow: visible; min-width: 0; max-width: 100%; }
+    .quote-items-table {
+      display: block;
+      width: 100%;
+      min-width: 0;
+      table-layout: auto;
+      border-collapse: separate;
+      border-spacing: 0;
+    }
+    .quote-items-table colgroup,
+    .quote-items-table thead { display: none; }
+    .quote-items-table tbody { display: block; width: 100%; }
+    .quote-items-table .item-main-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      width: 100%;
+      overflow: hidden;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .quote-items-table .item-main-row td {
+      display: block;
+      min-width: 0;
+      padding: 9px 10px;
+      border: 0;
+      border-bottom: 1px solid #f0e0d0;
+      background: #fff !important;
+      text-align: left !important;
+      overflow-wrap: anywhere;
+    }
+    .quote-items-table .item-main-row td::before {
+      content: attr(data-label);
+      display: block;
+      margin-bottom: 3px;
+      color: #d8833b;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+      text-transform: uppercase;
+    }
+    .quote-items-table .item-cell-index,
+    .quote-items-table .item-cell-type,
+    .quote-items-table .item-cell-for { grid-column: 1 / -1; }
+    .quote-items-table .item-cell-index {
+      padding: 7px 10px;
+      color: #fff;
+      background: #d8833b !important;
+      font-weight: 700;
+    }
+    .quote-items-table .item-cell-index::before {
+      display: inline;
+      margin-right: 6px;
+      color: #fff;
+    }
+    .quote-items-table .item-sub-detail {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+      width: 100%;
+      margin-top: 6px;
+      overflow: hidden;
+      border: 1px solid #f0e0d0;
+      border-radius: 8px;
+      background: #fffaf5;
+    }
+    .quote-items-table .item-sub-detail td {
+      display: block;
+      min-width: 0;
+      padding: 9px 10px;
+      border: 0;
+      background: #fffaf5 !important;
+      text-align: left !important;
+      overflow-wrap: anywhere;
+    }
+    .quote-items-table .item-sub-spacer { display: none; }
+    .quote-items-table .item-sub-accessories,
+    .quote-items-table .item-sub-description { grid-column: 1 / -1; }
+    .quote-items-table .quotation-image-row {
+      display: block;
+      width: 100%;
+      margin: 6px 0 16px;
+      overflow: hidden;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #fff;
+    }
+    .quote-items-table .quotation-image-row td {
+      display: block;
+      width: 100%;
+      padding: 10px;
+      border: 0;
+    }
+    .quote-items-table .quotation-image { width: 100%; min-width: 0; }
+    .quote-items-table .quotation-image img { width: 100%; max-width: 420px; }
   }
 `;
 
@@ -6161,23 +6255,23 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
           const internalDimensions = itemInternalDimensionLines(item);
           const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr class="item-main-row">
-            <td>${idx + 1}</td>
-            <td>${escapeHtml(item.itemType) || '-'}</td>
-            <td>${escapeHtml(item.forWhat) || '-'}</td>
-            ${hasLevels ? `<td style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
-            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
-            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
-            <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerL)) || '-'}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerD)) || '-'}</td>
-            <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerH)) || '-'}</td>
+            <td class="item-cell-index" data-label="#">${idx + 1}</td>
+            <td class="item-cell-type" data-label="${L.itemType}">${escapeHtml(item.itemType) || '-'}</td>
+            <td class="item-cell-for" data-label="${L.forWhat}">${escapeHtml(item.forWhat) || '-'}</td>
+            ${hasLevels ? `<td class="item-cell-dimension" data-label="${L.levels}" style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
+            <td class="item-cell-dimension" data-label="${L.interL}" style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
+            <td class="item-cell-dimension" data-label="${L.interD}" style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.d)}</td>
+            <td class="item-cell-dimension" data-label="${L.interH}" style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.h)}</td>
+            <td class="item-cell-dimension" data-label="${L.outerL}" style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerL)) || '-'}</td>
+            <td class="item-cell-dimension" data-label="${L.outerD}" style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerD)) || '-'}</td>
+            <td class="item-cell-dimension" data-label="${L.outerH}" style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerH)) || '-'}</td>
           </tr>
           <tr class="item-sub-detail">
-            <td></td>
-            <td colspan="${hasLevels ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
-            <td colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
-            <td style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
-            <td style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
+            <td class="item-sub-spacer"></td>
+            <td class="item-sub-accessories" colspan="${hasLevels ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
+            <td class="item-sub-description" colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
+            <td class="item-sub-qty" style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
+            <td class="item-sub-amount" style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
           </tr>${(() => {
             const presentation = quotationImagePresentations.get(String(item.item_id || ''));
             return renderOptionalQuotationImageRow(
@@ -6226,7 +6320,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
 
           <div class="section">
             <div class="section-title">${L.items}</div>
-            <div style="overflow-x:auto;">
+            <div class="quote-items-wrap">
               <div class="material-banner">${escapeHtml(isEnglish ? MATERIAL_NOTE_EN : MATERIAL_NOTE)}</div><table class="items-table quote-items-table">
                 <colgroup>
                   <col class="col-index">
