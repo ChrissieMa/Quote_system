@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import {
   ACCESSORY_DISPLAY_LABELS,
+  accessoryOrderItemName,
   accessoryStorageName,
   buildPilotPreview,
   calculatePilotItem,
@@ -86,6 +87,8 @@ test('舊三圈燈保留 internal keys 並只改客人顯示名稱', () => {
   assert.deepEqual(item.accessoryQty, { '獨立燈板 - 上燈': 1 });
   assert.deepEqual(item.accessories, ['三圈燈｜獨立上燈板 x1']);
   assert.equal(accessoryStorageName('三圈燈｜獨立上燈板'), '獨立燈板 - 上燈');
+  assert.equal(accessoryOrderItemName('三圈燈｜獨立上燈板 x2'), '獨立燈板 - 上燈');
+  assert.equal(accessoryOrderItemName('彩燈｜上下燈 x2'), '彩燈｜上下燈');
   assert.equal(item.accessoriesAmountHkd, 144.12);
 });
 

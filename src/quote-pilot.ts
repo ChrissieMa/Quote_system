@@ -45,6 +45,9 @@ export const accessoryStorageName = (name: string): string => {
   return match?.[0] || name;
 };
 
+export const accessoryOrderItemName = (name: string): string =>
+  accessoryStorageName(String(name || '').replace(/\s*x\d+$/i, '').trim());
+
 export type PilotDimensions = { length: number; depth: number; height: number };
 export type PilotInnerDimensions = { length?: number; depth?: number; height?: number };
 

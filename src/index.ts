@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import multer from 'multer';
 import {
+  accessoryOrderItemName,
   accessoryStorageName,
   buildPilotPreview,
   calculatePilotItem,
@@ -6847,7 +6848,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
         const rawAccArray: string[] = Array.isArray(item.accessories)
           ? item.accessories.filter(Boolean)
           : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-        const accArray: string[] = Array.from(new Set(rawAccArray.map((s: string) => s.replace(/\s*x\d+$/i, '').trim()).filter(Boolean)));
+        const accArray: string[] = Array.from(new Set(rawAccArray.map(accessoryOrderItemName).filter(Boolean)));
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
         const itemNo = `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`;
