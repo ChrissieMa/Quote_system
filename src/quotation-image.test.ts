@@ -215,6 +215,7 @@ test('every provider-free Quote accessory maps to the exact 3D browser applicato
   const expected = {
     '趟門': ['door_sliding'],
     '磁石門': ['door_magnetic'],
+    '一體磁吸結構': ['door_magnetic'],
     '黑底板': ['bottom_base_black'],
     '透明底板': ['bottom_base_clear'],
     '獨立燈板 - 上燈': [
@@ -258,6 +259,36 @@ test('every provider-free Quote accessory maps to the exact 3D browser applicato
   assert.deepEqual(QUOTE_TO_3D_ACCESSORIES['背燈'][0], {
     accessory_type: 'back_light', quantity: 1, colour: 'white',
   });
+});
+
+test('一體磁吸安全 fallback 且彩燈 metadata 不會令 Quote to 3D adapter fail', () => {
+  const item = {
+    ...storedQuoteItem(),
+    accessories: ['一體磁吸結構', '彩燈｜獨立上燈板 x2'],
+    accessoryQty: {
+      '一體磁吸結構': 1,
+      '彩燈｜獨立上燈板': 2,
+    },
+  };
+  const request = buildQuotationRenderRequestFromQuoteItem(item);
+  assert.ok(request);
+  assert.deepEqual(request.accessories, [{ accessory_type: 'door_magnetic', quantity: 1 }]);
+  assert.equal(JSON.stringify(request).includes('彩燈'), false);
+  assert.equal(
+    quotationImageDisclaimer(item, false, true),
+    '3D圖暫不顯示彩燈顏色效果。',
+  );
+
+  const displayLabelOnly = buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    accessories: ['三圈燈｜獨立上燈板 x1'],
+    accessoryQty: undefined,
+  });
+  assert.ok(displayLabelOnly);
+  assert.deepEqual(displayLabelOnly.accessories.map(accessory => accessory.accessory_type), [
+    'light_board_top_independent',
+    'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
+  ]);
 });
 
 test('unsupported accessories and ambiguous combinations skip scheduling without perpetual pending metadata', () => {

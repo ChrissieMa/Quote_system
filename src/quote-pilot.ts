@@ -17,16 +17,33 @@ export const PILOT_ITEM_TYPES = [
 ] as const;
 
 export const PILOT_ACCESSORIES = [
-  '趟門', '磁石門', '黑底板', '透明底板',
+  '趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板',
   '獨立燈板 - 上燈', '獨立燈板 - 下燈', '獨立燈板 - 上下燈', '上下燈', '背燈',
+  '彩燈｜獨立上燈板', '彩燈｜獨立下燈板', '彩燈｜獨立上下燈板', '彩燈｜上下燈',
   '前板白色刻字', '前板彩色刻字',
   '左板圖片', '右板圖片', '底板圖片', '頂板圖片', '背板圖片',
   '左板鏡面', '右板鏡面', '底板鏡面', '頂板鏡面', '背板鏡面',
 ] as const;
 
-const SINGLE_ACCESSORIES = new Set(['趟門', '磁石門', '黑底板', '透明底板']);
+const SINGLE_ACCESSORIES = new Set(['趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板']);
 const ALLOWED_ACCESSORIES = new Set<string>(PILOT_ACCESSORIES);
 const RMB_DIVISOR = 0.85;
+
+export const ACCESSORY_DISPLAY_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  '獨立燈板 - 上燈': '三圈燈｜獨立上燈板',
+  '獨立燈板 - 下燈': '三圈燈｜獨立下燈板',
+  '獨立燈板 - 上下燈': '三圈燈｜獨立上下燈板',
+  '上下燈': '三圈上下燈',
+});
+
+export const RGB_LIGHT_WARNING = '彩燈單組燈帶超過 5m，請確認控制器及亮度安排。';
+
+export const accessoryDisplayLabel = (name: string): string => ACCESSORY_DISPLAY_LABELS[name] || name;
+
+export const accessoryStorageName = (name: string): string => {
+  const match = Object.entries(ACCESSORY_DISPLAY_LABELS).find(([, label]) => label === name);
+  return match?.[0] || name;
+};
 
 export type PilotDimensions = { length: number; depth: number; height: number };
 export type PilotInnerDimensions = { length?: number; depth?: number; height?: number };
@@ -123,6 +140,10 @@ export type CalculatedPilotItem = {
   localDeliveryNotes: string;
   baseProductAmountHkd: number;
   accessoriesAmountHkd: number;
+  rgbLightMetres: number;
+  rgbSupplierSurchargeRmb: number;
+  rgbCustomerSurchargeHkd: number;
+  internalWarnings: string[];
   unitProductAndAccessoriesHkd: number;
   productAndAccessoriesTotalHkd: number;
   amount: number;
@@ -282,11 +303,27 @@ const calculateOuterDimensions = (
     };
   }
 
-  const hasTopStandard = (accessories['上下燈'] || 0) > 0;
+  const hasIntegratedMagnetic = (accessories['一體磁吸結構'] || 0) > 0;
+  const hasTopStandard = (accessories['上下燈'] || 0) > 0 || (accessories['彩燈｜上下燈'] || 0) > 0;
   const hasTopIndependentSingle =
-    (accessories['獨立燈板 - 上燈'] || 0) > 0 || (accessories['獨立燈板 - 下燈'] || 0) > 0;
-  const hasTopIndependentDouble = (accessories['獨立燈板 - 上下燈'] || 0) > 0;
+    (accessories['獨立燈板 - 上燈'] || 0) > 0 || (accessories['獨立燈板 - 下燈'] || 0) > 0
+    || (accessories['彩燈｜獨立上燈板'] || 0) > 0 || (accessories['彩燈｜獨立下燈板'] || 0) > 0;
+  const hasTopIndependentDouble =
+    (accessories['獨立燈板 - 上下燈'] || 0) > 0 || (accessories['彩燈｜獨立上下燈板'] || 0) > 0;
   const hasBack = (accessories['背燈'] || 0) > 0;
+  if (hasIntegratedMagnetic) {
+    const hasTop = hasTopStandard || hasTopIndependentDouble
+      || (accessories['獨立燈板 - 上燈'] || 0) > 0
+      || (accessories['彩燈｜獨立上燈板'] || 0) > 0;
+    const hasBottom = hasTopStandard || hasTopIndependentDouble
+      || (accessories['獨立燈板 - 下燈'] || 0) > 0
+      || (accessories['彩燈｜獨立下燈板'] || 0) > 0;
+    return {
+      length: inner.length + 1,
+      depth: inner.depth + (hasBack ? 2.8 : 1),
+      height: inner.height + (hasTop && hasBottom ? 4.6 : hasTop || hasBottom ? 2.3 : 1),
+    };
+  }
   const heightIncrease = hasTopIndependentDouble ? 6 : hasTopStandard ? 5 : hasTopIndependentSingle ? 3.5 : 1;
   return {
     length: inner.length + 2,
@@ -350,8 +387,25 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     (accessories['獨立燈板 - 上燈'] || 0) +
     (accessories['獨立燈板 - 下燈'] || 0) +
     ((accessories['獨立燈板 - 上下燈'] || 0) * 2) +
-    ((accessories['上下燈'] || 0) * 2);
+    ((accessories['上下燈'] || 0) * 2) +
+    (accessories['彩燈｜獨立上燈板'] || 0) +
+    (accessories['彩燈｜獨立下燈板'] || 0) +
+    ((accessories['彩燈｜獨立上下燈板'] || 0) * 2) +
+    ((accessories['彩燈｜上下燈'] || 0) * 2);
   if (lightBoardCount > 0) accessoryRmb += calcLightBoardRmb(inner.length, inner.depth) * lightBoardCount;
+  const rgbSingleMetres = (2 * (inner.length + inner.depth)) / 100;
+  const rgbSingleAccessoryCount =
+    (accessories['彩燈｜獨立上燈板'] || 0) +
+    (accessories['彩燈｜獨立下燈板'] || 0);
+  const rgbDoubleAccessoryCount =
+    (accessories['彩燈｜獨立上下燈板'] || 0) +
+    (accessories['彩燈｜上下燈'] || 0);
+  const rgbAccessoryQuantity = rgbSingleAccessoryCount + rgbDoubleAccessoryCount;
+  const rgbLightMetres = money(rgbSingleMetres * (rgbSingleAccessoryCount + (rgbDoubleAccessoryCount * 2)));
+  const rgbSupplierSurchargeRmb = money(rgbLightMetres * 10);
+  const rgbCustomerSurchargeHkd = rgbAccessoryQuantity * 100;
+  accessoryRmb += rgbSupplierSurchargeRmb;
+  hkdAddons += rgbCustomerSurchargeHkd;
   const backLightCount = accessories['背燈'] || 0;
   if (backLightCount > 0) accessoryRmb += calcBackLightRmb(inner.length, inner.height) * backLightCount;
   const backImageCount = accessories['背板圖片'] || 0;
@@ -384,9 +438,10 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   const lightBoardPieces = lightBoardCount + backLightCount;
   const packageUnits = ((isDisplayCase ? levels : 1) + (lightBoardPieces * 0.5)) * quantity;
   const accessoriesList = [
-    ...Object.entries(accessories).filter(([name]) => SINGLE_ACCESSORIES.has(name)).map(([name]) => name),
-    ...Object.entries(accessories).filter(([name]) => !SINGLE_ACCESSORIES.has(name)).map(([name, qty]) => `${name} x${qty}`),
+    ...Object.entries(accessories).filter(([name]) => SINGLE_ACCESSORIES.has(name)).map(([name]) => accessoryDisplayLabel(name)),
+    ...Object.entries(accessories).filter(([name]) => !SINGLE_ACCESSORIES.has(name)).map(([name, qty]) => `${accessoryDisplayLabel(name)} x${qty}`),
   ];
+  const internalWarnings = rgbAccessoryQuantity > 0 && rgbSingleMetres > 5 ? [RGB_LIGHT_WARNING] : [];
 
   return {
     ...(input.item_id ? { item_id: input.item_id } : {}),
@@ -415,6 +470,10 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     localDeliveryNotes: '香港運費由報價時人手輸入估算總數；客人版只顯示預計範圍',
     baseProductAmountHkd,
     accessoriesAmountHkd,
+    rgbLightMetres,
+    rgbSupplierSurchargeRmb,
+    rgbCustomerSurchargeHkd,
+    internalWarnings,
     unitProductAndAccessoriesHkd: money(unitProductAmount),
     productAndAccessoriesTotalHkd,
     amount: money(amount),

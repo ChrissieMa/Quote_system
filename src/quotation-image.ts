@@ -463,6 +463,9 @@ const lightBoard = (
 export const QUOTE_TO_3D_ACCESSORIES: Readonly<Record<string, readonly CanonicalAccessory[]>> = Object.freeze({
   '趟門': [{ accessory_type: 'door_sliding', quantity: 1 }],
   '磁石門': [{ accessory_type: 'door_magnetic', quantity: 1 }],
+  // Until the 3D Project adds a dedicated canonical type, the integrated
+  // magnetic structure uses the renderer's established magnetic-door shape.
+  '一體磁吸結構': [{ accessory_type: 'door_magnetic', quantity: 1 }],
   '黑底板': [{ accessory_type: 'bottom_base_black', quantity: 1 }],
   '透明底板': [{ accessory_type: 'bottom_base_clear', quantity: 1 }],
   '獨立燈板 - 上燈': lightBoard('top_independent', ['top']),
@@ -480,10 +483,27 @@ export const QUOTE_TO_3D_ACCESSORIES: Readonly<Record<string, readonly Canonical
   '背板鏡面': [{ accessory_type: 'mirror_back', quantity: 1 }],
 });
 
+const QUOTE_ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  '三圈燈｜獨立上燈板': '獨立燈板 - 上燈',
+  '三圈燈｜獨立下燈板': '獨立燈板 - 下燈',
+  '三圈燈｜獨立上下燈板': '獨立燈板 - 上下燈',
+  '三圈上下燈': '上下燈',
+});
+
+const RGB_QUOTE_ACCESSORIES = new Set([
+  '彩燈｜獨立上燈板',
+  '彩燈｜獨立下燈板',
+  '彩燈｜獨立上下燈板',
+  '彩燈｜上下燈',
+]);
+
+const canonicalStoredAccessoryName = (name: string): string =>
+  QUOTE_ACCESSORY_STORAGE_ALIASES[name] || name;
+
 const parseStoredAccessories = (item: QuoteItemWithQuotationImage): StoredAccessory[] | null => {
   if (isRecord(item.accessoryQty)) {
     return Object.entries(item.accessoryQty).map(([name, value]) => ({
-      name: name.trim(),
+      name: canonicalStoredAccessoryName(name.trim()),
       quantity: Number(value),
     }));
   }
@@ -492,7 +512,7 @@ const parseStoredAccessories = (item: QuoteItemWithQuotationImage): StoredAccess
     const raw = String(value || '').trim();
     const match = raw.match(/^(.*?)\s+x(\d+)$/i);
     return {
-      name: (match ? match[1] : raw).trim(),
+      name: canonicalStoredAccessoryName((match ? match[1] : raw).trim()),
       quantity: match ? Number(match[2]) : 1,
     };
   });
@@ -501,7 +521,10 @@ const parseStoredAccessories = (item: QuoteItemWithQuotationImage): StoredAccess
 const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['accessories'] | null => {
   const stored = parseStoredAccessories(item);
   if (!stored) return null;
-  if (stored.some(entry => !entry.name || entry.quantity !== 1)) {
+  if (stored.some(entry => !entry.name || !Number.isInteger(entry.quantity) || entry.quantity < 1)) {
+    return null;
+  }
+  if (stored.some(entry => !RGB_QUOTE_ACCESSORIES.has(entry.name) && entry.quantity !== 1)) {
     return null;
   }
   if (new Set(stored.map(entry => entry.name)).size !== stored.length) return null;
@@ -510,7 +533,7 @@ const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['
   // cannot reproduce it without the approved asset provider. Omit only this
   // exact provider-dependent visual from the render request; do not weaken
   // the unknown-accessory or quantity checks below.
-  const renderOnlyOmissions = new Set(['背板圖片']);
+  const renderOnlyOmissions = new Set(['背板圖片', ...RGB_QUOTE_ACCESSORIES]);
   if (stored.some(entry => !QUOTE_TO_3D_ACCESSORIES[entry.name] && !renderOnlyOmissions.has(entry.name))) {
     return null;
   }
@@ -541,9 +564,23 @@ export const quotationImageDisclaimer = (
 ): string => {
   if (!hasPresentation) return '';
   const stored = parseStoredAccessories(item);
-  if (!stored?.some(entry => entry.name === '背板圖片' && entry.quantity === 1)) return '';
-  return isEnglish
-    ? 'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.'
+  if (!stored) return '';
+  const hasBackPanelArtwork = stored.some(entry => entry.name === '背板圖片' && entry.quantity === 1);
+  const hasRgbLight = stored.some(entry => RGB_QUOTE_ACCESSORIES.has(entry.name));
+  if (!hasBackPanelArtwork && !hasRgbLight) return '';
+  if (isEnglish) {
+    if (hasBackPanelArtwork && hasRgbLight) {
+      return 'Back-panel artwork follows the final approved design. The 3D image does not yet show the RGB colour effect.';
+    }
+    return hasRgbLight
+      ? 'The 3D image does not yet show the RGB colour effect.'
+      : 'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.';
+  }
+  if (hasBackPanelArtwork && hasRgbLight) {
+    return '背板圖片按最終設計稿為準；3D圖暫不顯示彩燈顏色效果。';
+  }
+  return hasRgbLight
+    ? '3D圖暫不顯示彩燈顏色效果。'
     : '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。';
 };
 

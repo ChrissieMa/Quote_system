@@ -92,6 +92,19 @@ test('quantity defaults to one and Google asks one bounded clarification', () =>
   assert.deepEqual(source.clarification?.options, ['Google Search', 'Google Organic']);
 });
 
+test('一行報價可分辨一體磁吸、三圈燈新顯示名及彩燈', () => {
+  const parsed = parseShortQuoteText(
+    '92503576 盒 25x25x30 一體磁吸結構+三圈燈｜獨立上燈板+彩燈｜獨立下燈板 內運100 港運200 利500 FB 無優惠',
+  );
+  assert.equal(parsed.kind, 'ready');
+  if (parsed.kind !== 'ready') return;
+  assert.deepEqual(parsed.accessories, {
+    '一體磁吸結構': 1,
+    '彩燈｜獨立下燈板': 1,
+    '獨立燈板 - 上燈': 1,
+  });
+});
+
 test('conflicting offers fail before preview and are never stacked', () => {
   const parsed = parseShortQuoteText(
     '92503576 盒 76x23x40 內運150 港運260 利800 FB 盒-300 無優惠',

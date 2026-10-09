@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import multer from 'multer';
 import {
+  accessoryStorageName,
   buildPilotPreview,
   calculatePilotItem,
   formatDimensionValue,
@@ -308,7 +309,7 @@ const DEFAULT_PAYMENT_TERMS_EN = `1. Full payment is required after order confir
 const DEFAULT_QUOTE_NOTES = `💡 所有優惠必須 Like Facebook Page 並分享指定 Post 才能享有優惠💡
 
 🤏🏻 全港少數採用 5MM 高清厚板製作展示盒及展示櫃 🤏🏻
-💫 購買任何展示盒或展示櫃，附送趟門或磁石門。💫
+💫 購買任何展示盒或展示櫃，附送趟門或一體磁吸結構。💫
 ➕ 加購優惠 ➕ 如加購背景或刻字，即免費設計及修圖。
 💡 獨立燈板 💡 獨立燈板與展示盒分體設計，方便日後升級成疊高展示櫃，燈板亦可靈活轉為上燈或下燈 🚪`;
 
@@ -603,8 +604,8 @@ const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = fals
       for (const entry of Array.isArray(item?.accessories) ? item.accessories : []) {
         const text = String(entry || '').trim();
         const match = text.match(/^(.*?)\s+x(\d+)$/);
-        if (match) accessoryQty[match[1]] = Number(match[2]);
-        else if (text) accessoryQty[text] = 1;
+        if (match) accessoryQty[accessoryStorageName(match[1])] = Number(match[2]);
+        else if (text) accessoryQty[accessoryStorageName(text)] = 1;
       }
       const itemType = String(item?.itemType || '') as PilotQuoteInput['items'][number]['itemType'];
       const outerDimensions = itemType.includes('Display Case') || itemType === '階梯' ? {
@@ -1851,6 +1852,10 @@ const formalAccessoryName = (rawName: string): string => {
     背圖: '背板圖片',
     白色刻字: '前板白色刻字',
     彩色刻字: '前板彩色刻字',
+    '三圈燈｜獨立上燈板': '獨立燈板 - 上燈',
+    '三圈燈｜獨立下燈板': '獨立燈板 - 下燈',
+    '三圈燈｜獨立上下燈板': '獨立燈板 - 上下燈',
+    '三圈上下燈': '上下燈',
   };
   return aliases[name] || name;
 };
@@ -4759,20 +4764,35 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                     </td>
                     <td>
                       <div class="f-stair-no-accessories" style="display:none;font-size:12px;color:#6b7280;">階梯不適用</div>
-                      <div class="f-accessories-editor" style="min-width:300px;max-height:220px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:6px;font-size:12px;background:#fff;">
-                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">單次配件</div>
+                      <div class="f-accessories-editor" style="min-width:330px;max-height:360px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:8px;font-size:12px;background:#fff;">
+                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">門款／結構</div>
                         <div class="f-acc-wrap" style="margin-bottom:8px;">
-                          <label style="display:block;"><input type="checkbox" value="趟門"> 趟門</label>
-                          <label style="display:block;"><input type="checkbox" value="磁石門"> 磁石門</label>
+                          <label style="display:block;"><input type="checkbox" class="f-door-option" value="趟門"> 趟門</label>
+                          <label style="display:block;"><input type="checkbox" class="f-door-option" value="一體磁吸結構"> 一體磁吸結構</label>
+                        </div>
+                        <div class="f-structure-summary" style="display:none;margin:-2px 0 8px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:#9a3412;font-weight:700;line-height:1.45;"></div>
+                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">其他單次配件</div>
+                        <div class="f-acc-wrap" style="margin-bottom:8px;">
                           <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
                           <label style="display:block;"><input type="checkbox" value="透明底板"> 透明底板</label>
                         </div>
-                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">數量配件</div>
+                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">三圈燈（原有燈效）</div>
                         <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
-                          <label>獨立燈板 - 上燈</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
-                          <label>獨立燈板 - 下燈</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
-                          <label>獨立燈板 - 上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
-                          <label>上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="上下燈" value="0" style="width:58px;">
+                          <label>三圈燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
+                          <label>三圈燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
+                          <label>三圈燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
+                          <label>三圈上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="上下燈" value="0" style="width:58px;">
+                        </div>
+                        <div style="font-weight:700;color:#7c3aed;margin:9px 0 4px;">彩燈（多色／USB／DC頭）</div>
+                        <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
+                          <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立上燈板" value="0" style="width:58px;">
+                          <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立下燈板" value="0" style="width:58px;">
+                          <label>彩燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立上下燈板" value="0" style="width:58px;">
+                          <label>彩燈｜上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜上下燈" value="0" style="width:58px;">
+                        </div>
+                        <div class="f-rgb-meta" style="display:none;margin:7px 0;padding:6px 8px;border-radius:5px;background:#f5f3ff;color:#5b21b6;line-height:1.45;"></div>
+                        <div style="font-weight:700;color:#d8833b;margin:9px 0 4px;">其他數量配件</div>
+                        <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
                           <label>背燈</label><input type="number" min="0" class="f-acc-qty" data-name="背燈" value="0" style="width:58px;">
                           <label>前板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="前板白色刻字" value="0" style="width:58px;">
                           <label>前板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="前板彩色刻字" value="0" style="width:58px;">
@@ -5125,11 +5145,28 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     function getOuterDimensionIncrease(row) {
       var qtyMap = getAccessoryQtyMap(row);
-      var hasTopStandard = (qtyMap['上下燈'] || 0) > 0;
+      var singles = getSingleAccessories(row);
+      var hasIntegratedMagnetic = singles.indexOf('一體磁吸結構') !== -1;
+      var hasTopStandard = (qtyMap['上下燈'] || 0) > 0 || (qtyMap['彩燈｜上下燈'] || 0) > 0;
       var hasTopSingleStandard = false;
-      var hasTopIndependentSingle = (qtyMap['獨立燈板 - 上燈'] || 0) > 0 || (qtyMap['獨立燈板 - 下燈'] || 0) > 0;
-      var hasTopIndependentDouble = (qtyMap['獨立燈板 - 上下燈'] || 0) > 0;
+      var hasTopIndependentSingle = (qtyMap['獨立燈板 - 上燈'] || 0) > 0 || (qtyMap['獨立燈板 - 下燈'] || 0) > 0
+        || (qtyMap['彩燈｜獨立上燈板'] || 0) > 0 || (qtyMap['彩燈｜獨立下燈板'] || 0) > 0;
+      var hasTopIndependentDouble = (qtyMap['獨立燈板 - 上下燈'] || 0) > 0 || (qtyMap['彩燈｜獨立上下燈板'] || 0) > 0;
       var hasBack = (qtyMap['背燈'] || 0) > 0;
+
+      if (hasIntegratedMagnetic) {
+        var hasTop = hasTopStandard || hasTopIndependentDouble
+          || (qtyMap['獨立燈板 - 上燈'] || 0) > 0
+          || (qtyMap['彩燈｜獨立上燈板'] || 0) > 0;
+        var hasBottom = hasTopStandard || hasTopIndependentDouble
+          || (qtyMap['獨立燈板 - 下燈'] || 0) > 0
+          || (qtyMap['彩燈｜獨立下燈板'] || 0) > 0;
+        return {
+          outerLengthIncrease: 1,
+          outerDepthIncrease: hasBack ? 2.8 : 1,
+          outerHeightIncrease: hasTop && hasBottom ? 4.6 : (hasTop || hasBottom ? 2.3 : 1)
+        };
+      }
 
       var topLikeCount = 0;
       if (hasTopStandard) topLikeCount += 1;
@@ -5177,7 +5214,9 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     function updateOuterDimensions(row) {
       var isManualOuter = updateOuterDimensionMode(row);
+      var structureSummary = row.querySelector('.f-structure-summary');
       if (isManualOuter) {
+        if (structureSummary) structureSummary.style.display = 'none';
         return;
       }
 
@@ -5191,6 +5230,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         if (outerLInput) outerLInput.value = '';
         if (outerDInput) outerDInput.value = '';
         if (outerHInput) outerHInput.value = '';
+        if (structureSummary) structureSummary.style.display = 'none';
         return;
       }
 
@@ -5198,6 +5238,19 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       if (outerLInput) outerLInput.value = formatDimensionInputValue(l + inc.outerLengthIncrease);
       if (outerDInput) outerDInput.value = formatDimensionInputValue(d + inc.outerDepthIncrease);
       if (outerHInput) outerHInput.value = formatDimensionInputValue(h + inc.outerHeightIncrease);
+      var singles = getSingleAccessories(row);
+      var selectedStructure = singles.indexOf('一體磁吸結構') !== -1
+        ? '一體磁吸結構'
+        : (singles.indexOf('趟門') !== -1 ? '趟門' : '');
+      if (structureSummary) {
+        structureSummary.style.display = selectedStructure ? 'block' : 'none';
+        structureSummary.textContent = selectedStructure
+          ? selectedStructure + '｜外尺寸 '
+            + formatDimensionInputValue(l + inc.outerLengthIncrease) + ' × '
+            + formatDimensionInputValue(d + inc.outerDepthIncrease) + ' × '
+            + formatDimensionInputValue(h + inc.outerHeightIncrease) + ' cm'
+          : '';
+      }
     }
 
     function getLightBoardPieceCount(row) {
@@ -5207,6 +5260,10 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       count += (qtyMap['獨立燈板 - 下燈'] || 0);
       count += ((qtyMap['獨立燈板 - 上下燈'] || 0) * 2);
       count += ((qtyMap['上下燈'] || 0) * 2);
+      count += (qtyMap['彩燈｜獨立上燈板'] || 0);
+      count += (qtyMap['彩燈｜獨立下燈板'] || 0);
+      count += ((qtyMap['彩燈｜獨立上下燈板'] || 0) * 2);
+      count += ((qtyMap['彩燈｜上下燈'] || 0) * 2);
       count += (qtyMap['背燈'] || 0);
       return count;
     }
@@ -5265,8 +5322,31 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       lightBoardCount += (qtyMap['獨立燈板 - 下燈'] || 0);
       lightBoardCount += ((qtyMap['獨立燈板 - 上下燈'] || 0) * 2);
       lightBoardCount += ((qtyMap['上下燈'] || 0) * 2);
+      lightBoardCount += (qtyMap['彩燈｜獨立上燈板'] || 0);
+      lightBoardCount += (qtyMap['彩燈｜獨立下燈板'] || 0);
+      lightBoardCount += ((qtyMap['彩燈｜獨立上下燈板'] || 0) * 2);
+      lightBoardCount += ((qtyMap['彩燈｜上下燈'] || 0) * 2);
       if (lightBoardCount > 0) {
         accessoryRmb += calcLightBoardRmb(l, d) * lightBoardCount;
+      }
+
+      var rgbSingleMetres = (2 * (l + d)) / 100;
+      var rgbSingleAccessoryCount = (qtyMap['彩燈｜獨立上燈板'] || 0)
+        + (qtyMap['彩燈｜獨立下燈板'] || 0);
+      var rgbDoubleAccessoryCount = (qtyMap['彩燈｜獨立上下燈板'] || 0)
+        + (qtyMap['彩燈｜上下燈'] || 0);
+      var rgbAccessoryQuantity = rgbSingleAccessoryCount + rgbDoubleAccessoryCount;
+      var rgbLightMetres = Math.round((rgbSingleMetres * (rgbSingleAccessoryCount + (rgbDoubleAccessoryCount * 2))) * 100) / 100;
+      var rgbSupplierSurchargeRmb = Math.round((rgbLightMetres * 10) * 100) / 100;
+      accessoryRmb += rgbSupplierSurchargeRmb;
+      hkdAddons += rgbAccessoryQuantity * 100;
+      var rgbMeta = row.querySelector('.f-rgb-meta');
+      if (rgbMeta) {
+        rgbMeta.style.display = rgbAccessoryQuantity > 0 ? 'block' : 'none';
+        rgbMeta.innerHTML = rgbAccessoryQuantity > 0
+          ? '彩燈實際燈帶：<strong>' + rgbLightMetres + 'm</strong> ｜ 供應商追加：<strong>RMB ' + rgbSupplierSurchargeRmb.toFixed(2) + '</strong> ｜ 客人加價：<strong>HKD $' + (rgbAccessoryQuantity * 100) + '</strong>'
+            + (rgbSingleMetres > 5 ? '<br><span style="color:#b91c1c;font-weight:700;">彩燈單組燈帶超過 5m，請確認控制器及亮度安排。</span>' : '')
+          : '';
       }
 
       var backLightCount = qtyMap['背燈'] || 0;
@@ -5321,6 +5401,11 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         if (el.classList.contains('f-amt') || el.classList.contains('f-lh') || el.classList.contains('f-level-height-input')) return;
         var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
+          if (el.classList.contains('f-door-option') && el.checked) {
+            row.querySelectorAll('.f-door-option').forEach(function(option) {
+              if (option !== el) option.checked = false;
+            });
+          }
           if (el.classList.contains('f-type') || el.classList.contains('f-lv')) {
             updateLevelHeightEditor(row);
           }
@@ -5836,6 +5921,12 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       estimatedPackageUnits: parseFloat(String(item.estimatedPackageUnits)) || 0,
       localDeliveryOverride: String(item.localDeliveryOverride) === 'true' || item.localDeliveryOverride === true,
       localDeliveryNotes: String(item.localDeliveryNotes || ''),
+      rgbLightMetres: parseFloat(String(item.rgbLightMetres)) || 0,
+      rgbSupplierSurchargeRmb: parseFloat(String(item.rgbSupplierSurchargeRmb)) || 0,
+      rgbCustomerSurchargeHkd: parseFloat(String(item.rgbCustomerSurchargeHkd)) || 0,
+      internalWarnings: Array.isArray(item.internalWarnings)
+        ? item.internalWarnings.map((warning: unknown) => String(warning))
+        : [],
       amount: parseFloat(String(item.amount)) || 0,
     }));
     items = ensureImmutableItemIds(items, { preserveExisting: isPilotInternal });
