@@ -243,6 +243,7 @@ test('Create Quote 運費輸入格下面包含即時計算及低價警告位置'
   const source = readFileSync(__dirname + '/index.ts', 'utf8');
   assert.match(source, /class="f-freight-estimate freight-estimate-hint"/);
   assert.match(source, /class="f-hk-delivery-estimate freight-estimate-hint"/);
+  assert.match(source, /客人建議總收/);
   assert.match(source, /function updateFreightEstimate\(row\)/);
   assert.match(source, /⚠️ 低過建議/);
   assert.match(source, /rows\.forEach\(function\(row\)[\s\S]+updateFreightEstimate\(row\)/);

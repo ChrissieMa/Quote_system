@@ -5049,7 +5049,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         + '估算 $' + estimate.chinaMin + '–$' + estimate.chinaMax + '｜' + weightText
         + caution
         + freightWarningHtml(row.querySelector('.f-freight'), estimate.chinaRecommended);
-      hkHint.innerHTML = '建議 <strong>$' + estimate.hkRecommended + '</strong><br>'
+      hkHint.innerHTML = '客人建議總收 <strong>$' + estimate.hkRecommended + '</strong><br>'
         + '估算 $' + estimate.hkMin + '–$' + estimate.hkMax + '｜' + weightText
         + freightWarningHtml(row.querySelector('.f-hk-delivery'), estimate.hkRecommended);
     }
