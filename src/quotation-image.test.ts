@@ -236,6 +236,10 @@ test('every provider-free Quote accessory maps to the exact 3D browser applicato
       'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
       'light_bottom_outer_ring', 'light_bottom_middle_ring', 'light_bottom_inner_ring',
     ],
+    '彩燈｜獨立上燈板': ['light_board_colour_top_independent'],
+    '彩燈｜獨立下燈板': ['light_board_colour_bottom_independent'],
+    '彩燈｜獨立上下燈板': ['light_board_colour_both_independent'],
+    '彩燈｜上下燈': ['light_board_colour_both_standard'],
     '背燈': ['back_light', 'background_back'],
     '左板鏡面': ['mirror_left'],
     '右板鏡面': ['mirror_right'],
@@ -261,7 +265,7 @@ test('every provider-free Quote accessory maps to the exact 3D browser applicato
   });
 });
 
-test('一體磁吸安全 fallback 且彩燈 metadata 不會令 Quote to 3D adapter fail', () => {
+test('一體磁吸及彩燈使用 3D renderer 已驗證的 canonical mapping', () => {
   const item = {
     ...storedQuoteItem(),
     accessories: ['一體磁吸結構', '彩燈｜獨立上燈板 x2'],
@@ -272,12 +276,14 @@ test('一體磁吸安全 fallback 且彩燈 metadata 不會令 Quote to 3D adapt
   };
   const request = buildQuotationRenderRequestFromQuoteItem(item);
   assert.ok(request);
-  assert.deepEqual(request.accessories, [{ accessory_type: 'door_magnetic', quantity: 1 }]);
-  assert.equal(JSON.stringify(request).includes('彩燈'), false);
-  assert.equal(
-    quotationImageDisclaimer(item, false, true),
-    '3D圖暫不顯示彩燈顏色效果。',
-  );
+  assert.deepEqual(request.accessories, [
+    { accessory_type: 'door_magnetic', quantity: 1 },
+    { accessory_type: 'light_board_colour_top_independent', quantity: 1 },
+  ]);
+  // Quote quantity remains commercial data. A single product image needs one
+  // visual mode regardless of whether the customer orders one or two units.
+  assert.equal(item.accessoryQty['彩燈｜獨立上燈板'], 2);
+  assert.equal(quotationImageDisclaimer(item, false, true), '');
 
   const displayLabelOnly = buildQuotationRenderRequestFromQuoteItem({
     ...storedQuoteItem(),
@@ -288,6 +294,61 @@ test('一體磁吸安全 fallback 且彩燈 metadata 不會令 Quote to 3D adapt
   assert.deepEqual(displayLabelOnly.accessories.map(accessory => accessory.accessory_type), [
     'light_board_top_independent',
     'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
+  ]);
+});
+
+test('四款彩燈均可建立 Quote 圖片 request，舊三圈燈 mapping 不變', () => {
+  const rgbMappings = {
+    '彩燈｜獨立上燈板': 'light_board_colour_top_independent',
+    '彩燈｜獨立下燈板': 'light_board_colour_bottom_independent',
+    '彩燈｜獨立上下燈板': 'light_board_colour_both_independent',
+    '彩燈｜上下燈': 'light_board_colour_both_standard',
+  } as const;
+  for (const [quoteAccessory, canonicalType] of Object.entries(rgbMappings)) {
+    const request = buildQuotationRenderRequestFromQuoteItem({
+      ...storedQuoteItem(),
+      accessories: [`${quoteAccessory} x2`],
+      accessoryQty: { [quoteAccessory]: 2 },
+    });
+    assert.deepEqual(request?.accessories, [{ accessory_type: canonicalType, quantity: 1 }]);
+  }
+
+  const legacy = buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    accessories: ['三圈上下燈 x1'],
+    accessoryQty: undefined,
+  });
+  assert.deepEqual(legacy?.accessories.map(accessory => accessory.accessory_type), [
+    'light_board_both_standard',
+    'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
+    'light_bottom_outer_ring', 'light_bottom_middle_ring', 'light_bottom_inner_ring',
+  ]);
+});
+
+test('27x27x36 一體磁吸上下彩燈及背燈沿用 Quote 已計算的正確圖片尺寸', () => {
+  const request = buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    interL: '27',
+    interD: '27',
+    interH: '36',
+    outerL: '28',
+    outerD: '29.8',
+    outerH: '40.6',
+    accessories: ['一體磁吸結構', '彩燈｜上下燈', '背燈'],
+    accessoryQty: {
+      '一體磁吸結構': 1,
+      '彩燈｜上下燈': 1,
+      '背燈': 1,
+    },
+  });
+  assert.ok(request);
+  assert.deepEqual(request.dimensions.inner, { length: 27, depth: 27, height: 36 });
+  assert.deepEqual(request.dimensions.outer, { length: 28, depth: 29.8, height: 40.6 });
+  assert.deepEqual(request.accessories.map(accessory => accessory.accessory_type), [
+    'door_magnetic',
+    'light_board_colour_both_standard',
+    'back_light',
+    'background_back',
   ]);
 });
 
