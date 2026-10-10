@@ -463,8 +463,8 @@ const lightBoard = (
 export const QUOTE_TO_3D_ACCESSORIES: Readonly<Record<string, readonly CanonicalAccessory[]>> = Object.freeze({
   '趟門': [{ accessory_type: 'door_sliding', quantity: 1 }],
   '磁石門': [{ accessory_type: 'door_magnetic', quantity: 1 }],
-  // Until the 3D Project adds a dedicated canonical type, the integrated
-  // magnetic structure uses the renderer's established magnetic-door shape.
+  // The 3D renderer deliberately keeps the established canonical magnetic
+  // key while presenting the new integrated four-door structure.
   '一體磁吸結構': [{ accessory_type: 'door_magnetic', quantity: 1 }],
   '黑底板': [{ accessory_type: 'bottom_base_black', quantity: 1 }],
   '透明底板': [{ accessory_type: 'bottom_base_clear', quantity: 1 }],
@@ -472,6 +472,10 @@ export const QUOTE_TO_3D_ACCESSORIES: Readonly<Record<string, readonly Canonical
   '獨立燈板 - 下燈': lightBoard('bottom_independent', ['bottom']),
   '獨立燈板 - 上下燈': lightBoard('both_independent', ['top', 'bottom']),
   '上下燈': lightBoard('both_standard', ['top', 'bottom']),
+  '彩燈｜獨立上燈板': [{ accessory_type: 'light_board_colour_top_independent', quantity: 1 }],
+  '彩燈｜獨立下燈板': [{ accessory_type: 'light_board_colour_bottom_independent', quantity: 1 }],
+  '彩燈｜獨立上下燈板': [{ accessory_type: 'light_board_colour_both_independent', quantity: 1 }],
+  '彩燈｜上下燈': [{ accessory_type: 'light_board_colour_both_standard', quantity: 1 }],
   '背燈': [
     { accessory_type: 'back_light', quantity: 1, colour: 'white' },
     { accessory_type: 'background_back', quantity: 1 },
@@ -533,7 +537,7 @@ const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['
   // cannot reproduce it without the approved asset provider. Omit only this
   // exact provider-dependent visual from the render request; do not weaken
   // the unknown-accessory or quantity checks below.
-  const renderOnlyOmissions = new Set(['背板圖片', ...RGB_QUOTE_ACCESSORIES]);
+  const renderOnlyOmissions = new Set(['背板圖片']);
   if (stored.some(entry => !QUOTE_TO_3D_ACCESSORIES[entry.name] && !renderOnlyOmissions.has(entry.name))) {
     return null;
   }
@@ -566,22 +570,11 @@ export const quotationImageDisclaimer = (
   const stored = parseStoredAccessories(item);
   if (!stored) return '';
   const hasBackPanelArtwork = stored.some(entry => entry.name === '背板圖片' && entry.quantity === 1);
-  const hasRgbLight = stored.some(entry => RGB_QUOTE_ACCESSORIES.has(entry.name));
-  if (!hasBackPanelArtwork && !hasRgbLight) return '';
+  if (!hasBackPanelArtwork) return '';
   if (isEnglish) {
-    if (hasBackPanelArtwork && hasRgbLight) {
-      return 'Back-panel artwork follows the final approved design. The 3D image does not yet show the RGB colour effect.';
-    }
-    return hasRgbLight
-      ? 'The 3D image does not yet show the RGB colour effect.'
-      : 'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.';
+    return 'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.';
   }
-  if (hasBackPanelArtwork && hasRgbLight) {
-    return '背板圖片按最終設計稿為準；3D圖暫不顯示彩燈顏色效果。';
-  }
-  return hasRgbLight
-    ? '3D圖暫不顯示彩燈顏色效果。'
-    : '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。';
+  return '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。';
 };
 
 const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1['cabinet_layers'] => {
