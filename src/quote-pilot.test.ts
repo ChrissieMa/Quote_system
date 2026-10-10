@@ -17,6 +17,7 @@ import {
   resolveDisplayCaseLevelHeights,
   verifyConfirmationId,
 } from './quote-pilot';
+import { estimateQuoteFreight, freightUnderquoteGap } from './freight-estimator';
 
 const displayBoxItem = (
   accessories: Record<string, number>,
@@ -158,6 +159,94 @@ test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () 
   assert.match(source, /三圈燈｜獨立上燈板<\/label><input[^>]+data-name="獨立燈板 - 上燈"/);
   assert.match(source, /data-name="彩燈｜獨立上下燈板"/);
   assert.match(source, /購買任何展示盒或展示櫃，附送趟門或一體磁吸結構/);
+});
+
+test('27x27x36 展示盒即時計出保守重量、中國運費及香港運費建議', () => {
+  const estimate = estimateQuoteFreight({
+    itemType: 'Display box 展示盒',
+    lengthCm: 27,
+    depthCm: 27,
+    heightCm: 36,
+    quantity: 1,
+    packageUnits: 1,
+  });
+  assert.equal(estimate.available, true);
+  assert.equal(estimate.confidence, 'medium');
+  assert.equal(estimate.estimatedWeightMinKg, 4.1);
+  assert.equal(estimate.estimatedWeightMaxKg, 6.6);
+  assert.equal(estimate.recommendedChinaFreightHkd, 80);
+  assert.equal(estimate.recommendedHkDeliveryHkd, 120);
+});
+
+test('燈板增加包裝單位時會提高保守重量及運費建議', () => {
+  const plain = estimateQuoteFreight({
+    itemType: 'Display box 展示盒',
+    lengthCm: 27,
+    depthCm: 27,
+    heightCm: 36,
+    quantity: 1,
+    packageUnits: 1,
+  });
+  const withLightBoard = estimateQuoteFreight({
+    itemType: 'Display box 展示盒',
+    lengthCm: 27,
+    depthCm: 27,
+    heightCm: 36,
+    quantity: 1,
+    packageUnits: 1.5,
+  });
+  assert.ok(Number(withLightBoard.estimatedWeightMaxKg) > Number(plain.estimatedWeightMaxKg));
+  assert.ok(Number(withLightBoard.recommendedChinaFreightHkd) > Number(plain.recommendedChinaFreightHkd));
+  assert.ok(Number(withLightBoard.recommendedHkDeliveryHkd) > Number(plain.recommendedHkDeliveryHkd));
+});
+
+test('疊高展示櫃按每層高度計算並標示保守提示', () => {
+  const estimate = estimateQuoteFreight({
+    itemType: 'Display Case 疊高展示櫃',
+    lengthCm: 55,
+    depthCm: 30,
+    levelHeightsCm: [50, 50, 40],
+    quantity: 1,
+    packageUnits: 3,
+  });
+  assert.equal(estimate.available, true);
+  assert.equal(estimate.confidence, 'caution');
+  assert.ok(Number(estimate.estimatedWeightMaxKg) > Number(estimate.estimatedWeightMinKg));
+  assert.match(estimate.note, /保守上限/);
+});
+
+test('階梯或尺寸未完整時不會扮作精準估價', () => {
+  const stair = estimateQuoteFreight({
+    itemType: '階梯',
+    lengthCm: 30,
+    depthCm: 20,
+    heightCm: 10,
+  });
+  const incomplete = estimateQuoteFreight({
+    itemType: 'Display box 展示盒',
+    lengthCm: 30,
+    depthCm: 20,
+  });
+  assert.equal(stair.available, false);
+  assert.equal(incomplete.available, false);
+  assert.match(stair.note, /人手確認/);
+  assert.match(incomplete.note, /完整尺寸/);
+});
+
+test('輸入低過建議價先顯示收少提示', () => {
+  assert.equal(freightUnderquoteGap(100, 140), 40);
+  assert.equal(freightUnderquoteGap(140, 140), 0);
+  assert.equal(freightUnderquoteGap('', 140), 0);
+});
+
+test('Create Quote 運費輸入格下面包含即時計算及低價警告位置', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /class="f-freight-estimate freight-estimate-hint"/);
+  assert.match(source, /class="f-hk-delivery-estimate freight-estimate-hint"/);
+  assert.match(source, /客人建議總收/);
+  assert.match(source, /function updateFreightEstimate\(row\)/);
+  assert.match(source, /⚠️ 低過建議/);
+  assert.match(source, /rows\.forEach\(function\(row\)[\s\S]+updateFreightEstimate\(row\)/);
 });
 
 test('a signed confirmation locks the exact preview and creates a stable idempotency token', () => {

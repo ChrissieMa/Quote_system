@@ -21,6 +21,7 @@ import {
   verifyConfirmationId,
   type PilotQuoteInput,
 } from './quote-pilot';
+import { FREIGHT_ESTIMATOR_MODEL } from './freight-estimator';
 import {
   lookupQuoteRecords,
   validateQuoteLookupQuery,
@@ -4602,6 +4603,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
     campaignOptions += '<option value="__manual__">手動輸入 Campaign / Ads</option>';
   }
 
+  const freightEstimatorModelJson = JSON.stringify(FREIGHT_ESTIMATOR_MODEL).replace(/</g, '\\u003c');
   const content = `
     <div class="doc-card">
       ${docHeader('建立報價單', 'Create Quote')}
@@ -4812,8 +4814,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                     </td>
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
                     <td><input type="number" class="f-qty amount-input" min="1" value="1" style="width:55px"></td>
-                    <td><input type="number" class="f-freight amount-input" step="0.01" style="width:80px" title="內地運費"></td>
-                    <td><input type="number" class="f-hk-delivery amount-input" min="0" step="0.01" style="width:95px" title="輸入此 Item 的香港本地送貨估算總數"></td>
+                    <td style="min-width:132px;vertical-align:top;"><input type="number" class="f-freight amount-input" step="0.01" style="width:100%;min-width:80px" title="內地運費"><div class="f-freight-estimate freight-estimate-hint" aria-live="polite">輸入尺寸後顯示建議</div></td>
+                    <td style="min-width:142px;vertical-align:top;"><input type="number" class="f-hk-delivery amount-input" min="0" step="0.01" style="width:100%;min-width:95px" title="輸入此 Item 的香港本地送貨估算總數"><div class="f-hk-delivery-estimate freight-estimate-hint" aria-live="polite">輸入尺寸後顯示建議</div></td>
                     <td><input type="number" class="f-profit amount-input" step="0.01" style="width:80px"></td>
                     <td><input type="number" class="f-amt amount-input" step="0.01" style="width:90px;background:#f9fafb;" readonly></td>
                     <td><button type="button" class="btn btn-danger btn-sm" onclick="removeRow(this)">✕</button></td>
@@ -4917,8 +4919,15 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
   `;
 
   const extraHead = `
+  <style>
+    .freight-estimate-hint{margin-top:6px;max-width:150px;font-size:11px;line-height:1.4;color:#64748b;white-space:normal}
+    .freight-estimate-hint strong{color:#166534;font-size:12px}
+    .freight-estimate-hint .freight-warning{display:block;margin-top:3px;color:#b91c1c;font-weight:700}
+    .freight-estimate-hint .freight-caution{display:block;margin-top:3px;color:#9a3412;font-weight:700}
+  </style>
   <script>
     var RMB_DIVISOR = 0.85;
+    var FREIGHT_ESTIMATOR_MODEL = ${freightEstimatorModelJson};
 
     function parseNum(val) {
       var n = parseFloat(val);
@@ -4931,6 +4940,118 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         d: parseNum((row.querySelector('.f-id') || {}).value),
         h: parseNum((row.querySelector('.f-ih') || {}).value)
       };
+    }
+
+    function freightRoundOneUp(value) {
+      return Math.ceil(Number(value || 0) * 10) / 10;
+    }
+
+    function freightRoundTenUp(value) {
+      return Math.ceil(Number(value || 0) / 10) * 10;
+    }
+
+    function freightSurfaceArea(l, d, h) {
+      return (2 * ((l * d) + (l * h) + (d * h))) / 10000;
+    }
+
+    function freightLocalDelivery(weightKg) {
+      var model = FREIGHT_ESTIMATOR_MODEL;
+      if (weightKg <= model.hkBaseWeightKg) return model.hkBaseChargeHkd;
+      return model.hkBaseChargeHkd + ((weightKg - model.hkBaseWeightKg) * model.hkAdditionalHkdPerKg);
+    }
+
+    function calculateFreightEstimate(row) {
+      var itemType = String((row.querySelector('.f-type') || {}).value || '');
+      var isDisplayCase = itemType.indexOf('Display Case') !== -1;
+      var isDisplayBox = itemType.indexOf('Display box') !== -1;
+      if (!isDisplayCase && !isDisplayBox) {
+        return { available: false, note: '未有足夠同類重量，請人手確認。' };
+      }
+
+      var dims = getDims(row);
+      var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
+      if (!(dims.l > 0 && dims.d > 0)) {
+        return { available: false, note: '輸入完整尺寸後顯示建議。' };
+      }
+
+      var band = isDisplayCase ? FREIGHT_ESTIMATOR_MODEL.displayCase : FREIGHT_ESTIMATOR_MODEL.displayBox;
+      var area = 0;
+      var basePackageUnits = qty;
+      if (isDisplayCase) {
+        var levels = Math.max(2, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 2);
+        var heights = getLevelHeightsForCalculation(row, levels);
+        if (!heights) return { available: false, note: '輸入每層內高後顯示建議。' };
+        heights.forEach(function(height) { area += freightSurfaceArea(dims.l, dims.d, height); });
+        area *= qty;
+        basePackageUnits = heights.length * qty;
+      } else {
+        if (!(dims.h > 0)) return { available: false, note: '輸入完整尺寸後顯示建議。' };
+        area = freightSurfaceArea(dims.l, dims.d, dims.h) * qty;
+      }
+
+      var packageUnits = Math.max(basePackageUnits, getEstimatedPackageUnits(row));
+      var extraPackageRatio = Math.max(0, (packageUnits - basePackageUnits) / basePackageUnits);
+      var accessoryUplift = 1 + Math.min(
+        FREIGHT_ESTIMATOR_MODEL.accessoryPackageUpliftCap,
+        extraPackageRatio * FREIGHT_ESTIMATOR_MODEL.accessoryPackageUpliftPerExtraUnit
+      );
+      var minWeight = freightRoundOneUp(area * band.medianKgPerSquareMetre);
+      var maxWeight = freightRoundOneUp(area * band.upperKgPerSquareMetre * accessoryUplift);
+      var chinaMin = freightRoundTenUp(Math.max(
+        FREIGHT_ESTIMATOR_MODEL.chinaMinimumHkd,
+        minWeight * FREIGHT_ESTIMATOR_MODEL.chinaMedianHkdPerKg
+      ));
+      var chinaMax = freightRoundTenUp(Math.max(
+        FREIGHT_ESTIMATOR_MODEL.chinaMinimumHkd,
+        maxWeight * FREIGHT_ESTIMATOR_MODEL.chinaObservedHighHkdPerKg
+      ));
+      var chinaRecommended = freightRoundTenUp(Math.max(
+        FREIGHT_ESTIMATOR_MODEL.chinaMinimumHkd,
+        maxWeight * FREIGHT_ESTIMATOR_MODEL.chinaRecommendedHkdPerKg
+      ));
+      var hkMin = freightRoundTenUp(freightLocalDelivery(minWeight));
+      var hkMax = freightRoundTenUp(freightLocalDelivery(maxWeight));
+      return {
+        available: true,
+        confidence: band.confidence,
+        minWeight: minWeight,
+        maxWeight: maxWeight,
+        chinaMin: chinaMin,
+        chinaMax: chinaMax,
+        chinaRecommended: chinaRecommended,
+        hkMin: hkMin,
+        hkMax: hkMax,
+        hkRecommended: hkMax
+      };
+    }
+
+    function freightWarningHtml(input, recommended) {
+      var entered = parseNum(input && input.value);
+      if (!(entered > 0 && recommended > entered)) return '';
+      return '<span class="freight-warning">⚠️ 低過建議 $' + freightRoundTenUp(recommended - entered) + '</span>';
+    }
+
+    function updateFreightEstimate(row) {
+      var chinaHint = row.querySelector('.f-freight-estimate');
+      var hkHint = row.querySelector('.f-hk-delivery-estimate');
+      if (!chinaHint || !hkHint) return;
+      var estimate = calculateFreightEstimate(row);
+      if (!estimate.available) {
+        chinaHint.textContent = estimate.note;
+        hkHint.textContent = estimate.note;
+        return;
+      }
+      var weightText = estimate.minWeight + '–' + estimate.maxWeight + 'kg';
+      var caution = estimate.confidence === 'caution'
+        ? '<span class="freight-caution">展示櫃差距較大，已用保守上限</span>'
+        : '';
+      chinaHint.innerHTML = '建議 <strong>$' + estimate.chinaRecommended + '</strong><br>'
+        + '估算 $' + estimate.chinaMin + '–$' + estimate.chinaMax + '｜' + weightText
+        + caution
+        + freightWarningHtml(row.querySelector('.f-freight'), estimate.chinaRecommended);
+      hkHint.innerHTML = '客人建議總收 <strong>$' + estimate.hkRecommended + '</strong><br>'
+        + '估算 $' + estimate.hkMin + '–$' + estimate.hkMax + '｜' + weightText
+        + freightWarningHtml(row.querySelector('.f-hk-delivery'), estimate.hkRecommended);
     }
 
     function getSingleAccessories(row) {
@@ -5457,6 +5578,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var rows = Array.from(document.querySelectorAll('#itemsBody tr'));
       rows.forEach(function(row) {
         sum += calcRowAmount(row);
+        updateFreightEstimate(row);
       });
       document.getElementById('subtotal').value = sum.toFixed(2);
       recalcTotal();
