@@ -298,7 +298,8 @@ const DEFAULT_TERMS = `1. 本報價僅供參考，所有尺寸、設計及細節
 8. 客戶需於收貨時即時檢查產品，如有問題請即時提出，否則視為驗收完成。
 9. 如產品因不當使用、人為損壞或自行安裝不當而造成損壞，本公司概不負責。
 10. 展示盒為亞加力製品，可能出現輕微加工痕跡，屬正常情況。
-11. LKS Display Box 保留最終報價及訂單之決定權。`;
+11. 一體磁吸結構只適用於單層展示盒，不可疊高使用；如因疊高、超出設計用途或其他不當使用而造成損壞，本公司恕不負責賠償或更換。
+12. LKS Display Box 保留最終報價及訂單之決定權。`;
 
 const DEFAULT_PAYMENT_TERMS = `1. 所有訂單均需於確認後支付全數貨款，本公司將於收到全數付款後開始生產。
 2. 完成製作後，本公司將根據貨物及包裝後之實際重量計算運費，並另行發出運費發票（Invoice）。
@@ -336,7 +337,8 @@ const DEFAULT_TERMS_EN = `1. This quotation is for reference only. All sizes, de
 8. Customers should inspect the product upon delivery. Any issue should be reported immediately; otherwise the product will be treated as accepted.
 9. LKS Display Box is not responsible for damage caused by misuse, human damage or incorrect self-installation.
 10. Acrylic products may have minor production marks, which are considered normal.
-11. LKS Display Box reserves the final decision on all quotations and orders.`;
+11. Integrated magnetic structures are designed for single-level display boxes only and must not be stacked. LKS Display Box is not responsible for compensation or replacement for damage caused by stacking, use beyond the intended design, or other misuse.
+12. LKS Display Box reserves the final decision on all quotations and orders.`;
 
 const MATERIAL_NOTE_EN = 'All LKS display boxes and display cases are made with 5MM high-clarity acrylic panels';
 
@@ -1031,9 +1033,8 @@ const buildDisplayDiscountText = (fields: FieldSet, isEnglish: boolean): string 
 const buildDisplayDeliveryText = (
   fields: FieldSet,
   isEnglish: boolean,
-  localDeliveryAmount = 0,
   validUntil?: unknown
-): string => buildDeliveryWaiverText(fields, isEnglish, localDeliveryAmount, validUntil);
+): string => buildDeliveryWaiverText(fields, isEnglish, validUntil);
 
 const getOrderLanguageFromSourceQuote = async (orderFields: FieldSet): Promise<'中文' | 'English'> => {
   if (orderFields['Quote Language']) return normalizeQuoteLanguage(orderFields['Quote Language']);
@@ -1109,20 +1110,6 @@ const renderDimensionLines = (values: string[]): string =>
   values.map(value => escapeHtml(value) || '-').join('<br>');
 
 
-const sumQuoteLocalDelivery = (items: any[]): number =>
-  (Array.isArray(items) ? items : []).reduce((sum, item) => {
-    const value = Number(item?.hongKongDelivery ?? item?.deliveryCostReserve ?? item?.localDelivery ?? 0);
-    return sum + (Number.isFinite(value) ? value : 0);
-  }, 0);
-
-const buildDeliveryFeeRange = (localDeliveryAmount: number): string => {
-  const amount = Number(localDeliveryAmount) || 0;
-  if (amount <= 0) return '';
-  const lower = Math.floor(amount / 100) * 100;
-  const upper = lower + 100;
-  return `HK$${lower}–$${upper}`;
-};
-
 const formatDeliveryOfferReasonZh = (reason: string): string => {
   if (reason === '新客戶免運費' || reason === '首次落單優惠') return '首次落單優惠';
   return reason || '';
@@ -1141,12 +1128,10 @@ const formatDeliveryOfferReasonEn = (reason: string): string => {
 const buildDeliveryWaiverText = (
   fields: FieldSet,
   isEnglish: boolean,
-  localDeliveryAmount = 0,
   validUntil?: unknown
 ): string => {
   const mode = String(fields['Delivery Charge Mode'] || '');
   const reason = String(fields['Delivery Offer Reason'] || '');
-  const range = buildDeliveryFeeRange(localDeliveryAmount);
   const validUntilText = String(validUntil || fields['Valid Until'] || '').trim();
 
   if (mode !== '已包本地送貨') {
@@ -1156,19 +1141,17 @@ const buildDeliveryWaiverText = (
 
   if (isEnglish) {
     const firstLine = reason
-      ? `Local delivery included | ${formatDeliveryOfferReasonEn(reason)}`
+      ? `${formatDeliveryOfferReasonEn(reason)} | Local delivery included`
       : 'Local delivery included';
     const lines = [firstLine];
-    if (range) lines.push(`Delivery fee is calculated by estimated weight | Estimated delivery fee approx. ${range}, now waived`);
     if (validUntilText) lines.push(`Offer valid until quotation valid-until date: ${validUntilText}`);
     return lines.join('\n');
   }
 
   const firstLine = reason
-    ? `已包本地送貨｜${formatDeliveryOfferReasonZh(reason)}`
+    ? `${formatDeliveryOfferReasonZh(reason)}｜已包本地送貨`
     : '已包本地送貨';
   const lines = [firstLine];
-  if (range) lines.push(`運費以重量計算｜預計運費約 ${range}，現已豁免`);
   if (validUntilText) lines.push(`優惠有效期為此報價有效期 ${validUntilText}`);
   return lines.join('\n');
 };
@@ -3216,6 +3199,7 @@ const SHARED_CSS = `
   .items-table tr:nth-child(even) td { background: #fdf8f5; }
   .items-table .item-sub-detail td { background: #fffaf5 !important; }
   .items-table .quotation-image-row td { background:#fff !important; text-align:center; }
+  .dimension-basis-note { margin-top:4px; color:#9a3412; font-size:11px; font-weight:700; line-height:1.35; }
   .quotation-image { display:flex; justify-content:center; padding:8px 0; }
   .quotation-image img { display:block; width:min(100%, 420px); height:auto; aspect-ratio:1; object-fit:contain; }
   .quotation-image-caption { margin:0 auto 8px; max-width:520px; color:#6b7280; font-size:12px; line-height:1.5; text-align:center; }
@@ -3599,7 +3583,18 @@ const parseAccessories = (raw: unknown): string[] => {
 const renderAccTags = (raw: unknown): string => {
   const tags = parseAccessories(raw);
   if (tags.length === 0) return '<span style="color:#9ca3af">-</span>';
-  return `<div class="acc-tags">${tags.map(t => `<span class="acc-tag">${escapeHtml(t)}</span>`).join('')}</div>`;
+  const displayTag = (rawTag: string): string => {
+    const tag = String(rawTag || '').trim();
+    if (tag.startsWith('彩燈｜')) return tag.replace(/^彩燈｜/, '彩燈（多色／USB）｜');
+    if (tag.startsWith('三圈燈｜')) return tag.replace(/^三圈燈｜/, '三圈燈（三圈光／火牛配三腳插）｜');
+    if (tag.startsWith('三圈上下燈')) return tag.replace(/^三圈上下燈/, '三圈燈（三圈光／火牛配三腳插）｜上下燈');
+    if (tag.startsWith('獨立燈板 - 上下燈')) return tag.replace(/^獨立燈板 - 上下燈/, '三圈燈（三圈光／火牛配三腳插）｜獨立上下燈板');
+    if (tag.startsWith('獨立燈板 - 上燈')) return tag.replace(/^獨立燈板 - 上燈/, '三圈燈（三圈光／火牛配三腳插）｜獨立上燈板');
+    if (tag.startsWith('獨立燈板 - 下燈')) return tag.replace(/^獨立燈板 - 下燈/, '三圈燈（三圈光／火牛配三腳插）｜獨立下燈板');
+    if (tag.startsWith('上下燈')) return tag.replace(/^上下燈/, '三圈燈（三圈光／火牛配三腳插）｜上下燈');
+    return tag;
+  };
+  return `<div class="acc-tags">${tags.map(t => `<span class="acc-tag">${escapeHtml(displayTag(t))}</span>`).join('')}</div>`;
 };
 
 const statusBadgeClass = (status: string): string => {
@@ -4809,14 +4804,14 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                           <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
                           <label style="display:block;"><input type="checkbox" value="透明底板"> 透明底板</label>
                         </div>
-                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">三圈燈（原有燈效）</div>
+                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">三圈燈（三圈光／火牛配三腳插）</div>
                         <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
                           <label>三圈燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
                           <label>三圈燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
                           <label>三圈燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
                           <label>三圈上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="上下燈" value="0" style="width:58px;">
                         </div>
-                        <div style="font-weight:700;color:#7c3aed;margin:9px 0 4px;">彩燈（多色／USB／DC頭）</div>
+                        <div style="font-weight:700;color:#7c3aed;margin:9px 0 4px;">彩燈（多色／USB）</div>
                         <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
                           <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立上燈板" value="0" style="width:58px;">
                           <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立下燈板" value="0" style="width:58px;">
@@ -5737,7 +5732,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var mode = getElValue('deliveryChargeMode');
       var reason = getElValue('deliveryOfferReason');
       if (mode === '已包本地送貨') {
-        return reason ? '已包本地送貨｜' + reason : '已包本地送貨';
+        return reason ? reason + '｜已包本地送貨' : '已包本地送貨';
       }
       if (mode === 'LKS 車隊 運費到付') return 'LKS 車隊 運費到付';
       return mode || '';
@@ -6167,7 +6162,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
           : '優惠折扣'))
       : ''));
     const deliveryDisplayText = String(b.deliveryDisplayText || (deliveryChargeMode === '已包本地送貨'
-      ? (deliveryOfferReason && deliveryOfferReason !== '不適用' ? `已包本地送貨｜${deliveryOfferReason}` : '已包本地送貨')
+      ? (deliveryOfferReason && deliveryOfferReason !== '不適用' ? `${deliveryOfferReason}｜已包本地送貨` : '已包本地送貨')
       : deliveryChargeMode));
 
     const quoteNumber = await getNextNumber(tableQuotes, 'Quote Number', 'QT');
@@ -6439,6 +6434,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
       contactHandle: isEnglish ? 'Contact Handle / Reference' : '聯絡帳號 / 參考',
       items: isEnglish ? 'Items' : '產品項目',
       itemType: isEnglish ? 'Item Type' : '產品類型',
+      dimensionBasis: isEnglish ? 'Dimension Basis' : '尺寸基準',
       forWhat: isEnglish ? 'For What' : '擺放物品',
       interL: isEnglish ? 'Internal L' : '內長',
       interD: isEnglish ? 'Internal D' : '內深',
@@ -6490,7 +6486,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
     });
 
     const buildShareDeliveryText = (): string =>
-      buildDeliveryWaiverText(financialFields, isEnglish, sumQuoteLocalDelivery(items), quote['Valid Until']);
+      buildDeliveryWaiverText(financialFields, isEnglish, quote['Valid Until']);
 
     const subtotal = Number(convertedOrder
       ? (financialFields['Product Amount'] ?? quote['Sub Total'])
@@ -6521,7 +6517,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
           const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr class="item-main-row">
             <td class="item-cell-index" data-label="#">${idx + 1}</td>
-            <td class="item-cell-type" data-label="${L.itemType}">${escapeHtml(item.itemType) || '-'}</td>
+            <td class="item-cell-type" data-label="${L.itemType}">${escapeHtml(item.itemType) || '-'}<div class="dimension-basis-note">${L.dimensionBasis}：${escapeHtml(storedDimensionBasis(item.dimensionBasis) || (isEnglish ? 'Not recorded' : '未記錄'))}</div></td>
             <td class="item-cell-for" data-label="${L.forWhat}">${escapeHtml(item.forWhat) || '-'}</td>
             ${hasLevels ? `<td class="item-cell-dimension" data-label="${L.levels}" style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
             <td class="item-cell-dimension" data-label="${L.interL}" style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
@@ -7126,6 +7122,7 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
       address: isEnglish ? 'Address' : '地址',
       items: isEnglish ? 'Items' : '產品項目',
       itemType: isEnglish ? 'Item Type' : '產品類型',
+      dimensionBasis: isEnglish ? 'Dimension Basis' : '尺寸基準',
       forWhat: isEnglish ? 'For What' : '擺放物品',
       interL: isEnglish ? 'Internal L' : '內長',
       interD: isEnglish ? 'Internal D' : '內深',
@@ -7144,6 +7141,7 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
       balanceDue: isEnglish ? 'Balance Due' : '尚欠金額',
       selectedPayment: isEnglish ? 'Selected Payment Method' : '已選付款方式',
       notes: isEnglish ? 'Notes' : '備註',
+      terms: isEnglish ? 'Terms and Conditions' : '條款及細則',
       paymentTerms: isEnglish ? 'Payment Terms' : '付款條款',
       thankYou: isEnglish ? 'Thank you for your business!' : '多謝您的訂購！',
       noItems: isEnglish ? 'No items' : '沒有產品項目'
@@ -7183,7 +7181,7 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
           const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr>
             <td>${idx + 1}</td>
-            <td>${escapeHtml(item.itemType) || '-'}</td>
+            <td>${escapeHtml(item.itemType) || '-'}<div class="dimension-basis-note">${I.dimensionBasis}：${escapeHtml(storedDimensionBasis(item.dimensionBasis) || (isEnglish ? 'Not recorded' : '未記錄'))}</div></td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
             ${hasLevels ? `<td style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
@@ -7216,9 +7214,11 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
     const deliveryDisplayText = buildDisplayDeliveryText(
       of,
       isEnglish,
-      sumQuoteLocalDelivery(items),
       sourceQuoteFields?.['Valid Until']
     );
+    const invoiceTerms = isEnglish
+      ? DEFAULT_TERMS_EN
+      : String(of['Terms and Conditions'] || sourceQuoteFields?.['Terms and Conditions'] || DEFAULT_TERMS);
     const balanceDue = status === 'Paid' ? 0 : total;
 
     const content = `
@@ -7300,6 +7300,7 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
           ${of['Payment Method'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">${I.selectedPayment}</div><p style="font-size:13px;">${escapeHtml(of['Payment Method'] as string)}</p></div>` : ''}
           ${renderPaymentMethodHtml(isEnglish)}
           ${of['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">${I.notes}</div><p style="font-size:13px;">${nl2br(of['Notes'])}</p></div>` : ''}
+          <div class="section"><div class="section-title">${I.terms}</div><p style="font-size:12px;color:#374151;">${nl2br(invoiceTerms)}</p></div>
           <div class="section"><div class="section-title">${I.paymentTerms}</div><p style="font-size:12px;color:#374151;">${nl2br(isEnglish ? DEFAULT_PAYMENT_TERMS_EN : DEFAULT_PAYMENT_TERMS)}</p></div>
 
           <div class="thank-you">${I.thankYou}</div>
