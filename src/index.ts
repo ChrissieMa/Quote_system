@@ -123,6 +123,10 @@ import {
   validateAggregateDateRange,
 } from './purchase-cycle-aggregate';
 import {
+  normalizeDimensionBasis,
+  storedDimensionBasis,
+} from './dimension-basis';
+import {
   buildLegacyCustomerMergeFields,
   extractCustomerId,
   nonBlankCustomerUpdates,
@@ -568,6 +572,7 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
 
 const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = false): any => {
   const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
+  const itemDimensionBases = rawItems.map((item: any) => normalizeDimensionBasis(item?.dimensionBasis));
   const promotionType = String(rawBody?.promotionType || '').trim();
   const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠']);
   if (!allowedPromotions.has(promotionType)) {
@@ -641,7 +646,10 @@ const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = fals
   const preview = buildPilotPreview(input);
   return {
     ...normalizedBody,
-    items: preview.items,
+    items: preview.items.map((item, index) => ({
+      ...item,
+      dimensionBasis: itemDimensionBases[index] || normalizeDimensionBasis(undefined),
+    })),
     subtotal: preview.subtotal,
     total: preview.finalTotal,
     promotionType: promotionType || preview.promotionType,
@@ -1355,6 +1363,7 @@ const overlayConfirmedOrderItem = (baseItem: any, itemRecord: any): any => {
   return {
     ...base,
     itemType: getTextOrFallback(fields, 'Item Type', base.itemType),
+    dimensionBasis: getTextOrFallback(fields, '尺寸基準', base.dimensionBasis),
     forWhat: getTextOrFallback(fields, 'For What', base.forWhat),
     interL: getTextOrFallback(fields, 'Inter L', base.interL),
     interD: getTextOrFallback(fields, 'Inter D', base.interD),
@@ -1917,6 +1926,7 @@ const calculatedItemFromStored = (
 const quoteDescriptionSummary = (items: Array<Record<string, unknown>>): string =>
   items.map(item => [
     item.itemType,
+    item.dimensionBasis ? `尺寸基準 ${item.dimensionBasis}` : '',
     item.forWhat,
     item.description,
     item.interL && item.interD && item.interH ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}` : '',
@@ -3376,6 +3386,20 @@ const SHARED_CSS = `
     outline: none;
     border-color: #d8833b;
   }
+  .items-input-table .f-dimension-basis-wrap label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    line-height: 1.35;
+  }
+  .items-input-table input.f-dimension-basis {
+    width: auto;
+    flex: 0 0 auto;
+    padding: 0;
+    margin: 0;
+    border: 0;
+  }
 
   /* ── Privacy Notice ── */
   .privacy-notice {
@@ -4749,7 +4773,13 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                 </thead>
                 <tbody id="itemsBody">
                   <tr>
-                    <td><select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option><option value="階梯">階梯</option></select></td>
+                    <td style="min-width:178px;">
+                      <select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option><option value="階梯">階梯</option></select>
+                      <div class="f-dimension-basis-wrap" style="display:flex;flex-direction:column;gap:3px;margin-top:7px;padding:6px 7px;border:1px solid #e5e7eb;border-radius:5px;background:#f8fafc;font-size:12px;white-space:nowrap;">
+                        <label><input type="radio" class="f-dimension-basis" value="內尺寸為準" checked> 內尺寸為準</label>
+                        <label><input type="radio" class="f-dimension-basis" value="外尺寸為準"> 外尺寸為準</label>
+                      </div>
+                    </td>
                     <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
                     <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
@@ -5518,10 +5548,22 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       return lineAmount;
     }
 
+    var dimensionBasisGroupSequence = 0;
+
+    function prepareDimensionBasisInputs(row) {
+      var inputs = Array.from(row.querySelectorAll('.f-dimension-basis'));
+      var groupName = 'dimension-basis-' + (++dimensionBasisGroupSequence);
+      inputs.forEach(function(input) { input.name = groupName; });
+      if (!inputs.some(function(input) { return input.checked; }) && inputs[0]) {
+        inputs[0].checked = true;
+      }
+    }
+
     function bindRowEvents(row) {
+      prepareDimensionBasisInputs(row);
       row.querySelectorAll('input, select').forEach(function(el) {
         if (el.classList.contains('f-amt') || el.classList.contains('f-lh') || el.classList.contains('f-level-height-input')) return;
-        var evt = (el.type === 'checkbox' || el.tagName === 'SELECT') ? 'change' : 'input';
+        var evt = (el.type === 'checkbox' || el.type === 'radio' || el.tagName === 'SELECT') ? 'change' : 'input';
         el.addEventListener(evt, function() {
           if (el.classList.contains('f-door-option') && el.checked) {
             row.querySelectorAll('.f-door-option').forEach(function(option) {
@@ -5542,9 +5584,15 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var tbody = document.getElementById('itemsBody');
       var first = tbody.querySelector('tr');
       var clone = first.cloneNode(true);
+      // Give the detached clone its own radio group before checking its default.
+      // Otherwise inserting a checked clone with the original group name can
+      // silently clear the first row's dimension-basis selection.
+      prepareDimensionBasisInputs(clone);
       clone.querySelectorAll('input, select').forEach(function(el) {
         if (el.type === 'checkbox') {
           el.checked = false;
+        } else if (el.type === 'radio') {
+          el.checked = el.value === '內尺寸為準';
         } else if (el.tagName === 'SELECT') {
           el.selectedIndex = 0;
         } else if (el.type === 'number') {
@@ -5776,6 +5824,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         var acc = getAccessories(row);
         items.push({
           itemType: (row.querySelector('.f-type') || {}).value || '',
+          dimensionBasis: (row.querySelector('.f-dimension-basis:checked') || {}).value || '內尺寸為準',
           forWhat: (row.querySelector('.f-for') || {}).value || '',
           interL: (row.querySelector('.f-il') || {}).value || '',
           interD: (row.querySelector('.f-id') || {}).value || '',
@@ -6024,6 +6073,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
         ? { item_id: String(item.item_id).toLowerCase() }
         : {}),
       itemType: String(item.itemType || ''),
+      dimensionBasis: normalizeDimensionBasis(item.dimensionBasis),
       forWhat: String(item.forWhat || ''),
       interL: String(item.interL || ''),
       interD: String(item.interD || ''),
@@ -6064,6 +6114,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       .map((item: any) => {
         const parts = [
           item.itemType,
+          item.dimensionBasis ? `尺寸基準 ${item.dimensionBasis}` : '',
           item.forWhat,
           item.description,
           item.interL && item.interD && item.interH ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}` : '',
@@ -6973,6 +7024,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
         const accArray: string[] = Array.from(new Set(rawAccArray.map(accessoryOrderItemName).filter(Boolean)));
 
         const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
+        const dimensionBasis = storedDimensionBasis(item.dimensionBasis);
         const itemNo = `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`;
         const fields: FieldSet = {
           'Item No': itemNo,
@@ -6991,6 +7043,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
           'Local Delivery Override': Boolean(item.localDeliveryOverride),
           'Local Delivery Notes': safeStr(item.localDeliveryNotes),
           'Item Type': safeStr(item.itemType),
+          ...(dimensionBasis ? { '尺寸基準': dimensionBasis } : {}),
           'For What': safeStr(item.forWhat),
           'Inter L': safeStr(item.interL),
           'Inter D': safeStr(item.interD),
