@@ -3386,6 +3386,20 @@ const SHARED_CSS = `
     outline: none;
     border-color: #d8833b;
   }
+  .items-input-table .f-dimension-basis-wrap label {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    cursor: pointer;
+    line-height: 1.35;
+  }
+  .items-input-table input.f-dimension-basis {
+    width: auto;
+    flex: 0 0 auto;
+    padding: 0;
+    margin: 0;
+    border: 0;
+  }
 
   /* ── Privacy Notice ── */
   .privacy-notice {

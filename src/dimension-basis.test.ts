@@ -29,6 +29,7 @@ test('Create Quote records one mutually exclusive dimension basis per item and w
   const source = readFileSync(__dirname + '/index.ts', 'utf8');
   assert.match(source, /type="radio" class="f-dimension-basis" value="內尺寸為準" checked/);
   assert.match(source, /type="radio" class="f-dimension-basis" value="外尺寸為準"/);
+  assert.match(source, /input\.f-dimension-basis\s*\{[\s\S]*?width: auto;/);
   assert.match(source, /input\.name = groupName/);
   assert.match(source, /prepareDimensionBasisInputs\(clone\);/);
   assert.match(source, /dimensionBasis: \(row\.querySelector\('\.f-dimension-basis:checked'\)/);
