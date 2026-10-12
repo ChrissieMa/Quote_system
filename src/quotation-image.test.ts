@@ -382,6 +382,33 @@ test('unsupported accessories and ambiguous combinations skip scheduling without
   }
 });
 
+test('standalone light and acrylic panel quotes safely skip 3D rendering', () => {
+  const runtime = {
+    coordinator: new QuotationImageCoordinator(
+      new FixtureQuotationImageRenderer(renderedFixture()),
+      new LocalTestQuotationImageStorage(),
+    ),
+    jobScheduler: new InMemoryQuotationImageJobScheduler(),
+    metadataWriter: { async update() {} },
+  };
+  for (const itemType of ['單塊燈板', '單塊板件']) {
+    const item = {
+      ...storedQuoteItem(),
+      itemType,
+      forWhat: itemType === '單塊板件' ? '前板' : '',
+      outerL: '',
+      outerD: '',
+      outerH: '',
+      accessories: [],
+      accessoryQty: {},
+    };
+    assert.equal(buildQuotationRenderRequestFromQuoteItem(item), null);
+    const prepared = prepareNewQuoteItemsForQuotationImageJobs([item], { enabled: true, runtime });
+    assert.equal(prepared.jobs.length, 0);
+    assert.equal(prepared.items[0].quotation_image, undefined);
+  }
+});
+
 test('back-panel artwork and clear-plus-black base use an accurate render-only subset', () => {
   const item = {
     ...storedQuoteItem(),

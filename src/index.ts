@@ -574,7 +574,12 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
 
 const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = false): any => {
   const rawItems = Array.isArray(rawBody?.items) ? rawBody.items : [];
-  const itemDimensionBases = rawItems.map((item: any) => normalizeDimensionBasis(item?.dimensionBasis));
+  const itemDimensionBases = rawItems.map((item: any) => {
+    const itemType = String(item?.itemType || '');
+    return itemType === '單塊燈板' || itemType === '單塊板件'
+      ? ''
+      : normalizeDimensionBasis(item?.dimensionBasis);
+  });
   const promotionType = String(rawBody?.promotionType || '').trim();
   const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠']);
   if (!allowedPromotions.has(promotionType)) {
@@ -650,7 +655,7 @@ const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = fals
     ...normalizedBody,
     items: preview.items.map((item, index) => ({
       ...item,
-      dimensionBasis: itemDimensionBases[index] || normalizeDimensionBasis(undefined),
+      dimensionBasis: itemDimensionBases[index],
     })),
     subtotal: preview.subtotal,
     total: preview.finalTotal,
@@ -1906,13 +1911,52 @@ const calculatedItemFromStored = (
   profit: changes.profit ?? Number(item.profit ?? item['Quoted Profit HKD'] ?? 0),
 });
 
+const standalonePanelFormula = (face: unknown): string => {
+  const text = String(face || '').trim();
+  if (text === '前板' || text === '背板') return 'L×H';
+  if (text === '左板' || text === '右板') return 'D×H';
+  if (text === '頂板' || text === '底板') return 'L×D';
+  return '';
+};
+
+const quoteItemDimensionSummary = (item: Record<string, unknown>): string => {
+  const itemType = String(item.itemType || '');
+  if (itemType === '單塊燈板') {
+    return item.interL && item.interD ? `燈板尺寸 ${item.interL}*${item.interD}` : '';
+  }
+  if (itemType === '單塊板件') {
+    return item.interL && item.interD && item.interH
+      ? `原盒尺寸 ${item.interL}*${item.interD}*${item.interH}`
+      : '';
+  }
+  return item.interL && item.interD && item.interH
+    ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}`
+    : '';
+};
+
+const quoteItemDimensionNote = (item: Record<string, unknown>, isEnglish: boolean, label: string): string => {
+  const itemType = String(item.itemType || '');
+  if (itemType === '單塊燈板') {
+    const size = [item.interL, item.interD].filter(Boolean).join(' × ');
+    return isEnglish ? `Light panel size: ${size} cm` : `燈板尺寸：${size} cm`;
+  }
+  if (itemType === '單塊板件') {
+    const face = String(item.forWhat || '');
+    const formula = standalonePanelFormula(face);
+    return isEnglish
+      ? `Panel: ${face || '-'}${formula ? ` (${formula})` : ''}`
+      : `板件位置：${face || '-'}${formula ? `（按 ${formula} 計價）` : ''}`;
+  }
+  return `${label}：${storedDimensionBasis(item.dimensionBasis) || (isEnglish ? 'Not recorded' : '未記錄')}`;
+};
+
 const quoteDescriptionSummary = (items: Array<Record<string, unknown>>): string =>
   items.map(item => [
     item.itemType,
     item.dimensionBasis ? `尺寸基準 ${item.dimensionBasis}` : '',
     item.forWhat,
     item.description,
-    item.interL && item.interD && item.interH ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}` : '',
+    quoteItemDimensionSummary(item),
     item.outerL && item.outerD && item.outerH ? `外尺寸 ${item.outerL}*${item.outerD}*${item.outerH}` : '',
     item.accessories ? `配件 ${(item.accessories as unknown[]).join(', ')}` : '',
     item.qty ? `QTY ${item.qty}` : '',
@@ -4769,13 +4813,25 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                 <tbody id="itemsBody">
                   <tr>
                     <td style="min-width:178px;">
-                      <select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option><option value="階梯">階梯</option></select>
+                      <select class="f-type"><option value="Display box 展示盒">Display box 展示盒</option><option value="Display Case 疊高展示櫃">Display Case 疊高展示櫃</option><option value="階梯">階梯</option><option value="單塊燈板">單塊燈板</option><option value="單塊板件">單塊板件</option></select>
+                      <div class="f-standalone-note" style="display:none;margin-top:6px;padding:6px 7px;border-radius:5px;background:#eff6ff;color:#1d4ed8;font-size:11px;line-height:1.4;"></div>
                       <div class="f-dimension-basis-wrap" style="display:flex;flex-direction:column;gap:3px;margin-top:7px;padding:6px 7px;border:1px solid #e5e7eb;border-radius:5px;background:#f8fafc;font-size:12px;white-space:nowrap;">
                         <label><input type="radio" class="f-dimension-basis" value="內尺寸為準" checked> 內尺寸為準</label>
                         <label><input type="radio" class="f-dimension-basis" value="外尺寸為準"> 外尺寸為準</label>
                       </div>
                     </td>
-                    <td><input type="text" class="f-for" placeholder="e.g. Shoes"></td>
+                    <td>
+                      <input type="text" class="f-for" placeholder="e.g. Shoes">
+                      <div class="f-panel-face-wrap" style="display:none;min-width:100px;">
+                        <select class="f-panel-face">
+                          <option value="">選擇板件</option>
+                          <option value="前板">前板</option><option value="背板">背板</option>
+                          <option value="左板">左板</option><option value="右板">右板</option>
+                          <option value="頂板">頂板</option><option value="底板">底板</option>
+                        </select>
+                        <div class="f-panel-face-note" style="margin-top:5px;color:#6b7280;font-size:11px;line-height:1.35;">揀板件後自動使用正確尺寸公式</div>
+                      </div>
+                    </td>
                     <td><input type="number" class="f-il" step="0.1" style="width:60px"></td>
                     <td><input type="number" class="f-id" step="0.1" style="width:60px"></td>
                     <td style="min-width:92px;">
@@ -4967,6 +5023,58 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       };
     }
 
+    function isStandaloneItemType(itemType) {
+      return itemType === '單塊燈板' || itemType === '單塊板件';
+    }
+
+    function updateStandaloneItemEditor(row) {
+      var itemType = String((row.querySelector('.f-type') || {}).value || '');
+      var isLightPanel = itemType === '單塊燈板';
+      var isPanel = itemType === '單塊板件';
+      var isStandalone = isLightPanel || isPanel;
+      var textFor = row.querySelector('.f-for');
+      var faceWrap = row.querySelector('.f-panel-face-wrap');
+      var faceSelect = row.querySelector('.f-panel-face');
+      var basisWrap = row.querySelector('.f-dimension-basis-wrap');
+      var note = row.querySelector('.f-standalone-note');
+      var innerHeight = row.querySelector('.f-ih');
+      var innerHeightNote = row.querySelector('.f-ih-case-note');
+      var levels = row.querySelector('.f-lv');
+      var levelEditor = row.querySelector('.f-level-heights-editor');
+
+      if (textFor) {
+        textFor.style.display = isStandalone ? 'none' : '';
+        textFor.disabled = isStandalone;
+      }
+      if (faceWrap) faceWrap.style.display = isPanel ? 'block' : 'none';
+      if (faceSelect) faceSelect.disabled = !isPanel;
+      if (basisWrap) basisWrap.style.display = isStandalone ? 'none' : 'flex';
+      if (note) {
+        note.style.display = isStandalone ? 'block' : 'none';
+        note.textContent = isLightPanel
+          ? '輸入燈板長度（Inter L）及闊度（Inter D）；自動用現有燈板公式計價。'
+          : (isPanel ? '輸入原盒 L／D／H，再選前、背、左、右、頂或底板；系統自動揀正確兩邊計價。' : '');
+      }
+      if (innerHeight) {
+        innerHeight.style.display = isLightPanel ? 'none' : '';
+        innerHeight.disabled = isLightPanel;
+        if (isLightPanel) innerHeight.value = '';
+      }
+      if (innerHeightNote && isStandalone) innerHeightNote.style.display = 'none';
+      if (levels) {
+        levels.style.display = isStandalone ? 'none' : '';
+        levels.disabled = isStandalone;
+        if (isStandalone) levels.value = '';
+      }
+      if (levelEditor && isStandalone) levelEditor.innerHTML = '單塊報價不適用';
+      ['.f-ol', '.f-od', '.f-oh'].forEach(function(selector) {
+        var input = row.querySelector(selector);
+        if (!input) return;
+        input.style.display = isStandalone ? 'none' : '';
+        if (isStandalone) input.value = '';
+      });
+    }
+
     function freightRoundOneUp(value) {
       return Math.ceil(Number(value || 0) * 10) / 10;
     }
@@ -5081,7 +5189,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     function getSingleAccessories(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
-      if (itemType === '階梯') return [];
+      if (itemType === '階梯' || isStandaloneItemType(itemType)) return [];
       var acc = [];
       row.querySelectorAll('.f-acc-wrap input[type=checkbox]:checked').forEach(function(cb) {
         acc.push(cb.value);
@@ -5091,7 +5199,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     function getAccessoryQtyMap(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
-      if (itemType === '階梯') return {};
+      if (itemType === '階梯' || isStandaloneItemType(itemType)) return {};
       var map = {};
       row.querySelectorAll('.f-acc-qty').forEach(function(input) {
         var name = input.getAttribute('data-name') || '';
@@ -5237,11 +5345,16 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
     function updateAccessoryEditor(row) {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isStair = itemType === '階梯';
+      var isStandalone = isStandaloneItemType(itemType);
+      var unavailable = isStair || isStandalone;
       var editor = row.querySelector('.f-accessories-editor');
       var note = row.querySelector('.f-stair-no-accessories');
-      if (editor) editor.style.display = isStair ? 'none' : '';
-      if (note) note.style.display = isStair ? 'block' : 'none';
-      if (!isStair) return;
+      if (editor) editor.style.display = unavailable ? 'none' : '';
+      if (note) {
+        note.style.display = unavailable ? 'block' : 'none';
+        note.textContent = isStandalone ? '單塊報價不使用配件' : '階梯不適用';
+      }
+      if (!unavailable) return;
       row.querySelectorAll('.f-acc-wrap input[type=checkbox]').forEach(function(input) {
         input.checked = false;
       });
@@ -5344,12 +5457,13 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var isStair = itemType === '階梯';
+      var isStandalone = isStandaloneItemType(itemType);
       var isManualOuter = isDisplayCase || isStair;
       ['.f-ol', '.f-od', '.f-oh'].forEach(function(selector) {
         var input = row.querySelector(selector);
         if (!input) return;
-        input.readOnly = !isManualOuter;
-        input.style.background = isManualOuter ? '#fff' : '#f9fafb';
+        input.readOnly = isStandalone || !isManualOuter;
+        input.style.background = isManualOuter && !isStandalone ? '#fff' : '#f9fafb';
       });
       return isManualOuter;
     }
@@ -5360,6 +5474,17 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
     }
 
     function updateOuterDimensions(row) {
+      var itemType = ((row.querySelector('.f-type') || {}).value || '');
+      if (isStandaloneItemType(itemType)) {
+        ['.f-ol', '.f-od', '.f-oh'].forEach(function(selector) {
+          var input = row.querySelector(selector);
+          if (input) input.value = '';
+        });
+        var standaloneSummary = row.querySelector('.f-structure-summary');
+        if (standaloneSummary) standaloneSummary.style.display = 'none';
+        updateOuterDimensionMode(row);
+        return;
+      }
       var isManualOuter = updateOuterDimensionMode(row);
       var structureSummary = row.querySelector('.f-structure-summary');
       if (isManualOuter) {
@@ -5419,6 +5544,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var qty = Math.max(1, parseInt((row.querySelector('.f-qty') || {}).value, 10) || 1);
+      if (isStandaloneItemType(itemType)) return 0.5 * qty;
       var levels = Math.max(1, parseInt((row.querySelector('.f-lv') || {}).value, 10) || 1);
 
       // 包裝 / 運費邏輯：
@@ -5441,6 +5567,10 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var itemType = ((row.querySelector('.f-type') || {}).value || '');
       var isDisplayCase = itemType.indexOf('Display Case') !== -1;
       var isStair = itemType === '階梯';
+      var isStandaloneLightPanel = itemType === '單塊燈板';
+      var isStandalonePanel = itemType === '單塊板件';
+      var isStandalone = isStandaloneLightPanel || isStandalonePanel;
+      var panelFace = String((row.querySelector('.f-panel-face') || {}).value || '');
       var enteredLevels = parseInt((row.querySelector('.f-lv') || {}).value, 10);
       var levels = Math.max(1, enteredLevels || 1);
       var qtyMap = getAccessoryQtyMap(row);
@@ -5450,17 +5580,32 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var outerH = parseNum((row.querySelector('.f-oh') || {}).value);
 
       if ((isStair && (!(outerL > 0 && outerD > 0 && outerH > 0) || !(enteredLevels > 0)))
-        || (!isStair && (!(l > 0 && d > 0) || (!isDisplayCase && !(h > 0)) || !levelHeights))) {
+        || (isStandaloneLightPanel && !(l > 0 && d > 0))
+        || (isStandalonePanel && (!(l > 0 && d > 0 && h > 0) || !panelFace))
+        || (!isStair && !isStandalone && (!(l > 0 && d > 0) || (!isDisplayCase && !(h > 0)) || !levelHeights))) {
         (row.querySelector('.f-amt') || {}).value = '';
         return 0;
       }
       var accessoryHeight = isDisplayCase ? levelHeights[0] : h;
 
-      var sizeRmb = isStair
-        ? calcStairRmb(outerL, outerD, outerH)
-        : levelHeights.reduce(function(sum, levelHeight) {
-          return sum + calcDisplayBoxRmb(l, d, levelHeight);
-        }, 0);
+      var panelFirst = 0;
+      var panelSecond = 0;
+      if (panelFace === '前板' || panelFace === '背板') {
+        panelFirst = l; panelSecond = h;
+      } else if (panelFace === '左板' || panelFace === '右板') {
+        panelFirst = d; panelSecond = h;
+      } else if (panelFace === '頂板' || panelFace === '底板') {
+        panelFirst = l; panelSecond = d;
+      }
+      var sizeRmb = isStandaloneLightPanel
+        ? calcLightBoardRmb(l, d) + calcPowerRmb()
+        : isStandalonePanel
+          ? calcLdPanelRmb(panelFirst, panelSecond)
+          : isStair
+            ? calcStairRmb(outerL, outerD, outerH)
+            : levelHeights.reduce(function(sum, levelHeight) {
+              return sum + calcDisplayBoxRmb(l, d, levelHeight);
+            }, 0);
       var accessoryRmb = 0;
       var hkdAddons = 0;
 
@@ -5568,7 +5713,10 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
           if (el.classList.contains('f-type') || el.classList.contains('f-lv')) {
             updateLevelHeightEditor(row);
           }
-          if (el.classList.contains('f-type')) updateAccessoryEditor(row);
+          if (el.classList.contains('f-type')) {
+            updateAccessoryEditor(row);
+            updateStandaloneItemEditor(row);
+          }
           updateOuterDimensions(row);
           recalcSubtotal();
         });
@@ -5606,6 +5754,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       bindRowEvents(clone);
       updateLevelHeightEditor(clone);
       updateAccessoryEditor(clone);
+      updateStandaloneItemEditor(clone);
       updateOuterDimensionMode(clone);
       updateOuterDimensions(clone);
       recalcSubtotal();
@@ -5817,10 +5966,14 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var items = [];
       document.querySelectorAll('#itemsBody tr').forEach(function(row) {
         var acc = getAccessories(row);
+        var itemType = (row.querySelector('.f-type') || {}).value || '';
+        var isStandalone = isStandaloneItemType(itemType);
         items.push({
-          itemType: (row.querySelector('.f-type') || {}).value || '',
-          dimensionBasis: (row.querySelector('.f-dimension-basis:checked') || {}).value || '內尺寸為準',
-          forWhat: (row.querySelector('.f-for') || {}).value || '',
+          itemType: itemType,
+          dimensionBasis: isStandalone ? '' : ((row.querySelector('.f-dimension-basis:checked') || {}).value || '內尺寸為準'),
+          forWhat: itemType === '單塊板件'
+            ? ((row.querySelector('.f-panel-face') || {}).value || '')
+            : (isStandalone ? '' : ((row.querySelector('.f-for') || {}).value || '')),
           interL: (row.querySelector('.f-il') || {}).value || '',
           interD: (row.querySelector('.f-id') || {}).value || '',
           interH: (row.querySelector('.f-ih') || {}).value || '',
@@ -5941,6 +6094,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         bindRowEvents(row);
         updateLevelHeightEditor(row);
         updateAccessoryEditor(row);
+        updateStandaloneItemEditor(row);
         updateOuterDimensions(row);
       });
       document.getElementById('quoteForm').addEventListener('submit', function(e) {
@@ -5961,6 +6115,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         }
         var invalidLevelHeightInput = null;
         var invalidStairInput = null;
+        var invalidStandaloneInput = null;
         document.querySelectorAll('#itemsBody tr').forEach(function(row) {
           syncLevelHeights(row);
           var itemType = ((row.querySelector('.f-type') || {}).value || '');
@@ -5981,6 +6136,22 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
             else if (!(outerH > 0)) invalidStairInput = row.querySelector('.f-oh');
             else if (!(stairLevels > 0)) invalidStairInput = row.querySelector('.f-lv');
           }
+          if (itemType === '單塊燈板' && !invalidStandaloneInput) {
+            var lightL = parseNum((row.querySelector('.f-il') || {}).value);
+            var lightD = parseNum((row.querySelector('.f-id') || {}).value);
+            if (!(lightL > 0)) invalidStandaloneInput = row.querySelector('.f-il');
+            else if (!(lightD > 0)) invalidStandaloneInput = row.querySelector('.f-id');
+          }
+          if (itemType === '單塊板件' && !invalidStandaloneInput) {
+            var panelL = parseNum((row.querySelector('.f-il') || {}).value);
+            var panelD = parseNum((row.querySelector('.f-id') || {}).value);
+            var panelH = parseNum((row.querySelector('.f-ih') || {}).value);
+            var panelFace = String((row.querySelector('.f-panel-face') || {}).value || '');
+            if (!panelFace) invalidStandaloneInput = row.querySelector('.f-panel-face');
+            else if (!(panelL > 0)) invalidStandaloneInput = row.querySelector('.f-il');
+            else if (!(panelD > 0)) invalidStandaloneInput = row.querySelector('.f-id');
+            else if (!(panelH > 0)) invalidStandaloneInput = row.querySelector('.f-ih');
+          }
         });
         if (invalidLevelHeightInput) {
           alert('請完整輸入疊高展示櫃每一層的內高。');
@@ -5990,6 +6161,11 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         if (invalidStairInput) {
           alert('階梯請完整輸入 Outer L／Outer D／Outer H 及 Levels。');
           invalidStairInput.focus();
+          return;
+        }
+        if (invalidStandaloneInput) {
+          alert('單塊燈板請輸入 L／D；單塊板件請選擇板件位置並完整輸入原盒 L／D／H。');
+          invalidStandaloneInput.focus();
           return;
         }
         var payload = {
@@ -6068,7 +6244,9 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
         ? { item_id: String(item.item_id).toLowerCase() }
         : {}),
       itemType: String(item.itemType || ''),
-      dimensionBasis: normalizeDimensionBasis(item.dimensionBasis),
+      dimensionBasis: String(item.itemType || '') === '單塊燈板' || String(item.itemType || '') === '單塊板件'
+        ? ''
+        : normalizeDimensionBasis(item.dimensionBasis),
       forWhat: String(item.forWhat || ''),
       interL: String(item.interL || ''),
       interD: String(item.interD || ''),
@@ -6112,7 +6290,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
           item.dimensionBasis ? `尺寸基準 ${item.dimensionBasis}` : '',
           item.forWhat,
           item.description,
-          item.interL && item.interD && item.interH ? `內尺寸 ${item.interL}*${item.interD}*${item.interH}` : '',
+          quoteItemDimensionSummary(item),
           item.outerL && item.outerD && item.outerH ? `外尺寸 ${item.outerL}*${item.outerD}*${item.outerH}` : '',
           item.noOfLevels ? `${item.noOfLevels}層` : '',
           item.levelHeights ? `層高 ${item.levelHeights}` : '',
@@ -6517,7 +6695,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
           const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr class="item-main-row">
             <td class="item-cell-index" data-label="#">${idx + 1}</td>
-            <td class="item-cell-type" data-label="${L.itemType}">${escapeHtml(item.itemType) || '-'}<div class="dimension-basis-note">${L.dimensionBasis}：${escapeHtml(storedDimensionBasis(item.dimensionBasis) || (isEnglish ? 'Not recorded' : '未記錄'))}</div></td>
+            <td class="item-cell-type" data-label="${L.itemType}">${escapeHtml(item.itemType) || '-'}<div class="dimension-basis-note">${escapeHtml(quoteItemDimensionNote(item, isEnglish, L.dimensionBasis))}</div></td>
             <td class="item-cell-for" data-label="${L.forWhat}">${escapeHtml(item.forWhat) || '-'}</td>
             ${hasLevels ? `<td class="item-cell-dimension" data-label="${L.levels}" style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
             <td class="item-cell-dimension" data-label="${L.interL}" style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>
@@ -7181,7 +7359,7 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
           const itemHasLevels = Number(item?.noOfLevels) > 0;
           return `<tr>
             <td>${idx + 1}</td>
-            <td>${escapeHtml(item.itemType) || '-'}<div class="dimension-basis-note">${I.dimensionBasis}：${escapeHtml(storedDimensionBasis(item.dimensionBasis) || (isEnglish ? 'Not recorded' : '未記錄'))}</div></td>
+            <td>${escapeHtml(item.itemType) || '-'}<div class="dimension-basis-note">${escapeHtml(quoteItemDimensionNote(item, isEnglish, I.dimensionBasis))}</div></td>
             <td>${escapeHtml(item.forWhat) || '-'}</td>
             ${hasLevels ? `<td style="text-align:center;">${itemHasLevels ? item.noOfLevels : '-'}</td>` : ''}
             <td style="text-align:center;line-height:1.7;">${renderDimensionLines(internalDimensions.l)}</td>

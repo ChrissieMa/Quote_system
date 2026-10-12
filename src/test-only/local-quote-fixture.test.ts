@@ -88,9 +88,11 @@ test('local original-route fixture keeps every conditional bottom section popula
     const quote = (await fixture.base('Quotes').select().firstPage())[0];
     const order = (await fixture.base('Order_2026').select().firstPage())[0];
     const quoteItems = JSON.parse(String(quote.fields['Quote Items JSON'])) as Array<Record<string, unknown>>;
-    assert.equal(quoteItems.length, 2);
+    assert.equal(quoteItems.length, 4);
     assert.ok(String(quoteItems[0].description || '').includes('mobile layout verification'));
     assert.ok(Array.isArray(quoteItems[1].accessories));
+    assert.equal(quoteItems[2].itemType, '單塊燈板');
+    assert.equal(quoteItems[3].forWhat, '左板');
     assert.ok(String(quote.fields['Notes'] || '').trim());
     assert.ok(String(quote.fields['Terms and Conditions'] || '').trim());
     assert.ok(String(order.fields['Payment Method'] || '').trim());

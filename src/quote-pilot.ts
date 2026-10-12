@@ -14,7 +14,15 @@ export const PILOT_ITEM_TYPES = [
   'Display box 展示盒',
   'Display Case 疊高展示櫃',
   '階梯',
+  '單塊燈板',
+  '單塊板件',
 ] as const;
+
+export const STANDALONE_PANEL_FACES = [
+  '前板', '背板', '左板', '右板', '頂板', '底板',
+] as const;
+
+export type StandalonePanelFace = typeof STANDALONE_PANEL_FACES[number];
 
 export const PILOT_ACCESSORIES = [
   '趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板',
@@ -278,6 +286,19 @@ const calcBackLightRmb = (l: number, h: number): number =>
 const calcBackPanelRmb = (l: number, h: number): number => l * h * 0.025;
 const calcLdPanelRmb = (l: number, d: number): number => l * d * 0.025;
 
+export const standalonePanelDimensions = (
+  face: StandalonePanelFace,
+  dimensions: PilotDimensions,
+): { first: number; second: number; formula: 'L×H' | 'D×H' | 'L×D' } => {
+  if (face === '前板' || face === '背板') {
+    return { first: dimensions.length, second: dimensions.height, formula: 'L×H' };
+  }
+  if (face === '左板' || face === '右板') {
+    return { first: dimensions.depth, second: dimensions.height, formula: 'D×H' };
+  }
+  return { first: dimensions.length, second: dimensions.depth, formula: 'L×D' };
+};
+
 const normalizeAccessories = (raw: Record<string, number> | undefined): Record<string, number> => {
   const normalized: Record<string, number> = {};
   for (const [name, rawQty] of Object.entries(raw || {}).sort(([a], [b]) => a.localeCompare(b))) {
@@ -339,6 +360,9 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   if (!PILOT_ITEM_TYPES.includes(input.itemType)) throw new Error(`Unsupported item type: ${input.itemType}`);
   const isDisplayCase = input.itemType.includes('Display Case');
   const isStair = input.itemType === '階梯';
+  const isStandaloneLightPanel = input.itemType === '單塊燈板';
+  const isStandalonePanel = input.itemType === '單塊板件';
+  const isStandalone = isStandaloneLightPanel || isStandalonePanel;
   const levels = isDisplayCase || isStair
     ? positiveInteger(input.levels, 'Levels')
     : Math.max(1, Number(input.levels) || 1);
@@ -361,29 +385,44 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     // level is retained as the compatibility height for existing Airtable
     // fields and height-based accessory formulae; users no longer enter it
     // separately in Create Quote.
-    height: isDisplayCase
+    height: isStandaloneLightPanel
+      ? 0
+      : isDisplayCase
       ? displayCaseLevelHeights[0]
       : isStair
         ? (enteredInnerHeight > 0 ? enteredInnerHeight : 0)
         : finitePositive(input.innerDimensions?.height, 'Inner height'),
   };
   const quantity = positiveInteger(input.quantity, 'Quantity');
-  if (isStair && Object.keys(input.accessories || {}).length > 0) {
-    throw new Error('階梯不使用 Accessories。');
+  if ((isStair || isStandalone) && Object.keys(input.accessories || {}).length > 0) {
+    throw new Error(`${input.itemType} 不使用 Accessories。`);
   }
-  const accessories = isStair ? {} : normalizeAccessories(input.accessories);
-  const outer = calculateOuterDimensions(input.itemType, inner, input.outerDimensions, accessories);
+  const accessories = isStair || isStandalone ? {} : normalizeAccessories(input.accessories);
+  const panelFace = String(input.forWhat || '').trim() as StandalonePanelFace;
+  if (isStandalonePanel && !STANDALONE_PANEL_FACES.includes(panelFace)) {
+    throw new Error('單塊板件必須選擇前板、背板、左板、右板、頂板或底板。');
+  }
+  const outer = isStandalone
+    ? { length: 0, depth: 0, height: 0 }
+    : calculateOuterDimensions(input.itemType, inner, input.outerDimensions, accessories);
   const chinaFreight = finiteNonNegative(input.chinaFreight, 'China freight');
   const hongKongDelivery = finiteNonNegative(input.hongKongDelivery, 'Hong Kong delivery');
   const profit = finiteNonNegative(input.profit, 'Profit');
 
   const pricingHeights = isDisplayCase ? displayCaseLevelHeights : [inner.height];
-  const sizeRmb = isStair
-    ? calcStairRmb(outer.length, outer.depth, outer.height)
-    : pricingHeights.reduce(
-      (sum, levelHeight) => sum + calcDisplayBoxRmb(inner.length, inner.depth, levelHeight),
-      0,
-    );
+  const panelDimensions = isStandalonePanel
+    ? standalonePanelDimensions(panelFace, inner)
+    : null;
+  const sizeRmb = isStandaloneLightPanel
+    ? calcLightBoardRmb(inner.length, inner.depth) + 30
+    : isStandalonePanel && panelDimensions
+      ? calcLdPanelRmb(panelDimensions.first, panelDimensions.second)
+      : isStair
+        ? calcStairRmb(outer.length, outer.depth, outer.height)
+        : pricingHeights.reduce(
+          (sum, levelHeight) => sum + calcDisplayBoxRmb(inner.length, inner.depth, levelHeight),
+          0,
+        );
   let accessoryRmb = 0;
   let hkdAddons = 0;
   const lightBoardCount =
@@ -439,7 +478,9 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   const productAndAccessoriesTotalHkd = money(unitProductAmount * quantity);
   const amount = (unitProductAmount * quantity) + chinaFreight + hongKongDelivery + profit;
   const lightBoardPieces = lightBoardCount + backLightCount;
-  const packageUnits = ((isDisplayCase ? levels : 1) + (lightBoardPieces * 0.5)) * quantity;
+  const packageUnits = (isStandalone
+    ? 0.5
+    : ((isDisplayCase ? levels : 1) + (lightBoardPieces * 0.5))) * quantity;
   const accessoriesList = [
     ...Object.entries(accessories).filter(([name]) => SINGLE_ACCESSORIES.has(name)).map(([name]) => accessoryDisplayLabel(name)),
     ...Object.entries(accessories).filter(([name]) => !SINGLE_ACCESSORIES.has(name)).map(([name, qty]) => `${accessoryDisplayLabel(name)} x${qty}`),
@@ -453,9 +494,9 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     interL: inner.length > 0 ? formatDimensionValue(inner.length) : '',
     interD: inner.depth > 0 ? formatDimensionValue(inner.depth) : '',
     interH: inner.height > 0 ? formatDimensionValue(inner.height) : '',
-    outerL: formatDimensionValue(outer.length),
-    outerD: formatDimensionValue(outer.depth),
-    outerH: formatDimensionValue(outer.height),
+    outerL: isStandalone ? '' : formatDimensionValue(outer.length),
+    outerD: isStandalone ? '' : formatDimensionValue(outer.depth),
+    outerH: isStandalone ? '' : formatDimensionValue(outer.height),
     noOfLevels: isDisplayCase || isStair ? levels : null,
     levelHeights: isDisplayCase
       ? formatDisplayCaseLevelHeights(displayCaseLevelHeights)
