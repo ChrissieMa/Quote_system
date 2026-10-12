@@ -202,7 +202,7 @@ export const createLocalQuoteFixture = (): {
     outerL: '30', outerD: '20', outerH: '22',
     noOfLevels: null,
     levelHeights: '',
-    accessories: ['一體磁吸結構', '彩燈｜獨立上燈板 x1', '背板鏡面'],
+    accessories: ['一體磁吸結構', '彩燈｜上燈 x1', '背板鏡面'],
     description: 'TEST-ONLY long description for mobile layout verification. This fictional item checks that a detailed custom-product description wraps fully inside the phone viewport without horizontal scrolling.',
     qty: 1,
     amount: 1280,

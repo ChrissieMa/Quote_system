@@ -295,6 +295,18 @@ test('一體磁吸及彩燈使用 3D renderer 已驗證的 canonical mapping', (
     'light_board_top_independent',
     'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
   ]);
+
+  const integratedDisplayLabelOnly = buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    accessories: ['一體磁吸結構', '彩燈｜上燈 x1', '透明底板'],
+    accessoryQty: undefined,
+  });
+  assert.ok(integratedDisplayLabelOnly);
+  assert.deepEqual(integratedDisplayLabelOnly.accessories, [
+    { accessory_type: 'door_magnetic', quantity: 1 },
+    { accessory_type: 'light_board_colour_top_independent', quantity: 1 },
+    { accessory_type: 'bottom_base_clear', quantity: 1 },
+  ]);
 });
 
 test('四款彩燈均可建立 Quote 圖片 request，舊三圈燈 mapping 不變', () => {

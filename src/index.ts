@@ -3635,8 +3635,15 @@ const parseAccessories = (raw: unknown): string[] => {
 const renderAccTags = (raw: unknown): string => {
   const tags = parseAccessories(raw);
   if (tags.length === 0) return '<span style="color:#9ca3af">-</span>';
+  const hasIntegratedMagnetic = tags.some(tag => String(tag || '').trim().startsWith('一體磁吸結構'));
   const displayTag = (rawTag: string): string => {
     const tag = String(rawTag || '').trim();
+    if (hasIntegratedMagnetic && tag.startsWith('彩燈｜獨立上燈板')) {
+      return tag.replace(/^彩燈｜獨立上燈板/, '彩燈（多色／USB）｜上燈');
+    }
+    if (hasIntegratedMagnetic && tag.startsWith('彩燈｜獨立下燈板')) {
+      return tag.replace(/^彩燈｜獨立下燈板/, '彩燈（多色／USB）｜下燈');
+    }
     if (tag.startsWith('彩燈｜')) return tag.replace(/^彩燈｜/, '彩燈（多色／USB）｜');
     if (tag.startsWith('三圈燈｜')) return tag.replace(/^三圈燈｜/, '三圈燈（三圈光／火牛配三腳插）｜');
     if (tag.startsWith('三圈上下燈')) return tag.replace(/^三圈上下燈/, '三圈燈（三圈光／火牛配三腳插）｜上下燈');
@@ -4863,24 +4870,41 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                           <label style="display:block;"><input type="checkbox" class="f-door-option" value="一體磁吸結構"> 一體磁吸結構</label>
                         </div>
                         <div class="f-structure-summary" style="display:none;margin:-2px 0 8px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:#9a3412;font-weight:700;line-height:1.45;"></div>
-                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">其他單次配件</div>
-                        <div class="f-acc-wrap" style="margin-bottom:8px;">
-                          <label style="display:block;"><input type="checkbox" value="黑底板"> 黑底板</label>
-                          <label style="display:block;"><input type="checkbox" value="透明底板"> 透明底板</label>
+                        <div class="f-bottom-base-section">
+                          <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">其他單次配件</div>
+                          <div class="f-acc-wrap" style="margin-bottom:8px;">
+                            <label style="display:block;"><input type="checkbox" class="f-bottom-base-option" value="黑底板"> 黑底板</label>
+                            <label style="display:block;"><input type="checkbox" class="f-bottom-base-option" value="透明底板"> 透明底板</label>
+                          </div>
+                          <div class="f-integrated-bottom-note" style="display:none;margin:-3px 0 8px;color:#6b7280;line-height:1.4;">一體磁吸結構選單燈時，可選黑色底板或透明底板。</div>
                         </div>
-                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">三圈燈（三圈光／火牛配三腳插）</div>
-                        <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
-                          <label>三圈燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
-                          <label>三圈燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
-                          <label>三圈燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
-                          <label>三圈上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="上下燈" value="0" style="width:58px;">
+                        <div class="f-standard-light-section">
+                          <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">三圈燈（三圈光／火牛配三腳插）</div>
+                          <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
+                            <label>三圈燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
+                            <label>三圈燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
+                            <label>三圈燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
+                            <label>三圈上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="上下燈" value="0" style="width:58px;">
+                          </div>
                         </div>
-                        <div style="font-weight:700;color:#7c3aed;margin:9px 0 4px;">彩燈（多色／USB）</div>
-                        <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
-                          <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立上燈板" value="0" style="width:58px;">
-                          <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立下燈板" value="0" style="width:58px;">
-                          <label>彩燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜獨立上下燈板" value="0" style="width:58px;">
-                          <label>彩燈｜上下燈</label><input type="number" min="0" class="f-acc-qty" data-name="彩燈｜上下燈" value="0" style="width:58px;">
+                        <div class="f-rgb-light-section">
+                          <div style="font-weight:700;color:#7c3aed;margin:9px 0 4px;">彩燈（多色／USB）</div>
+                          <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
+                            <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上燈板" value="0" style="width:58px;">
+                            <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立下燈板" value="0" style="width:58px;">
+                            <label>彩燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上下燈板" value="0" style="width:58px;">
+                            <label>彩燈｜上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜上下燈" value="0" style="width:58px;">
+                          </div>
+                        </div>
+                        <div class="f-integrated-rgb-section" style="display:none;margin-top:9px;padding:8px;border-radius:5px;background:#f5f3ff;">
+                          <label style="display:block;font-weight:700;color:#7c3aed;margin-bottom:5px;">一體磁吸結構彩燈（多色／USB）</label>
+                          <select class="f-integrated-rgb-select" style="width:100%;">
+                            <option value="">無燈</option>
+                            <option value="彩燈｜獨立上燈板">彩燈｜上燈</option>
+                            <option value="彩燈｜獨立下燈板">彩燈｜下燈</option>
+                            <option value="彩燈｜上下燈">彩燈｜上下燈</option>
+                          </select>
+                          <div style="margin-top:5px;color:#6b7280;line-height:1.4;">一體磁吸結構沒有獨立燈板。</div>
                         </div>
                         <div class="f-rgb-meta" style="display:none;margin:7px 0;padding:6px 8px;border-radius:5px;background:#f5f3ff;color:#5b21b6;line-height:1.45;"></div>
                         <div style="font-weight:700;color:#d8833b;margin:9px 0 4px;">其他數量配件</div>
@@ -5229,6 +5253,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         var qty = Math.max(0, parseInt(input.value, 10) || 0);
         if (name && qty > 0) map[name] = qty;
       });
+      var integratedRgb = row.querySelector('.f-integrated-rgb-select');
+      if (integratedRgb && integratedRgb.value) map[integratedRgb.value] = 1;
       return map;
     }
 
@@ -5377,13 +5403,46 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         note.style.display = unavailable ? 'block' : 'none';
         note.textContent = isStandalone ? '單塊報價不使用配件' : '階梯不適用';
       }
-      if (!unavailable) return;
+      if (!unavailable) {
+        updateIntegratedMagneticOptions(row);
+        return;
+      }
       row.querySelectorAll('.f-acc-wrap input[type=checkbox]').forEach(function(input) {
         input.checked = false;
       });
       row.querySelectorAll('.f-acc-qty').forEach(function(input) {
         input.value = '0';
       });
+      var integratedRgb = row.querySelector('.f-integrated-rgb-select');
+      if (integratedRgb) integratedRgb.value = '';
+    }
+
+    function updateIntegratedMagneticOptions(row) {
+      var singles = getSingleAccessories(row);
+      var integrated = singles.indexOf('一體磁吸結構') !== -1;
+      var integratedSection = row.querySelector('.f-integrated-rgb-section');
+      var integratedSelect = row.querySelector('.f-integrated-rgb-select');
+      var standardSection = row.querySelector('.f-standard-light-section');
+      var rgbSection = row.querySelector('.f-rgb-light-section');
+      var bottomSection = row.querySelector('.f-bottom-base-section');
+      var bottomNote = row.querySelector('.f-integrated-bottom-note');
+
+      if (integratedSection) integratedSection.style.display = integrated ? 'block' : 'none';
+      if (standardSection) standardSection.style.display = integrated ? 'none' : 'block';
+      if (rgbSection) rgbSection.style.display = integrated ? 'none' : 'block';
+      if (integrated) {
+        row.querySelectorAll('.f-regular-light-input').forEach(function(input) { input.value = '0'; });
+      } else if (integratedSelect) {
+        integratedSelect.value = '';
+      }
+
+      var singleIntegratedLight = integrated && integratedSelect
+        && (integratedSelect.value === '彩燈｜獨立上燈板' || integratedSelect.value === '彩燈｜獨立下燈板');
+      if (bottomSection) bottomSection.style.display = integrated ? (singleIntegratedLight ? 'block' : 'none') : 'block';
+      if (bottomNote) bottomNote.style.display = singleIntegratedLight ? 'block' : 'none';
+      if (integrated && !singleIntegratedLight) {
+        row.querySelectorAll('.f-bottom-base-option').forEach(function(input) { input.checked = false; });
+      }
     }
 
     function getLevelHeightsForCalculation(row, levels) {
@@ -5736,12 +5795,21 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
               if (option !== el) option.checked = false;
             });
           }
+          if (el.classList.contains('f-bottom-base-option') && el.checked
+            && getSingleAccessories(row).indexOf('一體磁吸結構') !== -1) {
+            row.querySelectorAll('.f-bottom-base-option').forEach(function(option) {
+              if (option !== el) option.checked = false;
+            });
+          }
           if (el.classList.contains('f-type') || el.classList.contains('f-lv')) {
             updateLevelHeightEditor(row);
           }
           if (el.classList.contains('f-type')) {
             updateAccessoryEditor(row);
             updateStandaloneItemEditor(row);
+          }
+          if (el.classList.contains('f-door-option') || el.classList.contains('f-integrated-rgb-select')) {
+            updateIntegratedMagneticOptions(row);
           }
           updateOuterDimensions(row);
           recalcSubtotal();

@@ -492,6 +492,8 @@ const QUOTE_ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object
   '三圈燈｜獨立下燈板': '獨立燈板 - 下燈',
   '三圈燈｜獨立上下燈板': '獨立燈板 - 上下燈',
   '三圈上下燈': '上下燈',
+  '彩燈｜上燈': '彩燈｜獨立上燈板',
+  '彩燈｜下燈': '彩燈｜獨立下燈板',
 });
 
 const RGB_QUOTE_ACCESSORIES = new Set([
