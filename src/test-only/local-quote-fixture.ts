@@ -53,6 +53,8 @@ export const LOCAL_QUOTE_TOKEN = fixtureToken('quote');
 export const LOCAL_INVOICE_TOKEN = fixtureToken('invoice');
 export const LOCAL_ITEM_ID = '9e4f6e72-d31a-4d1a-8d15-730282c1b102';
 const LOCAL_SECOND_ITEM_ID = 'd91ddcb5-d230-4f2b-91ae-e45fd1583cc0';
+const LOCAL_LIGHT_PANEL_ITEM_ID = '8f5b7d3d-e15b-45ad-bf8e-9b6f8b7a6321';
+const LOCAL_PANEL_ITEM_ID = 'bd64807c-30b8-4c68-b7fa-d28643812884';
 
 const record = (id: string, fields: FieldSet): FixtureRecord => ({
   id,
@@ -231,7 +233,35 @@ export const createLocalQuoteFixture = (): {
     amount: 2377,
     order_item_identity: { item_id: LOCAL_SECOND_ITEM_ID, record_id: 'rec_local_order_item_2' },
   };
-  const quoteItems = [item, secondItem];
+  const lightPanelItem = {
+    item_id: LOCAL_LIGHT_PANEL_ITEM_ID,
+    itemType: '單塊燈板',
+    forWhat: '',
+    dimensionBasis: '',
+    interL: '30', interD: '20', interH: '',
+    outerL: '', outerD: '', outerH: '',
+    noOfLevels: null,
+    levelHeights: '',
+    accessories: [],
+    description: 'TEST-ONLY standalone light panel quote preview.',
+    qty: 2,
+    amount: 264,
+  };
+  const panelItem = {
+    item_id: LOCAL_PANEL_ITEM_ID,
+    itemType: '單塊板件',
+    forWhat: '左板',
+    dimensionBasis: '',
+    interL: '30', interD: '20', interH: '25',
+    outerL: '', outerD: '', outerH: '',
+    noOfLevels: null,
+    levelHeights: '',
+    accessories: [],
+    description: 'TEST-ONLY standalone acrylic side panel quote preview.',
+    qty: 1,
+    amount: 14.71,
+  };
+  const quoteItems = [item, secondItem, lightPanelItem, panelItem];
   const fixtureTotal = quoteItems.reduce((sum, entry) => sum + Number(entry.amount || 0), 0);
   const quoteFields: FieldSet = {
     'Quote Number': 'QT-2026-9001',

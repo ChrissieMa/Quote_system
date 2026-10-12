@@ -15,6 +15,7 @@ import {
   RGB_LIGHT_WARNING,
   resolveAuthoritativeOffer,
   resolveDisplayCaseLevelHeights,
+  standalonePanelDimensions,
   verifyConfirmationId,
 } from './quote-pilot';
 import { estimateQuoteFreight, freightUnderquoteGap } from './freight-estimator';
@@ -75,6 +76,73 @@ test('dimension display adds cm after actual values only', () => {
   assert.equal(formatDimensionWithUnit('35 cm'), '35 cm');
   assert.equal(formatDimensionWithUnit('-'), '-');
   assert.equal(formatDimensionWithUnit(''), '');
+});
+
+test('單塊燈板沿用現有燈板公式並每件包括一個火牛成本', () => {
+  const item = calculatePilotItem({
+    itemType: '單塊燈板',
+    innerDimensions: { length: 30, depth: 20 },
+    quantity: 2,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  assert.equal(item.baseProductAmountHkd, 132);
+  assert.equal(item.productAndAccessoriesTotalHkd, 264);
+  assert.equal(item.amount, 264);
+  assert.equal(item.interH, '');
+  assert.deepEqual([item.outerL, item.outerD, item.outerH], ['', '', '']);
+  assert.deepEqual(item.accessories, []);
+});
+
+test('單塊普通板件按板件位置選用 L×H、D×H 或 L×D', () => {
+  const dimensions = { length: 30, depth: 20, height: 25 };
+  assert.deepEqual(standalonePanelDimensions('前板', dimensions), { first: 30, second: 25, formula: 'L×H' });
+  assert.deepEqual(standalonePanelDimensions('左板', dimensions), { first: 20, second: 25, formula: 'D×H' });
+  assert.deepEqual(standalonePanelDimensions('頂板', dimensions), { first: 30, second: 20, formula: 'L×D' });
+
+  const make = (forWhat: '前板' | '背板' | '左板' | '右板' | '頂板' | '底板') => calculatePilotItem({
+    itemType: '單塊板件',
+    forWhat,
+    innerDimensions: dimensions,
+    quantity: 1,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  assert.equal(make('前板').baseProductAmountHkd, 22.06);
+  assert.equal(make('背板').baseProductAmountHkd, 22.06);
+  assert.equal(make('左板').baseProductAmountHkd, 14.71);
+  assert.equal(make('右板').baseProductAmountHkd, 14.71);
+  assert.equal(make('頂板').baseProductAmountHkd, 17.65);
+  assert.equal(make('底板').baseProductAmountHkd, 17.65);
+});
+
+test('單塊板件必須選位置，兩款單塊報價均拒絕配件', () => {
+  const base = {
+    innerDimensions: { length: 30, depth: 20, height: 25 },
+    quantity: 1,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  };
+  assert.throws(() => calculatePilotItem({ ...base, itemType: '單塊板件' }), /必須選擇前板/);
+  assert.throws(() => calculatePilotItem({
+    ...base,
+    itemType: '單塊燈板',
+    accessories: { 背燈: 1 },
+  }), /不使用 Accessories/);
+});
+
+test('Create Quote 提供兩個獨立單塊類型及板件位置選擇', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /<option value="單塊燈板">單塊燈板<\/option>/);
+  assert.match(source, /<option value="單塊板件">單塊板件<\/option>/);
+  for (const face of ['前板', '背板', '左板', '右板', '頂板', '底板']) {
+    assert.match(source, new RegExp(`<option value="${face}">${face}<\\/option>`));
+  }
+  assert.match(source, /輸入原盒 L／D／H，再選前、背、左、右、頂或底板/);
+  assert.match(source, /單塊報價不使用配件/);
 });
 
 test('舊三圈燈保留 internal keys 並只改客人顯示名稱', () => {
