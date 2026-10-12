@@ -363,6 +363,20 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   const isStandaloneLightPanel = input.itemType === '單塊燈板';
   const isStandalonePanel = input.itemType === '單塊板件';
   const isStandalone = isStandaloneLightPanel || isStandalonePanel;
+  const standaloneDimension = (outerValue: unknown, legacyInnerValue: unknown, label: string): number => {
+    const preferred = Number(outerValue);
+    return finitePositive(preferred > 0 ? preferred : legacyInnerValue, label);
+  };
+  // Standalone panels are manufactured to their finished outside size.  The
+  // legacy inner-dimension fallback keeps any records created before this
+  // correction readable without changing those stored records in place.
+  const standaloneOuter = isStandalone ? {
+    length: standaloneDimension(input.outerDimensions?.length, input.innerDimensions?.length, 'Outer length'),
+    depth: standaloneDimension(input.outerDimensions?.depth, input.innerDimensions?.depth, 'Outer depth'),
+    height: isStandaloneLightPanel
+      ? 0
+      : standaloneDimension(input.outerDimensions?.height, input.innerDimensions?.height, 'Outer height'),
+  } : null;
   const levels = isDisplayCase || isStair
     ? positiveInteger(input.levels, 'Levels')
     : Math.max(1, Number(input.levels) || 1);
@@ -375,17 +389,21 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     )
     : [];
   const inner = {
-    length: isStair
+    length: isStandalone
+      ? 0
+      : isStair
       ? (Number(input.innerDimensions?.length) > 0 ? Number(input.innerDimensions?.length) : 0)
       : finitePositive(input.innerDimensions?.length, 'Inner length'),
-    depth: isStair
+    depth: isStandalone
+      ? 0
+      : isStair
       ? (Number(input.innerDimensions?.depth) > 0 ? Number(input.innerDimensions?.depth) : 0)
       : finitePositive(input.innerDimensions?.depth, 'Inner depth'),
     // For a Display Case, Level Heights are the source of truth.  The first
     // level is retained as the compatibility height for existing Airtable
     // fields and height-based accessory formulae; users no longer enter it
     // separately in Create Quote.
-    height: isStandaloneLightPanel
+    height: isStandalone
       ? 0
       : isDisplayCase
       ? displayCaseLevelHeights[0]
@@ -403,7 +421,7 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     throw new Error('單塊板件必須選擇前板、背板、左板、右板、頂板或底板。');
   }
   const outer = isStandalone
-    ? { length: 0, depth: 0, height: 0 }
+    ? standaloneOuter!
     : calculateOuterDimensions(input.itemType, inner, input.outerDimensions, accessories);
   const chinaFreight = finiteNonNegative(input.chinaFreight, 'China freight');
   const hongKongDelivery = finiteNonNegative(input.hongKongDelivery, 'Hong Kong delivery');
@@ -411,10 +429,10 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
 
   const pricingHeights = isDisplayCase ? displayCaseLevelHeights : [inner.height];
   const panelDimensions = isStandalonePanel
-    ? standalonePanelDimensions(panelFace, inner)
+    ? standalonePanelDimensions(panelFace, outer)
     : null;
   const sizeRmb = isStandaloneLightPanel
-    ? calcLightBoardRmb(inner.length, inner.depth) + 30
+    ? calcLightBoardRmb(outer.length, outer.depth) + 30
     : isStandalonePanel && panelDimensions
       ? calcLdPanelRmb(panelDimensions.first, panelDimensions.second)
       : isStair
@@ -491,12 +509,12 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     ...(input.item_id ? { item_id: input.item_id } : {}),
     itemType: input.itemType,
     forWhat: String(input.forWhat || ''),
-    interL: inner.length > 0 ? formatDimensionValue(inner.length) : '',
-    interD: inner.depth > 0 ? formatDimensionValue(inner.depth) : '',
-    interH: inner.height > 0 ? formatDimensionValue(inner.height) : '',
-    outerL: isStandalone ? '' : formatDimensionValue(outer.length),
-    outerD: isStandalone ? '' : formatDimensionValue(outer.depth),
-    outerH: isStandalone ? '' : formatDimensionValue(outer.height),
+    interL: isStandalone ? '' : (inner.length > 0 ? formatDimensionValue(inner.length) : ''),
+    interD: isStandalone ? '' : (inner.depth > 0 ? formatDimensionValue(inner.depth) : ''),
+    interH: isStandalone ? '' : (inner.height > 0 ? formatDimensionValue(inner.height) : ''),
+    outerL: formatDimensionValue(outer.length),
+    outerD: formatDimensionValue(outer.depth),
+    outerH: isStandaloneLightPanel ? '' : formatDimensionValue(outer.height),
     noOfLevels: isDisplayCase || isStair ? levels : null,
     levelHeights: isDisplayCase
       ? formatDisplayCaseLevelHeights(displayCaseLevelHeights)
