@@ -92,7 +92,11 @@ test('local original-route fixture keeps every conditional bottom section popula
     assert.ok(String(quoteItems[0].description || '').includes('mobile layout verification'));
     assert.ok(Array.isArray(quoteItems[1].accessories));
     assert.equal(quoteItems[2].itemType, '單塊燈板');
+    assert.equal(quoteItems[2].dimensionBasis, '外尺寸為準');
+    assert.deepEqual([quoteItems[2].outerL, quoteItems[2].outerD, quoteItems[2].outerH], ['30', '20', '']);
     assert.equal(quoteItems[3].forWhat, '左板');
+    assert.equal(quoteItems[3].dimensionBasis, '外尺寸為準');
+    assert.deepEqual([quoteItems[3].outerL, quoteItems[3].outerD, quoteItems[3].outerH], ['30', '20', '25']);
     assert.ok(String(quote.fields['Notes'] || '').trim());
     assert.ok(String(quote.fields['Terms and Conditions'] || '').trim());
     assert.ok(String(order.fields['Payment Method'] || '').trim());

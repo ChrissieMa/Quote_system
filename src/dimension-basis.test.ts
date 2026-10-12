@@ -32,10 +32,10 @@ test('Create Quote records one mutually exclusive dimension basis per item and w
   assert.match(source, /input\.f-dimension-basis\s*\{[\s\S]*?width: auto;/);
   assert.match(source, /input\.name = groupName/);
   assert.match(source, /prepareDimensionBasisInputs\(clone\);/);
-  assert.match(source, /dimensionBasis: isStandalone \? '' : \(\(row\.querySelector\('\.f-dimension-basis:checked'\)/);
+  assert.match(source, /dimensionBasis: isStandalone \? '外尺寸為準' : \(\(row\.querySelector\('\.f-dimension-basis:checked'\)/);
   assert.match(source, /itemDimensionBases = rawItems\.map/);
   assert.match(source, /items: preview\.items\.map/);
-  assert.match(source, /\? ''[\s\S]*?: normalizeDimensionBasis\(item\.dimensionBasis\)/);
+  assert.match(source, /\? OUTER_DIMENSION_BASIS[\s\S]*?: normalizeDimensionBasis\(item\?\.dimensionBasis\)/);
   assert.match(source, /'尺寸基準': dimensionBasis/);
 });
 

@@ -81,7 +81,8 @@ test('dimension display adds cm after actual values only', () => {
 test('單塊燈板沿用現有燈板公式並每件包括一個火牛成本', () => {
   const item = calculatePilotItem({
     itemType: '單塊燈板',
-    innerDimensions: { length: 30, depth: 20 },
+    innerDimensions: {},
+    outerDimensions: { length: 30, depth: 20, height: 0 },
     quantity: 2,
     chinaFreight: 0,
     hongKongDelivery: 0,
@@ -90,8 +91,8 @@ test('單塊燈板沿用現有燈板公式並每件包括一個火牛成本', ()
   assert.equal(item.baseProductAmountHkd, 132);
   assert.equal(item.productAndAccessoriesTotalHkd, 264);
   assert.equal(item.amount, 264);
-  assert.equal(item.interH, '');
-  assert.deepEqual([item.outerL, item.outerD, item.outerH], ['', '', '']);
+  assert.deepEqual([item.interL, item.interD, item.interH], ['', '', '']);
+  assert.deepEqual([item.outerL, item.outerD, item.outerH], ['30', '20', '']);
   assert.deepEqual(item.accessories, []);
 });
 
@@ -104,7 +105,8 @@ test('單塊普通板件按板件位置選用 L×H、D×H 或 L×D', () => {
   const make = (forWhat: '前板' | '背板' | '左板' | '右板' | '頂板' | '底板') => calculatePilotItem({
     itemType: '單塊板件',
     forWhat,
-    innerDimensions: dimensions,
+    innerDimensions: {},
+    outerDimensions: dimensions,
     quantity: 1,
     chinaFreight: 0,
     hongKongDelivery: 0,
@@ -120,7 +122,8 @@ test('單塊普通板件按板件位置選用 L×H、D×H 或 L×D', () => {
 
 test('單塊板件必須選位置，兩款單塊報價均拒絕配件', () => {
   const base = {
-    innerDimensions: { length: 30, depth: 20, height: 25 },
+    innerDimensions: {},
+    outerDimensions: { length: 30, depth: 20, height: 25 },
     quantity: 1,
     chinaFreight: 0,
     hongKongDelivery: 0,
@@ -134,6 +137,21 @@ test('單塊板件必須選位置，兩款單塊報價均拒絕配件', () => {
   }), /不使用 Accessories/);
 });
 
+test('舊單塊記錄仍可由原有內尺寸欄讀取，但重新計算後明確輸出外尺寸', () => {
+  const item = calculatePilotItem({
+    itemType: '單塊板件',
+    forWhat: '左板',
+    innerDimensions: { length: 30, depth: 20, height: 25 },
+    quantity: 1,
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  assert.deepEqual([item.interL, item.interD, item.interH], ['', '', '']);
+  assert.deepEqual([item.outerL, item.outerD, item.outerH], ['30', '20', '25']);
+  assert.equal(item.baseProductAmountHkd, 14.71);
+});
+
 test('Create Quote 提供兩個獨立單塊類型及板件位置選擇', () => {
   const source = readFileSync(__dirname + '/index.ts', 'utf8');
   assert.match(source, /<option value="單塊燈板">單塊燈板<\/option>/);
@@ -141,7 +159,8 @@ test('Create Quote 提供兩個獨立單塊類型及板件位置選擇', () => {
   for (const face of ['前板', '背板', '左板', '右板', '頂板', '底板']) {
     assert.match(source, new RegExp(`<option value="${face}">${face}<\\/option>`));
   }
-  assert.match(source, /輸入原盒 L／D／H，再選前、背、左、右、頂或底板/);
+  assert.match(source, /輸入原盒 Outer L／D／H，再選前、背、左、右、頂或底板/);
+  assert.match(source, /dimensionBasis: isStandalone \? '外尺寸為準'/);
   assert.match(source, /單塊報價不使用配件/);
 });
 
