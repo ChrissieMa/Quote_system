@@ -44,11 +44,24 @@ export const ACCESSORY_DISPLAY_LABELS: Readonly<Record<string, string>> = Object
   '上下燈': '三圈上下燈',
 });
 
+const ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  '彩燈｜上燈': '彩燈｜獨立上燈板',
+  '彩燈｜下燈': '彩燈｜獨立下燈板',
+  '彩燈｜上下燈': '彩燈｜上下燈',
+});
+
+const INTEGRATED_MAGNETIC_LIGHT_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  '彩燈｜獨立上燈板': '彩燈｜上燈',
+  '彩燈｜獨立下燈板': '彩燈｜下燈',
+  '彩燈｜上下燈': '彩燈｜上下燈',
+});
+
 export const RGB_LIGHT_WARNING = '彩燈單組燈帶超過 5m，請確認控制器及亮度安排。';
 
 export const accessoryDisplayLabel = (name: string): string => ACCESSORY_DISPLAY_LABELS[name] || name;
 
 export const accessoryStorageName = (name: string): string => {
+  if (ACCESSORY_STORAGE_ALIASES[name]) return ACCESSORY_STORAGE_ALIASES[name];
   const match = Object.entries(ACCESSORY_DISPLAY_LABELS).find(([, label]) => label === name);
   return match?.[0] || name;
 };
@@ -416,6 +429,30 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     throw new Error(`${input.itemType} 不使用 Accessories。`);
   }
   const accessories = isStair || isStandalone ? {} : normalizeAccessories(input.accessories);
+  const hasIntegratedMagnetic = (accessories['一體磁吸結構'] || 0) > 0;
+  if (hasIntegratedMagnetic) {
+    const forbiddenLights = [
+      '獨立燈板 - 上燈',
+      '獨立燈板 - 下燈',
+      '獨立燈板 - 上下燈',
+      '上下燈',
+      '彩燈｜獨立上下燈板',
+    ].filter(name => (accessories[name] || 0) > 0);
+    if (forbiddenLights.length > 0) {
+      throw new Error('一體磁吸結構只可選擇彩燈｜上燈、彩燈｜下燈或彩燈｜上下燈，沒有獨立燈板。');
+    }
+    const integratedLightKeys = ['彩燈｜獨立上燈板', '彩燈｜獨立下燈板', '彩燈｜上下燈'];
+    const selectedIntegratedLights = integratedLightKeys.filter(name => (accessories[name] || 0) > 0);
+    if (selectedIntegratedLights.length > 1) {
+      throw new Error('一體磁吸結構每件只可選擇一款彩燈。');
+    }
+    if (selectedIntegratedLights.some(name => accessories[name] !== 1)) {
+      throw new Error('一體磁吸結構彩燈數量必須為 1。');
+    }
+    if ((accessories['黑底板'] || 0) > 0 && (accessories['透明底板'] || 0) > 0) {
+      throw new Error('一體磁吸結構底板只可選擇黑色或透明其中一款。');
+    }
+  }
   const panelFace = String(input.forWhat || '').trim() as StandalonePanelFace;
   if (isStandalonePanel && !STANDALONE_PANEL_FACES.includes(panelFace)) {
     throw new Error('單塊板件必須選擇前板、背板、左板、右板、頂板或底板。');
@@ -501,7 +538,12 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     : ((isDisplayCase ? levels : 1) + (lightBoardPieces * 0.5))) * quantity;
   const accessoriesList = [
     ...Object.entries(accessories).filter(([name]) => SINGLE_ACCESSORIES.has(name)).map(([name]) => accessoryDisplayLabel(name)),
-    ...Object.entries(accessories).filter(([name]) => !SINGLE_ACCESSORIES.has(name)).map(([name, qty]) => `${accessoryDisplayLabel(name)} x${qty}`),
+    ...Object.entries(accessories).filter(([name]) => !SINGLE_ACCESSORIES.has(name)).map(([name, qty]) => {
+      const displayName = hasIntegratedMagnetic
+        ? (INTEGRATED_MAGNETIC_LIGHT_LABELS[name] || accessoryDisplayLabel(name))
+        : accessoryDisplayLabel(name);
+      return `${displayName} x${qty}`;
+    }),
   ];
   const internalWarnings = rgbAccessoryQuantity > 0 && rgbSingleMetres > 5 ? [RGB_LIGHT_WARNING] : [];
 

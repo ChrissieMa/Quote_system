@@ -191,19 +191,48 @@ test('普通 Display Box 非一體磁吸保留舊尺寸規則', () => {
 test('一體磁吸結構尺寸按無燈、單燈、上下燈及背燈組合計算', () => {
   const cases: Array<[Record<string, number>, [string, string, string]]> = [
     [{ '一體磁吸結構': 1 }, ['28', '28', '37']],
-    [{ '一體磁吸結構': 1, '獨立燈板 - 上燈': 1 }, ['28', '28', '38.3']],
-    [{ '一體磁吸結構': 1, '獨立燈板 - 下燈': 1 }, ['28', '28', '38.3']],
-    [{ '一體磁吸結構': 1, '獨立燈板 - 上下燈': 1 }, ['28', '28', '40.6']],
-    [{ '一體磁吸結構': 1, '獨立燈板 - 上燈': 1, '獨立燈板 - 下燈': 1 }, ['28', '28', '40.6']],
+    [{ '一體磁吸結構': 1, '彩燈｜獨立上燈板': 1 }, ['28', '28', '38.3']],
+    [{ '一體磁吸結構': 1, '彩燈｜獨立下燈板': 1 }, ['28', '28', '38.3']],
     [{ '一體磁吸結構': 1, '彩燈｜上下燈': 1 }, ['28', '28', '40.6']],
     [{ '一體磁吸結構': 1, '背燈': 1 }, ['28', '29.8', '37']],
-    [{ '一體磁吸結構': 1, '獨立燈板 - 上燈': 1, '背燈': 1 }, ['28', '29.8', '38.3']],
-    [{ '一體磁吸結構': 1, '獨立燈板 - 上下燈': 1, '背燈': 1 }, ['28', '29.8', '40.6']],
+    [{ '一體磁吸結構': 1, '彩燈｜獨立上燈板': 1, '背燈': 1 }, ['28', '29.8', '38.3']],
+    [{ '一體磁吸結構': 1, '彩燈｜上下燈': 1, '背燈': 1 }, ['28', '29.8', '40.6']],
   ];
   for (const [accessories, expected] of cases) {
     const item = displayBoxItem(accessories);
     assert.deepEqual([item.outerL, item.outerD, item.outerH], expected);
   }
+});
+
+test('一體磁吸只顯示三款彩燈並容許單燈選一款底板', () => {
+  const top = displayBoxItem({
+    '一體磁吸結構': 1,
+    '彩燈｜獨立上燈板': 1,
+    '黑底板': 1,
+  });
+  assert.ok(top.accessories.includes('彩燈｜上燈 x1'));
+  assert.ok(top.accessories.includes('黑底板'));
+  assert.equal(accessoryOrderItemName('彩燈｜上燈 x1'), '彩燈｜獨立上燈板');
+
+  assert.throws(() => displayBoxItem({
+    '一體磁吸結構': 1,
+    '獨立燈板 - 上燈': 1,
+  }), /沒有獨立燈板/);
+  assert.throws(() => displayBoxItem({
+    '一體磁吸結構': 1,
+    '彩燈｜獨立上下燈板': 1,
+  }), /沒有獨立燈板/);
+  assert.throws(() => displayBoxItem({
+    '一體磁吸結構': 1,
+    '彩燈｜獨立上燈板': 1,
+    '彩燈｜獨立下燈板': 1,
+  }), /只可選擇一款彩燈/);
+  assert.throws(() => displayBoxItem({
+    '一體磁吸結構': 1,
+    '彩燈｜獨立上燈板': 1,
+    '黑底板': 1,
+    '透明底板': 1,
+  }), /底板只可選擇黑色或透明其中一款/);
 });
 
 test('彩燈客人加價按 accessory quantity，不按米數', () => {
@@ -247,6 +276,10 @@ test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () 
   assert.match(source, /彩燈（多色／USB）/);
   assert.match(source, /三圈燈｜獨立上燈板<\/label><input[^>]+data-name="獨立燈板 - 上燈"/);
   assert.match(source, /data-name="彩燈｜獨立上下燈板"/);
+  assert.match(source, /<option value="彩燈｜獨立上燈板">彩燈｜上燈<\/option>/);
+  assert.match(source, /<option value="彩燈｜獨立下燈板">彩燈｜下燈<\/option>/);
+  assert.match(source, /一體磁吸結構沒有獨立燈板/);
+  assert.match(source, /一體磁吸結構選單燈時，可選黑色底板或透明底板/);
   assert.match(source, /購買任何展示盒或展示櫃，附送趟門或一體磁吸結構/);
 });
 
