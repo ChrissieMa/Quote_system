@@ -156,9 +156,35 @@ test('彩燈單組燈帶超過 5m 只顯示 internal warning，不阻擋報價',
 test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () => {
   const source = readFileSync(__dirname + '/index.ts', 'utf8');
   assert.match(source, /> 一體磁吸結構<\/label>/);
+  assert.match(source, /三圈燈（三圈光／火牛配三腳插）/);
+  assert.match(source, /彩燈（多色／USB）/);
   assert.match(source, /三圈燈｜獨立上燈板<\/label><input[^>]+data-name="獨立燈板 - 上燈"/);
   assert.match(source, /data-name="彩燈｜獨立上下燈板"/);
   assert.match(source, /購買任何展示盒或展示櫃，附送趟門或一體磁吸結構/);
+});
+
+test('Quote and Invoice customer-facing accessories explain both light families', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /彩燈（多色／USB）｜/);
+  assert.match(source, /三圈燈（三圈光／火牛配三腳插）｜/);
+  assert.match(source, /data-name="獨立燈板 - 上燈"/);
+  assert.match(source, /data-name="彩燈｜獨立上燈板"/);
+});
+
+test('included-delivery wording is offer-first and omits the old estimated-weight waiver line', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /`\$\{formatDeliveryOfferReasonZh\(reason\)\}｜已包本地送貨`/);
+  assert.match(source, /`\$\{formatDeliveryOfferReasonEn\(reason\)\} \| Local delivery included`/);
+  assert.doesNotMatch(source, /運費以重量計算｜預計運費約/);
+  assert.doesNotMatch(source, /Delivery fee is calculated by estimated weight \| Estimated delivery fee/);
+});
+
+test('Quote and Invoice terms include the integrated magnetic no-stacking rule', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /一體磁吸結構只適用於單層展示盒，不可疊高使用/);
+  assert.match(source, /Integrated magnetic structures are designed for single-level display boxes only and must not be stacked/);
+  assert.match(source, /const invoiceTerms = isEnglish/);
+  assert.match(source, /<div class="section-title">\$\{I\.terms\}<\/div>/);
 });
 
 test('27x27x36 展示盒即時計出保守重量、中國運費及香港運費建議', () => {

@@ -38,3 +38,10 @@ test('Create Quote records one mutually exclusive dimension basis per item and w
   assert.match(source, /dimensionBasis: normalizeDimensionBasis\(item\.dimensionBasis\)/);
   assert.match(source, /'尺寸基準': dimensionBasis/);
 });
+
+test('public Quote and Invoice show the saved dimension basis without changing legacy records', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  assert.match(source, /dimensionBasis: isEnglish \? 'Dimension Basis' : '尺寸基準'/);
+  assert.match(source, /storedDimensionBasis\(item\.dimensionBasis\) \|\| \(isEnglish \? 'Not recorded' : '未記錄'\)/);
+  assert.match(source, /class="dimension-basis-note"/);
+});
