@@ -17,6 +17,8 @@ import {
   resolveAuthoritativeOffer,
   resolveDisplayCaseLevelHeights,
   SHORT_QUOTE_CONFIRMATION_TEXT,
+  TEMPORARY_THRESHOLD_PROMOTION,
+  TEMPORARY_THRESHOLD_PROMOTION_TIERS,
   toCreateQuoteBody,
   verifyConfirmationId,
   type PilotQuoteInput,
@@ -582,7 +584,7 @@ const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = fals
       : normalizeDimensionBasis(item?.dimensionBasis);
   });
   const promotionType = String(rawBody?.promotionType || '').trim();
-  const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠']);
+  const allowedPromotions = new Set(['', '首次落單優惠', '舊客戶優惠', TEMPORARY_THRESHOLD_PROMOTION]);
   if (!allowedPromotions.has(promotionType)) {
     throw new Error('無效的使用優惠選項。');
   }
@@ -1019,6 +1021,7 @@ const mapDiscountReasonEn = (reason: string): string => {
   const map: Record<string, string> = {
     '首次落單優惠': 'First order offer',
     '舊客戶優惠': 'Returning customer offer',
+    '短期滿額優惠': 'Limited-time spending offer',
     'ToyTV 專屬優惠': 'ToyTV exclusive offer',
     '新客戶優惠': 'New customer offer',
     '回購優惠': 'Returning customer offer'
@@ -4626,8 +4629,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
   const [promotionTypeOptions, deliveryOfferReasonOptions] = await Promise.all([
     getSharedSelectOptions(
       'Promotion / Offer Type',
-      ['首次落單優惠', '舊客戶優惠'],
-      ['首次落單優惠', '舊客戶優惠'],
+      ['首次落單優惠', '舊客戶優惠', TEMPORARY_THRESHOLD_PROMOTION],
+      ['首次落單優惠', '舊客戶優惠', TEMPORARY_THRESHOLD_PROMOTION],
     ),
     getSharedSelectOptions(
       'Delivery Offer Reason',
@@ -4959,6 +4962,10 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                 <label>Total ($)</label>
                 <input type="number" name="total" id="total" step="0.01" readonly style="background:#f9fafb;">
               </div>
+            </div>
+
+            <div style="margin:-3px 0 12px;padding:9px 11px;border-radius:6px;background:#fff7ed;color:#9a3412;font-size:12px;line-height:1.6;">
+              <strong>短期滿額優惠：</strong>原價滿 $700 減 $100｜滿 $1,000 減 $200｜滿 $2,000 減 $300
             </div>
 
             <div class="form-row form-row-3">
@@ -5986,11 +5993,16 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var promotion = getElValue('promotionType');
       var multiplierGroup = document.getElementById('discountMultiplierGroup');
       var amountGroup = document.getElementById('discountAmountGroup');
+      var amountInput = document.getElementById('discountAmountHkd');
       if (multiplierGroup) multiplierGroup.style.display = discountType === '百分比折扣' ? 'block' : 'none';
       if (amountGroup) amountGroup.style.display = discountType === '指定金額扣減' ? 'block' : 'none';
+      if (amountInput) {
+        amountInput.readOnly = promotion === '${TEMPORARY_THRESHOLD_PROMOTION}';
+        amountInput.style.background = promotion === '${TEMPORARY_THRESHOLD_PROMOTION}' ? '#f9fafb' : '';
+      }
       if (discountType !== '百分比折扣') setElValue('discountMultiplier', '');
       if (discountType !== '指定金額扣減') setElValue('discountAmountHkd', '');
-      setElValue('discountReason', promotion === '首次落單優惠' || promotion === '舊客戶優惠' ? promotion : '');
+      setElValue('discountReason', promotion === '首次落單優惠' || promotion === '舊客戶優惠' || promotion === '${TEMPORARY_THRESHOLD_PROMOTION}' ? promotion : '');
     }
 
     function toggleDeliveryInputs() {
@@ -6007,6 +6019,24 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       return hasDisplayCase ? 500 : 300;
     }
 
+    var temporaryThresholdPromotionTiers = ${JSON.stringify(TEMPORARY_THRESHOLD_PROMOTION_TIERS)};
+    function getTemporaryThresholdDiscountAmount(subtotal) {
+      var amount = Math.max(0, Number(subtotal) || 0);
+      var tier = temporaryThresholdPromotionTiers.find(function(item) {
+        return amount >= item.minimumSubtotalHkd;
+      });
+      return tier ? tier.discountHkd : 0;
+    }
+
+    function syncTemporaryThresholdPromotion() {
+      if (getElValue('promotionType') !== '${TEMPORARY_THRESHOLD_PROMOTION}') return;
+      var subtotal = parseFloat(getElValue('subtotal')) || 0;
+      setElValue('discountType', '指定金額扣減');
+      setElValue('discountAmountHkd', String(getTemporaryThresholdDiscountAmount(subtotal)));
+      setElValue('discountMultiplier', '');
+      setElValue('discountReason', '${TEMPORARY_THRESHOLD_PROMOTION}');
+    }
+
     function applyPromotionPreset() {
       var promotion = getElValue('promotionType');
       if (promotion === '首次落單優惠') {
@@ -6016,6 +6046,9 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         setElValue('discountReason', '首次落單優惠');
         setElValue('deliveryChargeMode', '已包本地送貨');
         setElValue('deliveryOfferReason', '首次落單優惠');
+      } else if (promotion === '${TEMPORARY_THRESHOLD_PROMOTION}') {
+        syncTemporaryThresholdPromotion();
+        setElValue('deliveryOfferReason', '');
       } else if (promotion === '舊客戶優惠') {
         setElValue('discountType', '指定金額扣減');
         setElValue('discountAmountHkd', '');
@@ -6037,6 +6070,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     function recalcTotal() {
       var sub = parseFloat(document.getElementById('subtotal').value) || 0;
+      syncTemporaryThresholdPromotion();
       var discountValue = calculateDiscountValue(sub);
       var total = Math.max(0, Math.ceil(sub - discountValue));
       var discountText = buildDiscountDisplayText();
@@ -6732,6 +6766,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
       const map: Record<string, string> = {
         '首次落單優惠': 'First order offer',
         '舊客戶優惠': 'Returning customer offer',
+        '短期滿額優惠': 'Limited-time spending offer',
         'ToyTV 專屬優惠': 'ToyTV exclusive offer',
         '新客戶優惠': 'New customer offer',
         '回購優惠': 'Returning customer offer'

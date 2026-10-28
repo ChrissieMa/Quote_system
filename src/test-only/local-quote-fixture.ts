@@ -413,7 +413,7 @@ export const createLocalQuoteFixture = (): {
     options: { choices: values.map(value => ({ name: value })) },
   });
   const sharedFields = [
-    choices('Promotion / Offer Type', ['首次落單優惠', '舊客戶優惠']),
+    choices('Promotion / Offer Type', ['首次落單優惠', '舊客戶優惠', '短期滿額優惠']),
     choices('Delivery Offer Reason', ['首次落單優惠', '加碼優惠']),
   ];
   const metadataTables = [

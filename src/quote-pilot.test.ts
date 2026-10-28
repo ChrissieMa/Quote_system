@@ -16,6 +16,8 @@ import {
   resolveAuthoritativeOffer,
   resolveDisplayCaseLevelHeights,
   standalonePanelDimensions,
+  TEMPORARY_THRESHOLD_PROMOTION,
+  temporaryThresholdPromotionDiscount,
   verifyConfirmationId,
 } from './quote-pilot';
 import { estimateQuoteFreight, freightUnderquoteGap } from './freight-estimator';
@@ -589,6 +591,37 @@ test('retired promotion choices no longer resolve as current presets', () => {
   assert.deepEqual(resolveAuthoritativeOffer({ promotionType: 'ToyTV 專屬優惠' }), { kind: 'none' });
   assert.deepEqual(resolveAuthoritativeOffer({ promotionType: '現貨優惠' }), { kind: 'none' });
   assert.deepEqual(resolveAuthoritativeOffer({ promotionType: '新客戶免運費' }), { kind: 'none' });
+});
+
+test('temporary threshold promotion uses original subtotal tiers without replacing first-order pricing', () => {
+  assert.equal(temporaryThresholdPromotionDiscount(699.99), 0);
+  assert.equal(temporaryThresholdPromotionDiscount(700), 100);
+  assert.equal(temporaryThresholdPromotionDiscount(999.99), 100);
+  assert.equal(temporaryThresholdPromotionDiscount(1000), 200);
+  assert.equal(temporaryThresholdPromotionDiscount(1999.99), 200);
+  assert.equal(temporaryThresholdPromotionDiscount(2000), 300);
+  assert.equal(temporaryThresholdPromotionDiscount(999999), 300);
+
+  const preview = buildPilotPreview({
+    ...baselineInput,
+    offer: { kind: 'promotion', promotionType: TEMPORARY_THRESHOLD_PROMOTION },
+  });
+  assert.equal(preview.promotionType, TEMPORARY_THRESHOLD_PROMOTION);
+  assert.equal(preview.discountAmountHkd, temporaryThresholdPromotionDiscount(preview.subtotal));
+  assert.equal(preview.discountValueHkd, preview.discountAmountHkd);
+  assert.equal(preview.deliveryOfferReason, '');
+});
+
+test('temporary threshold promotion ignores a browser-supplied fixed amount', () => {
+  assert.deepEqual(resolveAuthoritativeOffer({
+    promotionType: TEMPORARY_THRESHOLD_PROMOTION,
+    discountType: '指定金額扣減',
+    discountAmountHkd: 9999,
+    discountReason: TEMPORARY_THRESHOLD_PROMOTION,
+  }), {
+    kind: 'promotion',
+    promotionType: TEMPORARY_THRESHOLD_PROMOTION,
+  });
 });
 
 test('first-order preset defaults to $300 for boxes and $500 when the quote contains a Display Case', () => {
