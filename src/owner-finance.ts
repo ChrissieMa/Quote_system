@@ -500,6 +500,29 @@ export const toHkdCents = (value: unknown): number => {
   return Math.round(amount * 100);
 };
 
+export type DriverShipmentMembership = {
+  shipmentId: string;
+  shipmentDate: string;
+  orderIds: readonly string[];
+};
+
+// A customer Order is charged for local delivery once. If later China
+// Shipments contain replacement/reissue items for the same Order, keep the
+// driver payable on the earliest shipment instead of charging it again.
+export const buildFirstDriverShipmentByOrder = (
+  memberships: readonly DriverShipmentMembership[],
+): Map<string, string> => {
+  const result = new Map<string, string>();
+  const sorted = [...memberships].sort((a, b) =>
+    a.shipmentDate.localeCompare(b.shipmentDate) || a.shipmentId.localeCompare(b.shipmentId));
+  for (const shipment of sorted) {
+    for (const orderId of new Set(shipment.orderIds.filter(Boolean))) {
+      if (!result.has(orderId)) result.set(orderId, shipment.shipmentId);
+    }
+  }
+  return result;
+};
+
 export const getDriverSettlement = (payable: unknown, paid: unknown): DriverSettlement => {
   const payableCents = Math.max(0, toHkdCents(payable));
   const paidCents = Math.max(0, toHkdCents(paid));

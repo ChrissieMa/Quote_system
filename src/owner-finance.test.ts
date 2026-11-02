@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   appendDriverPaymentLog,
+  buildFirstDriverShipmentByOrder,
   calculateOwnerFinanceSummary,
   auditReceiptBackfill,
   calculateOwnerOrderCostBreakdown,
@@ -233,6 +234,17 @@ test('driver settlement supports unpaid, partial and full without changing P&L c
     payableCents: 48600, paidCents: 49000, outstandingCents: 0,
     overpaidCents: 400, differenceCents: 400, status: '超付',
   });
+});
+
+test('replacement shipments never charge the same Order driver payable twice', () => {
+  const firstShipmentByOrder = buildFirstDriverShipmentByOrder([
+    { shipmentId: 'later', shipmentDate: '2026-10-29', orderIds: ['AUG2601', 'SEP2602', 'SEP2603'] },
+    { shipmentId: 'aug-first', shipmentDate: '2026-09-12', orderIds: ['AUG2601'] },
+    { shipmentId: 'sep-first', shipmentDate: '2026-10-01', orderIds: ['SEP2602'] },
+  ]);
+  assert.equal(firstShipmentByOrder.get('AUG2601'), 'aug-first');
+  assert.equal(firstShipmentByOrder.get('SEP2602'), 'sep-first');
+  assert.equal(firstShipmentByOrder.get('SEP2603'), 'later');
 });
 
 test('payment request log makes duplicate submissions a no-op key', () => {

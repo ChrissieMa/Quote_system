@@ -168,6 +168,7 @@ import {
   planDriverPayment,
   planFullReceipt,
   auditReceiptBackfill,
+  buildFirstDriverShipmentByOrder,
   makeReceiptBackfillUpdate,
   paymentLogHasRequest,
   summarizeOwnerOrderCostCoverage,
@@ -8043,6 +8044,7 @@ const getShipmentDriverOrders = (
   shipment: FinanceRecord,
   orderItemsById: Map<string, FinanceRecord>,
   ordersById: Map<string, FinanceRecord>,
+  firstShipmentByOrderId?: ReadonlyMap<string, string>,
 ): FinanceRecord[] => {
   const linkedItemIds = Array.isArray(shipment.fields['Order Items'])
     ? shipment.fields['Order Items'] as string[]
@@ -8059,8 +8061,21 @@ const getShipmentDriverOrders = (
     .filter(record => usesQuotedDeliveryDriverShare(
       record.fields['Internal 1 Order No'] || record.fields['Internal Order No']
     ))
-    .filter(record => getOrderAmountReceived(record.fields) > 0);
+    .filter(record => getOrderAmountReceived(record.fields) > 0)
+    .filter(record => !firstShipmentByOrderId || firstShipmentByOrderId.get(record.id) === shipment.id);
 };
+
+const buildFirstShipmentByOrderId = (
+  shipments: readonly { id: string; fields: FieldSet }[],
+  orderItemsById: Map<string, FinanceRecord>,
+  ordersById: Map<string, FinanceRecord>,
+): Map<string, string> => buildFirstDriverShipmentByOrder(shipments.map(shipment => ({
+  shipmentId: shipment.id,
+  shipmentDate: String(shipment.fields['Shipment Date'] || '9999-12-31'),
+  orderIds: getShipmentDriverOrders(
+    { id: shipment.id, fields: shipment.fields }, orderItemsById, ordersById,
+  ).map(order => order.id),
+})));
 
 const getDriverBatchPayableCents = (orders: FinanceRecord[]): number =>
   orders.reduce((sum, order) => sum + toHkdCents(getDriverPayable(order.fields)), 0);
@@ -8071,9 +8086,10 @@ const buildDriverPaidByOrderId = (
   ordersById: Map<string, FinanceRecord>,
 ): Map<string, number> => {
   const result = new Map<string, number>();
+  const firstShipmentByOrderId = buildFirstShipmentByOrderId(shipments, orderItemsById, ordersById);
   for (const shipment of shipments) {
     const linkedOrders = getShipmentDriverOrders(
-      { id: shipment.id, fields: shipment.fields }, orderItemsById, ordersById,
+      { id: shipment.id, fields: shipment.fields }, orderItemsById, ordersById, firstShipmentByOrderId,
     ).sort((a, b) => a.id.localeCompare(b.id));
     const totalPayableCents = getDriverBatchPayableCents(linkedOrders);
     const paidCents = Math.min(Math.max(0, toHkdCents(shipment.fields[DRIVER_PAID_FIELD])), totalPayableCents);
@@ -8312,9 +8328,13 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
       .map(record => `<li><strong>${escapeHtml(record.fields['Internal 1 Order No'] || record.fields['Internal Order No'] || record.id)}</strong>：${escapeHtml(getOutstandingFinanceStatus(record.fields as FieldSet) || '尚欠成本')}</li>`)
       .join('');
 
+    const firstShipmentByOrderId = buildFirstShipmentByOrderId(chinaShipments, orderItemsById, ordersById);
     const driverBatchRows = chinaShipments.flatMap(shipment => {
       const shipmentRecord: FinanceRecord = { id: shipment.id, fields: shipment.fields };
-      const linkedOrders = getShipmentDriverOrders(shipmentRecord, orderItemsById, ordersById);
+      const allLinkedOrders = getShipmentDriverOrders(shipmentRecord, orderItemsById, ordersById);
+      const linkedOrders = getShipmentDriverOrders(
+        shipmentRecord, orderItemsById, ordersById, firstShipmentByOrderId,
+      );
       if (linkedOrders.length === 0) return [];
 
       const monthlyTotals = new Map<string, number>();
@@ -8346,12 +8366,17 @@ app.get('/admin/dashboard', requireAdmin, async (req: Request, res: Response) =>
         .sort((a, b) => a[0].localeCompare(b[0]))
         .map(([month, amount]) => `${escapeHtml(month)}：<strong>${formatOwnerMoney(amount)}</strong>`)
         .join('<br>');
-      const orderNumbers = linkedOrders
+      const orderNumbers = allLinkedOrders
+        .map(order => String(order.fields['Internal 1 Order No'] || order.fields['Internal Order No'] || order.id))
+        .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
+        .join('、');
+      const excludedOrderNumbers = allLinkedOrders
+        .filter(order => !linkedOrders.some(linked => linked.id === order.id))
         .map(order => String(order.fields['Internal 1 Order No'] || order.fields['Internal Order No'] || order.id))
         .sort((a, b) => a.localeCompare(b, undefined, { numeric: true }))
         .join('、');
       return [`<tr>
-        <td><strong>${escapeHtml(shipment.fields['Shipment No.'] || shipment.id)}</strong><small>${escapeHtml(orderNumbers)}</small></td>
+        <td><strong>${escapeHtml(shipment.fields['Shipment No.'] || shipment.id)}</strong><small>${escapeHtml(orderNumbers)}</small>${excludedOrderNumbers ? `<small>補發不重複計司機費：${escapeHtml(excludedOrderNumbers)}</small>` : ''}</td>
         <td>${monthSplit}</td>
         <td><strong>${formatOwnerMoney(settlement.payableCents / 100)}</strong></td>
         <td><strong>${formatOwnerMoney(settlement.paidCents / 100)}</strong></td>
@@ -8768,8 +8793,9 @@ app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, req
   try {
     const state = await driverPaymentLock.run(shipmentId, async (): Promise<'saved' | 'duplicate'> => {
       await requireDriverPaymentSchema();
-      const [shipment, allOrderItems, allOrders] = await Promise.all([
+      const [shipment, allShipments, allOrderItems, allOrders] = await Promise.all([
         tableChinaShipments.find(shipmentId),
+        tableChinaShipments.select().all(),
         tableOrderItems.select().all(),
         tableOrders.select().all(),
       ]);
@@ -8780,7 +8806,10 @@ app.post('/admin/china-shipments/:shipmentId/driver-payments', requireAdmin, req
         record.id, { id: record.id, fields: record.fields },
       ]));
       const shipmentRecord: FinanceRecord = { id: shipment.id, fields: shipment.fields };
-      const linkedOrders = getShipmentDriverOrders(shipmentRecord, orderItemsById, ordersById);
+      const firstShipmentByOrderId = buildFirstShipmentByOrderId(allShipments, orderItemsById, ordersById);
+      const linkedOrders = getShipmentDriverOrders(
+        shipmentRecord, orderItemsById, ordersById, firstShipmentByOrderId,
+      );
       const payableCents = getDriverBatchPayableCents(linkedOrders);
       if (payableCents <= 0) throw new Error('driver-payment-no-payable');
 
