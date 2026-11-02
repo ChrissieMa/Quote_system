@@ -488,6 +488,9 @@ export const QUOTE_TO_3D_ACCESSORIES: Readonly<Record<string, readonly Canonical
 });
 
 const QUOTE_ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  '三圈燈｜上燈': '獨立燈板 - 上燈',
+  '三圈燈｜下燈': '獨立燈板 - 下燈',
+  '三圈燈｜上下燈': '上下燈',
   '三圈燈｜獨立上燈板': '獨立燈板 - 上燈',
   '三圈燈｜獨立下燈板': '獨立燈板 - 下燈',
   '三圈燈｜獨立上下燈板': '獨立燈板 - 上下燈',

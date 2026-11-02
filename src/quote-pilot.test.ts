@@ -176,6 +176,9 @@ test('舊三圈燈保留 internal keys 並只改客人顯示名稱', () => {
   assert.deepEqual(item.accessories, ['三圈燈｜獨立上燈板 x1']);
   assert.equal(accessoryStorageName('三圈燈｜獨立上燈板'), '獨立燈板 - 上燈');
   assert.equal(accessoryOrderItemName('三圈燈｜獨立上燈板 x2'), '獨立燈板 - 上燈');
+  assert.equal(accessoryOrderItemName('三圈燈｜上燈 x1'), '獨立燈板 - 上燈');
+  assert.equal(accessoryOrderItemName('三圈燈｜下燈 x1'), '獨立燈板 - 下燈');
+  assert.equal(accessoryOrderItemName('三圈燈｜上下燈 x1'), '上下燈');
   assert.equal(accessoryOrderItemName('彩燈｜上下燈 x2'), '彩燈｜上下燈');
   assert.equal(item.accessoriesAmountHkd, 144.12);
 });

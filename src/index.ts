@@ -7236,12 +7236,30 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       customerRecordId = newCustomer[0].id;
     }
 
-    // B. Order_2026
-    const internalOrderNo = await getNextNumber(tableOrders, 'Internal Order No', 'ORD');
-    const invoiceNumber = await getNextNumber(tableOrders, 'Invoice Number', 'INV');
-    const invoicePublicToken = generateToken();
-    const invoiceDate = getHongKongDate();
-    const internalOrderCode = await getNextInternalOrderCode(invoiceDate);
+    // B. Order_2026. A failed conversion may already have created the Order
+    // before an Order Item validation error stopped the request. Reuse that
+    // exact Order on retry so the owner never gets duplicate Order/Invoice
+    // numbers from one Quote.
+    const existingConvertedOrder = await getConvertedOrderForQuote(qf);
+    const existingOrderFields = existingConvertedOrder?.fields || {};
+    const internalOrderNo = existingConvertedOrder
+      ? String(existingOrderFields['Internal Order No'] || '')
+      : await getNextNumber(tableOrders, 'Internal Order No', 'ORD');
+    const invoiceNumber = existingConvertedOrder
+      ? String(existingOrderFields['Invoice Number'] || '')
+      : await getNextNumber(tableOrders, 'Invoice Number', 'INV');
+    const invoicePublicToken = existingConvertedOrder
+      ? String(existingOrderFields['Invoice Public Token'] || generateToken())
+      : generateToken();
+    const invoiceDate = existingConvertedOrder
+      ? String(existingOrderFields['Invoice Date'] || getHongKongDate())
+      : getHongKongDate();
+    const internalOrderCode = existingConvertedOrder
+      ? String(existingOrderFields['Internal 1 Order No'] || '')
+      : await getNextInternalOrderCode(invoiceDate);
+    if (!internalOrderNo || !invoiceNumber || !internalOrderCode) {
+      throw new Error('Existing Order is missing required conversion identifiers.');
+    }
     const { orderMonthSelect, itemMonthSelect } = getOrderMonthDetails(invoiceDate);
 
     const orderFields: FieldSet = {
@@ -7275,8 +7293,19 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       'Terms and Conditions': qf['Terms and Conditions'] || '',
       'Source Quote Ref': (qf['Quote Number'] as string) || '',
     };
-    const newOrder = await tableOrders.create([{ fields: orderFields }]);
-    const orderRecordId = newOrder[0].id;
+    let orderRecordId: string;
+    if (existingConvertedOrder) {
+      orderRecordId = existingConvertedOrder.id;
+      if (!existingOrderFields['Invoice Public Token']) {
+        await tableOrders.update([{
+          id: orderRecordId,
+          fields: { 'Invoice Public Token': invoicePublicToken } as FieldSet,
+        }]);
+      }
+    } else {
+      const newOrder = await tableOrders.create([{ fields: orderFields }]);
+      orderRecordId = newOrder[0].id;
+    }
 
     // V13: When a Quote converts to Invoice, mark the linked Inquiry as Converted and link the Order.
     try {
@@ -7301,49 +7330,62 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
     let itemsWithOrderItemIdentity = items;
 
     if (items.length > 0) {
-      const orderItemsPayload = items.map((item: any, itemIndex: number) => {
-        // Accessories: Airtable Multiple Select requires an array of strings
-        const rawAccArray: string[] = Array.isArray(item.accessories)
-          ? item.accessories.filter(Boolean)
-          : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-        const accArray: string[] = Array.from(new Set(rawAccArray.map(accessoryOrderItemName).filter(Boolean)));
+      const existingOrderItemIds = existingConvertedOrder
+        ? linkedRecordIds(existingOrderFields['Order Items'])
+        : [];
+      if (existingOrderItemIds.length > 0) {
+        if (existingOrderItemIds.length !== items.length) {
+          throw new Error('Existing Order has incomplete Order Items. Please review before retrying.');
+        }
+        itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(
+          items,
+          existingOrderItemIds.map(id => ({ id })),
+        );
+      } else {
+        const orderItemsPayload = items.map((item: any, itemIndex: number) => {
+          // Accessories: Airtable Multiple Select requires an array of strings
+          const rawAccArray: string[] = Array.isArray(item.accessories)
+            ? item.accessories.filter(Boolean)
+            : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
+          const accArray: string[] = Array.from(new Set(rawAccArray.map(accessoryOrderItemName).filter(Boolean)));
 
-        const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
-        const dimensionBasis = storedDimensionBasis(item.dimensionBasis);
-        const itemNo = `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`;
-        const fields: FieldSet = {
-          'Item No': itemNo,
-          'Month': itemMonthSelect,
-          'Order': [orderRecordId],
-          // Item Type and For What already have their own Airtable fields.
-          // Description must remain the customer's Quote Description only so
-          // production notes and Package Detail do not repeat product data.
-          'Description': safeStr(item.description),
-          'QTY': item.qty || 1,
-          'Product Amount': item.amount || 0,
-          'Quoted China Freight HKD': Number(item.freight) || 0,
-          'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
-          'Quoted Profit HKD': Number(item.profit) || 0,
-          'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
-          'Local Delivery Override': Boolean(item.localDeliveryOverride),
-          'Local Delivery Notes': safeStr(item.localDeliveryNotes),
-          'Item Type': safeStr(item.itemType),
-          ...(dimensionBasis ? { '尺寸基準': dimensionBasis } : {}),
-          'For What': safeStr(item.forWhat),
-          'Inter L': safeStr(item.interL),
-          'Inter D': safeStr(item.interD),
-          'Inter H': safeStr(item.interH),
-          'No. of Levels': item.noOfLevels || null,
-          'Level Heights': safeStr(item.levelHeights),
-        };
-        if (accArray.length > 0) fields['Accessories'] = accArray;
-        if (item.outerL) fields['Outer L'] = safeStr(item.outerL);
-        if (item.outerD) fields['Outer D'] = safeStr(item.outerD);
-        if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
-        return { fields };
-      });
-      const createdOrderItems = await tableOrderItems.create(orderItemsPayload);
-      itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
+          const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
+          const dimensionBasis = storedDimensionBasis(item.dimensionBasis);
+          const itemNo = `${internalOrderCode}-${itemSuffixFromIndex(itemIndex)}`;
+          const fields: FieldSet = {
+            'Item No': itemNo,
+            'Month': itemMonthSelect,
+            'Order': [orderRecordId],
+            // Item Type and For What already have their own Airtable fields.
+            // Description must remain the customer's Quote Description only so
+            // production notes and Package Detail do not repeat product data.
+            'Description': safeStr(item.description),
+            'QTY': item.qty || 1,
+            'Product Amount': item.amount || 0,
+            'Quoted China Freight HKD': Number(item.freight) || 0,
+            'Quoted Local Delivery HKD': Number(item.hongKongDelivery ?? item.deliveryCostReserve) || 0,
+            'Quoted Profit HKD': Number(item.profit) || 0,
+            'Estimated Package Units': Number(item.estimatedPackageUnits) || 0,
+            'Local Delivery Override': Boolean(item.localDeliveryOverride),
+            'Local Delivery Notes': safeStr(item.localDeliveryNotes),
+            'Item Type': safeStr(item.itemType),
+            ...(dimensionBasis ? { '尺寸基準': dimensionBasis } : {}),
+            'For What': safeStr(item.forWhat),
+            'Inter L': safeStr(item.interL),
+            'Inter D': safeStr(item.interD),
+            'Inter H': safeStr(item.interH),
+            'No. of Levels': item.noOfLevels || null,
+            'Level Heights': safeStr(item.levelHeights),
+          };
+          if (accArray.length > 0) fields['Accessories'] = accArray;
+          if (item.outerL) fields['Outer L'] = safeStr(item.outerL);
+          if (item.outerD) fields['Outer D'] = safeStr(item.outerD);
+          if (item.outerH) fields['Outer H'] = safeStr(item.outerH);
+          return { fields };
+        });
+        const createdOrderItems = await tableOrderItems.create(orderItemsPayload);
+        itemsWithOrderItemIdentity = linkQuoteItemsToOrderItemRecords(items, createdOrderItems);
+      }
     }
 
     // D. Update Quote. Serialize this Quote Items JSON write with image metadata

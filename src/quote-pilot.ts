@@ -45,6 +45,9 @@ export const ACCESSORY_DISPLAY_LABELS: Readonly<Record<string, string>> = Object
 });
 
 const ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
+  '三圈燈｜上燈': '獨立燈板 - 上燈',
+  '三圈燈｜下燈': '獨立燈板 - 下燈',
+  '三圈燈｜上下燈': '上下燈',
   '彩燈｜上燈': '彩燈｜獨立上燈板',
   '彩燈｜下燈': '彩燈｜獨立下燈板',
   '彩燈｜上下燈': '彩燈｜上下燈',
