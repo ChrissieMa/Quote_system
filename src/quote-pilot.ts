@@ -51,6 +51,9 @@ const ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freez
 });
 
 const INTEGRATED_MAGNETIC_LIGHT_LABELS: Readonly<Record<string, string>> = Object.freeze({
+  '獨立燈板 - 上燈': '三圈燈｜上燈',
+  '獨立燈板 - 下燈': '三圈燈｜下燈',
+  '上下燈': '三圈燈｜上下燈',
   '彩燈｜獨立上燈板': '彩燈｜上燈',
   '彩燈｜獨立下燈板': '彩燈｜下燈',
   '彩燈｜上下燈': '彩燈｜上下燈',
@@ -432,22 +435,26 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   const hasIntegratedMagnetic = (accessories['一體磁吸結構'] || 0) > 0;
   if (hasIntegratedMagnetic) {
     const forbiddenLights = [
-      '獨立燈板 - 上燈',
-      '獨立燈板 - 下燈',
       '獨立燈板 - 上下燈',
-      '上下燈',
       '彩燈｜獨立上下燈板',
     ].filter(name => (accessories[name] || 0) > 0);
     if (forbiddenLights.length > 0) {
-      throw new Error('一體磁吸結構只可選擇彩燈｜上燈、彩燈｜下燈或彩燈｜上下燈，沒有獨立燈板。');
+      throw new Error('一體磁吸結構沒有獨立燈板，請選擇上燈、下燈或上下燈。');
     }
-    const integratedLightKeys = ['彩燈｜獨立上燈板', '彩燈｜獨立下燈板', '彩燈｜上下燈'];
+    const integratedLightKeys = [
+      '獨立燈板 - 上燈',
+      '獨立燈板 - 下燈',
+      '上下燈',
+      '彩燈｜獨立上燈板',
+      '彩燈｜獨立下燈板',
+      '彩燈｜上下燈',
+    ];
     const selectedIntegratedLights = integratedLightKeys.filter(name => (accessories[name] || 0) > 0);
     if (selectedIntegratedLights.length > 1) {
-      throw new Error('一體磁吸結構每件只可選擇一款彩燈。');
+      throw new Error('一體磁吸結構每件只可選擇一款燈。');
     }
     if (selectedIntegratedLights.some(name => accessories[name] !== 1)) {
-      throw new Error('一體磁吸結構彩燈數量必須為 1。');
+      throw new Error('一體磁吸結構燈款數量必須為 1。');
     }
     if ((accessories['黑底板'] || 0) > 0 && (accessories['透明底板'] || 0) > 0) {
       throw new Error('一體磁吸結構底板只可選擇黑色或透明其中一款。');

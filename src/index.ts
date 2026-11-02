@@ -3638,6 +3638,15 @@ const renderAccTags = (raw: unknown): string => {
   const hasIntegratedMagnetic = tags.some(tag => String(tag || '').trim().startsWith('一體磁吸結構'));
   const displayTag = (rawTag: string): string => {
     const tag = String(rawTag || '').trim();
+    if (hasIntegratedMagnetic && tag.startsWith('三圈燈｜獨立上燈板')) {
+      return tag.replace(/^三圈燈｜獨立上燈板/, '三圈燈（三圈光／火牛配三腳插）｜上燈');
+    }
+    if (hasIntegratedMagnetic && tag.startsWith('三圈燈｜獨立下燈板')) {
+      return tag.replace(/^三圈燈｜獨立下燈板/, '三圈燈（三圈光／火牛配三腳插）｜下燈');
+    }
+    if (hasIntegratedMagnetic && tag.startsWith('三圈上下燈')) {
+      return tag.replace(/^三圈上下燈/, '三圈燈（三圈光／火牛配三腳插）｜上下燈');
+    }
     if (hasIntegratedMagnetic && tag.startsWith('彩燈｜獨立上燈板')) {
       return tag.replace(/^彩燈｜獨立上燈板/, '彩燈（多色／USB）｜上燈');
     }
@@ -4897,9 +4906,12 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                           </div>
                         </div>
                         <div class="f-integrated-rgb-section" style="display:none;margin-top:9px;padding:8px;border-radius:5px;background:#f5f3ff;">
-                          <label style="display:block;font-weight:700;color:#7c3aed;margin-bottom:5px;">一體磁吸結構彩燈（多色／USB）</label>
+                          <label style="display:block;font-weight:700;color:#7c3aed;margin-bottom:5px;">一體磁吸結構燈款</label>
                           <select class="f-integrated-rgb-select" style="width:100%;">
                             <option value="">無燈</option>
+                            <option value="獨立燈板 - 上燈">三圈燈｜上燈</option>
+                            <option value="獨立燈板 - 下燈">三圈燈｜下燈</option>
+                            <option value="上下燈">三圈燈｜上下燈</option>
                             <option value="彩燈｜獨立上燈板">彩燈｜上燈</option>
                             <option value="彩燈｜獨立下燈板">彩燈｜下燈</option>
                             <option value="彩燈｜上下燈">彩燈｜上下燈</option>
@@ -5437,7 +5449,10 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       }
 
       var singleIntegratedLight = integrated && integratedSelect
-        && (integratedSelect.value === '彩燈｜獨立上燈板' || integratedSelect.value === '彩燈｜獨立下燈板');
+        && (integratedSelect.value === '獨立燈板 - 上燈'
+          || integratedSelect.value === '獨立燈板 - 下燈'
+          || integratedSelect.value === '彩燈｜獨立上燈板'
+          || integratedSelect.value === '彩燈｜獨立下燈板');
       if (bottomSection) bottomSection.style.display = integrated ? (singleIntegratedLight ? 'block' : 'none') : 'block';
       if (bottomNote) bottomNote.style.display = singleIntegratedLight ? 'block' : 'none';
       if (integrated && !singleIntegratedLight) {

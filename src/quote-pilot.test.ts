@@ -204,7 +204,7 @@ test('一體磁吸結構尺寸按無燈、單燈、上下燈及背燈組合計�
   }
 });
 
-test('一體磁吸只顯示三款彩燈並容許單燈選一款底板', () => {
+test('一體磁吸顯示三圈燈和彩燈各三款，並容許單燈選一款底板', () => {
   const top = displayBoxItem({
     '一體磁吸結構': 1,
     '彩燈｜獨立上燈板': 1,
@@ -214,19 +214,25 @@ test('一體磁吸只顯示三款彩燈並容許單燈選一款底板', () => {
   assert.ok(top.accessories.includes('黑底板'));
   assert.equal(accessoryOrderItemName('彩燈｜上燈 x1'), '彩燈｜獨立上燈板');
 
-  assert.throws(() => displayBoxItem({
+  const tripleTop = displayBoxItem({
     '一體磁吸結構': 1,
     '獨立燈板 - 上燈': 1,
-  }), /沒有獨立燈板/);
+    '透明底板': 1,
+  });
+  assert.ok(tripleTop.accessories.includes('三圈燈｜上燈 x1'));
+  assert.ok(tripleTop.accessories.includes('透明底板'));
+  assert.equal(tripleTop.rgbCustomerSurchargeHkd, 0);
+  assert.ok(displayBoxItem({ '一體磁吸結構': 1, '獨立燈板 - 下燈': 1 }).accessories.includes('三圈燈｜下燈 x1'));
+  assert.ok(displayBoxItem({ '一體磁吸結構': 1, '上下燈': 1 }).accessories.includes('三圈燈｜上下燈 x1'));
   assert.throws(() => displayBoxItem({
     '一體磁吸結構': 1,
     '彩燈｜獨立上下燈板': 1,
   }), /沒有獨立燈板/);
   assert.throws(() => displayBoxItem({
     '一體磁吸結構': 1,
+    '獨立燈板 - 上燈': 1,
     '彩燈｜獨立上燈板': 1,
-    '彩燈｜獨立下燈板': 1,
-  }), /只可選擇一款彩燈/);
+  }), /只可選擇一款燈/);
   assert.throws(() => displayBoxItem({
     '一體磁吸結構': 1,
     '彩燈｜獨立上燈板': 1,
@@ -276,6 +282,9 @@ test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () 
   assert.match(source, /彩燈（多色／USB）/);
   assert.match(source, /三圈燈｜獨立上燈板<\/label><input[^>]+data-name="獨立燈板 - 上燈"/);
   assert.match(source, /data-name="彩燈｜獨立上下燈板"/);
+  assert.match(source, /<option value="獨立燈板 - 上燈">三圈燈｜上燈<\/option>/);
+  assert.match(source, /<option value="獨立燈板 - 下燈">三圈燈｜下燈<\/option>/);
+  assert.match(source, /<option value="上下燈">三圈燈｜上下燈<\/option>/);
   assert.match(source, /<option value="彩燈｜獨立上燈板">彩燈｜上燈<\/option>/);
   assert.match(source, /<option value="彩燈｜獨立下燈板">彩燈｜下燈<\/option>/);
   assert.match(source, /一體磁吸結構沒有獨立燈板/);
