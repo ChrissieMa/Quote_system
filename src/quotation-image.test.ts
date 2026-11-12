@@ -381,6 +381,8 @@ test('unsupported accessories and ambiguous combinations skip scheduling without
   const unsupported = [
     { '前板白色刻字': 1 },
     { '前板彩色刻字': 1 },
+    { '背板白色刻字': 1 },
+    { '左板彩色刻字': 1 },
     { '左板圖片': 1 },
     { '右板圖片': 1 },
     { '底板圖片': 1 },

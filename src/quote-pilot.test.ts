@@ -6,6 +6,7 @@ import {
   accessoryOrderItemName,
   accessoryStorageName,
   buildPilotPreview,
+  calculateOptionalAddonQuotes,
   calculatePilotItem,
   formatDimensionValue,
   formatDimensionWithUnit,
@@ -162,6 +163,58 @@ test('Create Quote 提供兩個獨立單塊類型及板件位置選擇', () => {
   assert.match(source, /輸入原盒 Outer L／D／H，再選前、背、左、右、頂或底板/);
   assert.match(source, /dimensionBasis: isStandalone \? '外尺寸為準'/);
   assert.match(source, /單塊報價不使用配件/);
+});
+
+test('Create Quote 六面均提供白色和彩色刻字，並按每塊統一加價', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  const faces = ['前板', '背板', '左板', '右板', '底板', '頂板'];
+  const baseAccessories = displayBoxItem({}).accessoriesAmountHkd;
+  for (const face of faces) {
+    const whiteName = `${face}白色刻字`;
+    const colourName = `${face}彩色刻字`;
+    assert.match(source, new RegExp(`data-name="${whiteName}"`));
+    assert.match(source, new RegExp(`data-name="${colourName}"`));
+    assert.equal(displayBoxItem({ [whiteName]: 1 }).accessoriesAmountHkd - baseAccessories, 90);
+    assert.equal(displayBoxItem({ [colourName]: 1 }).accessoriesAmountHkd - baseAccessories, 120);
+  }
+  assert.equal(displayBoxItem({ '左板白色刻字': 2 }).accessoriesAmountHkd - baseAccessories, 180);
+  assert.equal(displayBoxItem({ '頂板彩色刻字': 2 }).accessoriesAmountHkd - baseAccessories, 240);
+});
+
+test('可加購背景、鏡面及刻字按實際板位計單價，但不加入目前總價', () => {
+  const input = {
+    itemType: 'Display box 展示盒' as const,
+    innerDimensions: { length: 60, depth: 25, height: 40 },
+    quantity: 1,
+    accessories: {},
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  };
+  const base = calculatePilotItem(input);
+  const addons = calculateOptionalAddonQuotes(input, [
+    '左板圖片', '背板圖片', '左板鏡面', '背板鏡面',
+    '頂板白色刻字', '右板彩色刻字',
+  ]);
+  const byName = Object.fromEntries(addons.map(addon => [addon.name, addon]));
+  assert.equal(base.amount, calculatePilotItem(input).amount);
+  assert.ok(byName['左板圖片'].amountHkd < byName['背板圖片'].amountHkd);
+  assert.ok(byName['左板鏡面'].amountHkd < byName['背板鏡面'].amountHkd);
+  assert.equal(byName['頂板白色刻字'].amountHkd, 90);
+  assert.equal(byName['右板彩色刻字'].amountHkd, 120);
+  assert.equal(byName['左板圖片'].label, '左板背景');
+});
+
+test('Create Quote用箭嘴分類配件，並只收集已剔選的可加購板位', () => {
+  const source = readFileSync(__dirname + '/index.ts', 'utf8');
+  for (const category of ['門款／結構', '底板', '燈', '背景', '鏡面', '刻字', '可加購配件（只顯示價錢）']) {
+    assert.match(source, new RegExp(`<summary>${category.replace(/[（）]/g, '\\$&')}<\\/summary>`));
+  }
+  assert.match(source, /class="f-optional-addon" value="背板圖片"/);
+  assert.match(source, /optionalAddonSelections: getOptionalAddonSelections\(row\)/);
+  assert.match(source, /renderOptionalAddonsRow\(item, itemColumnCount, isEnglish\)/);
+  assert.match(source, /加入配件並建立修訂報價/);
+  assert.match(source, /renderQuoteResourceLinks\(isEnglish\)/);
 });
 
 test('舊三圈燈保留 internal keys 並只改客人顯示名稱', () => {

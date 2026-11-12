@@ -137,6 +137,12 @@ test('public Quote uses a mobile card layout without removing the desktop table 
   ]) assert.ok(source.includes(required), `missing mobile Quote layout safeguard: ${required}`);
 });
 
+test('optional add-on revision is owner-only and reuses authoritative Quote creation', () => {
+  assert.match(source, /app\.get\('\/admin\/quote\/:recordId\/revise', requireAdmin,/);
+  assert.match(source, /fetch\('\/quote\/create'/);
+  assert.match(source, /原本Quote、Invoice及Order完全不會改動/);
+});
+
 test('expense receipt inbox is owner-only, direct-to-Airtable, idempotent and excluded from P&L until review', () => {
   const start = source.indexOf("app.post('/admin/expenses/receipts'");
   const end = source.indexOf("app.post('/admin/china-shipments/:shipmentId/driver-payments'", start);

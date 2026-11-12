@@ -80,6 +80,32 @@ Valid Until：默認7天`);
   });
 });
 
+test('六面刻字名稱不會誤當成前板刻字', () => {
+  const parsed = parseShortQuoteText(`Blue，幫我預覽報價：
+
+顯示語言：中
+查詢來源：website - 3D
+客戶名稱：Mr/Miss
+客戶電話：00000000
+產品：展示盒
+內尺寸：30*20*25
+外尺寸：
+數量：1
+配件：背板白色刻字 左板彩色刻字
+內地運費：0
+香港運費：0
+利潤：0
+優惠：無優惠
+Valid Until：默認7天`);
+
+  assert.equal(parsed.kind, 'ready');
+  if (parsed.kind !== 'ready') return;
+  assert.deepEqual(parsed.accessories, {
+    '背板白色刻字': 1,
+    '左板彩色刻字': 1,
+  });
+});
+
 test('quantity defaults to one and Google asks one bounded clarification', () => {
   const parsed = parseShortQuoteText(
     '92503576 盒 76x23x40 趟門 內運150 港運260 利800 Google 無優惠',
