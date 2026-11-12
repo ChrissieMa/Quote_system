@@ -28,10 +28,24 @@ export const PILOT_ACCESSORIES = [
   '趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板',
   '獨立燈板 - 上燈', '獨立燈板 - 下燈', '獨立燈板 - 上下燈', '上下燈', '背燈',
   '彩燈｜獨立上燈板', '彩燈｜獨立下燈板', '彩燈｜獨立上下燈板', '彩燈｜上下燈',
-  '前板白色刻字', '前板彩色刻字',
+  '前板白色刻字', '背板白色刻字', '左板白色刻字', '右板白色刻字', '底板白色刻字', '頂板白色刻字',
+  '前板彩色刻字', '背板彩色刻字', '左板彩色刻字', '右板彩色刻字', '底板彩色刻字', '頂板彩色刻字',
   '左板圖片', '右板圖片', '底板圖片', '頂板圖片', '背板圖片',
   '左板鏡面', '右板鏡面', '底板鏡面', '頂板鏡面', '背板鏡面',
 ] as const;
+
+export const OPTIONAL_ADDON_ACCESSORIES = [
+  '左板圖片', '右板圖片', '底板圖片', '頂板圖片', '背板圖片',
+  '左板鏡面', '右板鏡面', '底板鏡面', '頂板鏡面', '背板鏡面',
+  '前板白色刻字', '背板白色刻字', '左板白色刻字', '右板白色刻字', '底板白色刻字', '頂板白色刻字',
+  '前板彩色刻字', '背板彩色刻字', '左板彩色刻字', '右板彩色刻字', '底板彩色刻字', '頂板彩色刻字',
+] as const;
+
+export type OptionalAddonQuote = {
+  name: typeof OPTIONAL_ADDON_ACCESSORIES[number];
+  label: string;
+  amountHkd: number;
+};
 
 const SINGLE_ACCESSORIES = new Set(['趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板']);
 const ALLOWED_ACCESSORIES = new Set<string>(PILOT_ACCESSORIES);
@@ -305,6 +319,17 @@ const calcBackLightRmb = (l: number, h: number): number =>
 const calcBackPanelRmb = (l: number, h: number): number => l * h * 0.025;
 const calcLdPanelRmb = (l: number, d: number): number => l * d * 0.025;
 
+const panelAccessoryRmb = (
+  name: string,
+  dimensions: { length: number; depth: number; height: number },
+): number => {
+  if (name.startsWith('背板')) return calcBackPanelRmb(dimensions.length, dimensions.height);
+  if (name.startsWith('左板') || name.startsWith('右板')) {
+    return calcLdPanelRmb(dimensions.depth, dimensions.height);
+  }
+  return calcLdPanelRmb(dimensions.length, dimensions.depth);
+};
+
 export const standalonePanelDimensions = (
   face: StandalonePanelFace,
   dimensions: PilotDimensions,
@@ -515,26 +540,33 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   hkdAddons += rgbCustomerSurchargeHkd;
   const backLightCount = accessories['背燈'] || 0;
   if (backLightCount > 0) accessoryRmb += calcBackLightRmb(inner.length, inner.height) * backLightCount;
-  const backImageCount = accessories['背板圖片'] || 0;
-  if (backImageCount > 0) {
-    accessoryRmb += calcBackPanelRmb(inner.length, inner.height) * backImageCount;
-    hkdAddons += 100 * backImageCount;
-  }
-  for (const name of ['左板圖片', '右板圖片', '底板圖片', '頂板圖片']) {
+  for (const name of ['左板圖片', '右板圖片', '底板圖片', '頂板圖片', '背板圖片']) {
     const count = accessories[name] || 0;
     if (count > 0) {
-      accessoryRmb += calcLdPanelRmb(inner.length, inner.depth) * count;
+      accessoryRmb += panelAccessoryRmb(name, {
+        length: inner.length,
+        depth: inner.depth,
+        height: inner.height,
+      }) * count;
       hkdAddons += 100 * count;
     }
   }
-  for (const name of ['左板鏡面', '右板鏡面', '底板鏡面', '頂板鏡面']) {
+  for (const name of ['左板鏡面', '右板鏡面', '底板鏡面', '頂板鏡面', '背板鏡面']) {
     const count = accessories[name] || 0;
-    if (count > 0) accessoryRmb += calcLdPanelRmb(inner.length, inner.depth) * count;
+    if (count > 0) {
+      accessoryRmb += panelAccessoryRmb(name, {
+        length: inner.length,
+        depth: inner.depth,
+        height: inner.height,
+      }) * count;
+    }
   }
-  const backMirrorCount = accessories['背板鏡面'] || 0;
-  if (backMirrorCount > 0) accessoryRmb += calcBackPanelRmb(inner.length, inner.height) * backMirrorCount;
-  hkdAddons += (accessories['前板白色刻字'] || 0) * 70;
-  hkdAddons += (accessories['前板彩色刻字'] || 0) * 90;
+  for (const name of ['前板白色刻字', '背板白色刻字', '左板白色刻字', '右板白色刻字', '底板白色刻字', '頂板白色刻字']) {
+    hkdAddons += (accessories[name] || 0) * 90;
+  }
+  for (const name of ['前板彩色刻字', '背板彩色刻字', '左板彩色刻字', '右板彩色刻字', '底板彩色刻字', '頂板彩色刻字']) {
+    hkdAddons += (accessories[name] || 0) * 120;
+  }
   if (lightBoardCount > 0 || backLightCount > 0) accessoryRmb += 30;
 
   const baseProductAmountHkd = money(sizeRmb / RMB_DIVISOR);
@@ -592,6 +624,36 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     productAndAccessoriesTotalHkd,
     amount: money(amount),
   };
+};
+
+const optionalAddonLabel = (name: string): string => name.replace(/圖片$/, '背景');
+
+export const calculateOptionalAddonQuotes = (
+  input: PilotItemInput,
+  requestedNames: unknown,
+): OptionalAddonQuote[] => {
+  if (!Array.isArray(requestedNames) || requestedNames.length === 0) return [];
+  if (input.itemType === '階梯' || input.itemType === '單塊燈板' || input.itemType === '單塊板件') return [];
+  const allowed = new Set<string>(OPTIONAL_ADDON_ACCESSORIES);
+  const names = Array.from(new Set(requestedNames.map(value => String(value || '').trim())))
+    .filter(name => allowed.has(name));
+  if (names.length === 0) return [];
+
+  const base = calculatePilotItem(input);
+  return names.map((name) => {
+    if ((base.accessoryQty[name] || 0) > 0) {
+      throw new Error(`${name} 已經包括在報價總價內，不能同時列作可加購配件。`);
+    }
+    const candidate = calculatePilotItem({
+      ...input,
+      accessories: { ...base.accessoryQty, [name]: 1 },
+    });
+    return {
+      name: name as OptionalAddonQuote['name'],
+      label: optionalAddonLabel(name),
+      amountHkd: money(candidate.accessoriesAmountHkd - base.accessoriesAmountHkd),
+    };
+  });
 };
 
 export const buildPilotPreview = (input: PilotQuoteInput): PilotPreview => {

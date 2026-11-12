@@ -7,6 +7,7 @@ import {
   accessoryOrderItemName,
   accessoryStorageName,
   buildPilotPreview,
+  calculateOptionalAddonQuotes,
   calculatePilotItem,
   formatDimensionValue,
   formatDimensionWithUnit,
@@ -345,6 +346,25 @@ const DEFAULT_TERMS_EN = `1. This quotation is for reference only. All sizes, de
 const MATERIAL_NOTE_EN = 'All LKS display boxes and display cases are made with 5MM high-clarity acrylic panels';
 
 const MATERIAL_NOTE = '本公司全線展示盒及展示櫃均採用 5MM 高清亞加力厚板製作';
+const renderQuoteResourceLinks = (isEnglish = false): string => {
+  const links = isEnglish
+    ? [
+      ['📐 Unsure about the size? View the measuring guide', 'https://lksdisplaybox.online/measurement-guide/'],
+      ['🎮 Try the 3D display preview', 'https://lksdisplaybox.online/展示盒訂製-3d-效果預覽/'],
+      ['🧩 Learn about display box structures and styles', 'https://lksdisplaybox.online/display-box-structure/'],
+    ]
+    : [
+      ['📐 擔心自己尺寸唔啱？即睇量度尺寸教學', 'https://lksdisplaybox.online/measurement-guide/'],
+      ['🎮 想自己試吓 3D 展示效果', 'https://lksdisplaybox.online/展示盒訂製-3d-效果預覽/'],
+      ['🧩 了解展示盒結構同款式', 'https://lksdisplaybox.online/display-box-structure/'],
+    ];
+  return `<div class="section quote-resource-links" style="margin-top:16px;">
+    <div class="section-title">${isEnglish ? 'Useful Tools' : '有唔明🤨即睇以下實用工具！'}</div>
+    <div style="display:grid;gap:9px;font-size:14px;">
+      ${links.map(([label, url]) => `<a href="${url}" target="_blank" rel="noopener noreferrer" style="color:#2563eb;text-decoration:none;font-weight:600;">${escapeHtml(label)}<br><span style="font-weight:400;word-break:break-all;">👉 ${escapeHtml(url)}</span></a>`).join('')}
+    </div>
+  </div>`;
+};
 const renderPaymentMethodHtml = (isEnglish = false): string => `
   <div class="section">
     <div class="section-title">${isEnglish ? 'Payment Method' : '付款方式'}</div>
@@ -659,6 +679,10 @@ const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = fals
     items: preview.items.map((item, index) => ({
       ...item,
       dimensionBasis: itemDimensionBases[index],
+      optionalAddons: calculateOptionalAddonQuotes(
+        input.items[index],
+        rawItems[index]?.optionalAddonSelections,
+      ),
     })),
     subtotal: preview.subtotal,
     total: preview.finalTotal,
@@ -3437,6 +3461,12 @@ const SHARED_CSS = `
     margin: 0;
     border: 0;
   }
+  .optional-addons-box { margin: 8px 0; padding: 11px 12px; border: 1px solid #bfdbfe; border-radius: 7px; background: #eff6ff; }
+  .optional-addons-title { color: #1d4ed8; font-weight: 800; margin-bottom: 7px; }
+  .optional-addons-list { display: flex; flex-wrap: wrap; gap: 7px; }
+  .optional-addons-list span { display: inline-block; padding: 5px 8px; border-radius: 999px; background: #fff; color: #1f2937; border: 1px solid #dbeafe; }
+  .optional-addons-list strong { color: #b45309; }
+  .optional-addons-disclaimer { margin-top: 8px; color: #6b7280; font-size: 12px; line-height: 1.45; }
 
   /* ── Privacy Notice ── */
   .privacy-notice {
@@ -3664,6 +3694,33 @@ const renderAccTags = (raw: unknown): string => {
     return tag;
   };
   return `<div class="acc-tags">${tags.map(t => `<span class="acc-tag">${escapeHtml(displayTag(t))}</span>`).join('')}</div>`;
+};
+
+type StoredOptionalAddon = { name: string; label: string; amountHkd: number };
+
+const storedOptionalAddons = (item: any): StoredOptionalAddon[] => (
+  Array.isArray(item?.optionalAddons)
+    ? item.optionalAddons.map((addon: any) => ({
+      name: String(addon?.name || '').trim(),
+      label: String(addon?.label || '').trim(),
+      amountHkd: Number(addon?.amountHkd || 0),
+    })).filter((addon: StoredOptionalAddon) => addon.name && addon.label && addon.amountHkd > 0)
+    : []
+);
+
+const renderOptionalAddonsRow = (item: any, columnCount: number, isEnglish = false): string => {
+  const addons = storedOptionalAddons(item);
+  if (addons.length === 0) return '';
+  const disclaimer = isEnglish
+    ? 'These optional items are not included in the quotation total. Prices are estimated for the current panel position, dimensions and design requirements; the final price is subject to an updated quotation if they change.'
+    : '以下可加購項目未計入本報價總額。所列價格按目前板位、尺寸及設計要求估算；如板位、尺寸或設計內容有更改，最終價格以更新報價為準。';
+  return `<tr class="optional-addons-row"><td colspan="${columnCount}">
+    <div class="optional-addons-box">
+      <div class="optional-addons-title">${isEnglish ? 'Optional Add-ons' : '可加購配件'}</div>
+      <div class="optional-addons-list">${addons.map(addon => `<span>${escapeHtml(addon.label)} <strong>+HK$${addon.amountHkd.toFixed(2)}</strong></span>`).join('')}</div>
+      <div class="optional-addons-disclaimer">${escapeHtml(disclaimer)}</div>
+    </div>
+  </td></tr>`;
 };
 
 const statusBadgeClass = (status: string): string => {
@@ -4514,6 +4571,9 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
           const receiptState = receiptStateMap[r.id];
           const receiptToken = receiptState?.token;
           const receiptIssued = Boolean(receiptState?.issued);
+          const quoteItems = parseQuoteItems(f['Quote Items JSON']);
+          const hasOptionalAddons = quoteItems.some(item => storedOptionalAddons(item).length > 0);
+          const canCreateRevision = hasOptionalAddons && !f['Order Ref'] && !f['Converted Order No'];
 
           // Build action buttons — ALL always shown
           const customerInfoLink = `${PUBLIC_BASE_URL}${publicCustomerInfoPath(token)}`;
@@ -4521,6 +4581,10 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
 
           // 1. View Quote
           actions += `<a href="${publicQuotePath(token)}" class="btn btn-outline btn-sm" target="_blank">View Quote</a>`;
+
+          if (canCreateRevision) {
+            actions += ` <a href="/admin/quote/${encodeURIComponent(r.id)}/revise" class="btn btn-outline btn-sm">加入配件並建立修訂報價</a>`;
+          }
 
           // 2. Copy Customer Info Link
           actions += ` <button type="button" class="btn btn-secondary btn-sm" onclick="copyLink('${customerInfoLink}', this)">Copy Customer Info Form Link</button>`;
@@ -4621,6 +4685,150 @@ app.get('/quotes', requireAdmin, async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error(error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">Error loading dashboard: ${escapeHtml(error.message)}</div>`));
+  }
+});
+
+// Owner-only one-click revision flow. It clones the original Quote, applies
+// only the selected optional add-ons, and sends the result through the same
+// authoritative Create Quote calculator. The original Quote is never changed.
+app.get('/admin/quote/:recordId/revise', requireAdmin, async (req: Request, res: Response) => {
+  try {
+    const recordId = String(req.params.recordId || '').trim();
+    if (!/^rec[A-Za-z0-9]{14}$/.test(recordId)) {
+      return res.status(400).send(renderPage('Invalid Quote', '<div class="alert alert-danger">Invalid Quote reference.</div>'));
+    }
+    const record = await tableQuotes.find(recordId);
+    const fields = record.fields;
+    if (fields['Order Ref'] || fields['Converted Order No']) {
+      return res.status(409).send(renderPage('Quote already converted', '<div class="alert alert-danger">呢張Quote已經轉成Invoice／Order，唔可以用完整修訂報價覆蓋。請另開加購單。</div>'));
+    }
+    const items = parseQuoteItems(fields['Quote Items JSON']);
+    const available = items.flatMap((item: any, itemIndex: number) => (
+      storedOptionalAddons(item).map((addon, addonIndex) => ({
+        itemIndex,
+        addonIndex,
+        itemLabel: `${itemIndex + 1}. ${String(item.itemType || 'Item')}`,
+        quantity: Math.max(1, Number(item.qty) || 1),
+        ...addon,
+      }))
+    ));
+    if (available.length === 0) {
+      return res.status(409).send(renderPage('No optional add-ons', '<div class="alert alert-info">呢張Quote冇已顯示嘅可加購配件。</div>'));
+    }
+
+    const quoteNumber = String(fields['Quote Number'] || '').trim();
+    const isEnglish = String(fields['Quote Language'] || '') === 'English';
+    const revisionNote = isEnglish
+      ? `This quotation is a revised version of ${quoteNumber}.`
+      : `此報價為 ${quoteNumber} 的修訂版本。`;
+    const baseNotes = String(fields['Notes'] || '');
+    const customerRecordId = getLinkedRecordId(fields['Customer']) || '';
+    const payload = {
+      customerRecordId,
+      customerSource: customerRecordId ? 'customers' : '',
+      legacyCustomerRecordId: '',
+      contactName: String(fields['Contact Name'] || fields['Customer Name'] || ''),
+      phone: String(fields['Phone'] || fields['Customer Phone'] || ''),
+      contactMethod: String(fields['Contact Method'] || 'WhatsApp'),
+      contactHandle: String(fields['Contact Handle / Reference'] || ''),
+      quoteLanguage: isEnglish ? 'English' : '中文',
+      quoteSourceChannel: String(fields['Quote Source / Channel'] || ''),
+      campaignSourceDetail: String(fields['Campaign / Source Detail'] || ''),
+      campaignSourceDetailWasManual: false,
+      inquiryRecordId: getLinkedRecordId(fields['Inquiry']) || '',
+      performanceMonthRecordId: getLinkedRecordId(fields['Performance Month']) || '',
+      promotionType: String(fields['Promotion / Offer Type'] || ''),
+      discountType: String(fields['Discount Type'] || '無折扣'),
+      discountMultiplier: Number(fields['Discount Multiplier'] || 0) || '',
+      discountAmountHkd: Number(fields['Discount Amount HKD'] || 0),
+      deliveryChargeMode: String(fields['Delivery Charge Mode'] || '已包本地送貨'),
+      deliveryOfferReason: String(fields['Delivery Offer Reason'] || ''),
+      validUntil: getHongKongDateAfterDays(7),
+      notes: [baseNotes, revisionNote].filter(Boolean).join('\n\n'),
+      terms: String(fields['Terms and Conditions'] || DEFAULT_TERMS),
+      items: items.map((item: any) => ({
+        ...item,
+        optionalAddonSelections: storedOptionalAddons(item).map(addon => addon.name),
+      })),
+    };
+    const payloadJson = JSON.stringify(payload).replace(/</g, '\\u003c');
+    const rows = available.map(entry => `
+      <label class="revision-addon-row">
+        <input type="checkbox" class="revision-addon" data-item-index="${entry.itemIndex}" data-addon-index="${entry.addonIndex}" data-name="${escapeHtml(entry.name)}" data-amount="${entry.amountHkd}" data-quantity="${entry.quantity}">
+        <span><strong>${escapeHtml(entry.itemLabel)}</strong><br>${escapeHtml(entry.label)} <b>+HK$${entry.amountHkd.toFixed(2)}</b>${entry.quantity > 1 ? ` × ${entry.quantity}件` : ''}</span>
+      </label>`).join('');
+    const originalSubtotal = Number(fields['Sub Total'] || 0);
+    const originalTotal = Number(fields['Total'] || 0);
+    const discountType = String(fields['Discount Type'] || '無折扣');
+    const discountMultiplier = Number(fields['Discount Multiplier'] || 0);
+    const discountAmount = Number(fields['Discount Amount HKD'] || 0);
+
+    const content = `<div class="doc-card"><div class="doc-body">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:16px;">
+        <div><h2 style="margin:0;">加入配件並建立修訂報價</h2><div style="color:#6b7280;margin-top:4px;">原報價：${escapeHtml(quoteNumber)}</div></div>
+        <a href="/quotes" class="btn btn-outline">返回</a>
+      </div>
+      <div class="alert alert-info">只會建立一張新Quote；原本Quote、Invoice及Order完全不會改動。</div>
+      <form id="revisionForm">
+        <div class="revision-addon-list">${rows}</div>
+        <div class="form-group" style="margin-top:16px;max-width:260px;"><label>新Quote有效期</label><input type="date" id="revisionValidUntil" value="${getHongKongDateAfterDays(7)}" required></div>
+        <div class="offer-preview" style="margin-top:16px;">
+          <div class="line"><span>原本總額</span><span>HK$${originalTotal.toFixed(2)}</span></div>
+          <div class="line"><span>已選加購（按Item QTY）</span><span id="revisionAddonTotal">HK$0.00</span></div>
+          <div class="line final"><span>新報價預計總額</span><span id="revisionNewTotal">HK$${originalTotal.toFixed(2)}</span></div>
+        </div>
+        <div style="text-align:right;margin-top:18px;"><button type="submit" class="btn btn-primary">確認建立修訂報價</button></div>
+      </form>
+    </div></div>`;
+    const extraHead = `<style>
+      .revision-addon-list{display:grid;gap:8px}.revision-addon-row{display:flex;gap:10px;align-items:flex-start;padding:11px 12px;border:1px solid #dbeafe;border-radius:7px;background:#f8fbff;cursor:pointer}.revision-addon-row input{margin-top:4px}.revision-addon-row b{color:#b45309}
+    </style><script>
+      var revisionPayload=${payloadJson};
+      var originalSubtotal=${JSON.stringify(originalSubtotal)};
+      var originalTotal=${JSON.stringify(originalTotal)};
+      var discountType=${JSON.stringify(discountType)};
+      var discountMultiplier=${JSON.stringify(discountMultiplier)};
+      var discountAmount=${JSON.stringify(discountAmount)};
+      function selectedRevisionAddons(){return Array.from(document.querySelectorAll('.revision-addon:checked'));}
+      function updateRevisionPreview(){
+        var addonTotal=selectedRevisionAddons().reduce(function(sum,input){return sum+(Number(input.dataset.amount)||0)*(Number(input.dataset.quantity)||1);},0);
+        var subtotal=originalSubtotal+addonTotal;
+        var discount=0;
+        if(discountType==='百分比折扣'&&discountMultiplier>0){discount=subtotal*(1-discountMultiplier);}
+        if(discountType==='指定金額扣減'&&discountAmount>0){discount=Math.min(discountAmount,subtotal);}
+        document.getElementById('revisionAddonTotal').textContent='HK$'+addonTotal.toFixed(2);
+        document.getElementById('revisionNewTotal').textContent='HK$'+Math.ceil(Math.max(0,subtotal-discount)).toFixed(2);
+      }
+      document.addEventListener('DOMContentLoaded',function(){
+        document.querySelectorAll('.revision-addon').forEach(function(input){input.addEventListener('change',updateRevisionPreview);});
+        document.getElementById('revisionForm').addEventListener('submit',function(event){
+          event.preventDefault();
+          var selected=selectedRevisionAddons();
+          if(!selected.length){alert('請最少選擇一項客人確認加購嘅配件。');return;}
+          var payload=JSON.parse(JSON.stringify(revisionPayload));
+          payload.validUntil=document.getElementById('revisionValidUntil').value;
+          selected.forEach(function(input){
+            var item=payload.items[Number(input.dataset.itemIndex)];
+            var name=String(input.dataset.name||'');
+            item.accessoryQty=item.accessoryQty||{};
+            item.accessoryQty[name]=(Number(item.accessoryQty[name])||0)+1;
+          });
+          payload.items.forEach(function(item){
+            var selectedNames=selected.filter(function(input){return Number(input.dataset.itemIndex)===payload.items.indexOf(item);}).map(function(input){return String(input.dataset.name||'');});
+            item.optionalAddonSelections=(item.optionalAddonSelections||[]).filter(function(name){return selectedNames.indexOf(name)===-1;});
+          });
+          fetch('/quote/create',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)})
+            .then(function(response){return response.text();})
+            .then(function(html){document.open();document.write(html);document.close();})
+            .catch(function(error){alert('Error: '+error.message);});
+        });
+        updateRevisionPreview();
+      });
+    </script>`;
+    return res.send(renderPage(`修訂報價 ${quoteNumber}`, content, extraHead));
+  } catch (error: any) {
+    logSafeError('Quote revision preparation failed.', error);
+    return res.status(500).send(renderPage('Unable to revise Quote', '<div class="alert alert-danger">暫時未能建立修訂報價。</div>'));
   }
 });
 
@@ -4874,68 +5082,126 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                     <td>
                       <div class="f-stair-no-accessories" style="display:none;font-size:12px;color:#6b7280;">階梯不適用</div>
                       <div class="f-accessories-editor" style="min-width:330px;max-height:360px;overflow-y:auto;border:1px solid #e5e7eb;border-radius:4px;padding:8px;font-size:12px;background:#fff;">
-                        <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">門款／結構</div>
-                        <div class="f-acc-wrap" style="margin-bottom:8px;">
-                          <label style="display:block;"><input type="checkbox" class="f-door-option" value="趟門"> 趟門</label>
-                          <label style="display:block;"><input type="checkbox" class="f-door-option" value="一體磁吸結構"> 一體磁吸結構</label>
-                        </div>
-                        <div class="f-structure-summary" style="display:none;margin:-2px 0 8px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:#9a3412;font-weight:700;line-height:1.45;"></div>
-                        <div class="f-bottom-base-section">
-                          <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">其他單次配件</div>
-                          <div class="f-acc-wrap" style="margin-bottom:8px;">
-                            <label style="display:block;"><input type="checkbox" class="f-bottom-base-option" value="黑底板"> 黑底板</label>
-                            <label style="display:block;"><input type="checkbox" class="f-bottom-base-option" value="透明底板"> 透明底板</label>
+                        <details class="f-accessory-group">
+                          <summary>門款／結構</summary>
+                          <div class="f-acc-wrap f-accessory-group-body">
+                            <label><input type="checkbox" class="f-door-option" value="趟門"> 趟門</label>
+                            <label><input type="checkbox" class="f-door-option" value="一體磁吸結構"> 一體磁吸結構</label>
                           </div>
-                          <div class="f-integrated-bottom-note" style="display:none;margin:-3px 0 8px;color:#6b7280;line-height:1.4;">一體磁吸結構選單燈時，可選黑色底板或透明底板。</div>
-                        </div>
-                        <div class="f-standard-light-section">
-                          <div style="font-weight:700;color:#d8833b;margin-bottom:4px;">三圈燈（三圈光／火牛配三腳插）</div>
-                          <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
-                            <label>三圈燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 上燈" value="0" style="width:58px;">
-                            <label>三圈燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 下燈" value="0" style="width:58px;">
-                            <label>三圈燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 上下燈" value="0" style="width:58px;">
-                            <label>三圈上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="上下燈" value="0" style="width:58px;">
+                          <div class="f-structure-summary" style="display:none;margin:0 8px 8px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:#9a3412;font-weight:700;line-height:1.45;"></div>
+                        </details>
+                        <details class="f-accessory-group f-bottom-base-section">
+                          <summary>底板</summary>
+                          <div class="f-acc-wrap f-accessory-group-body">
+                            <label><input type="checkbox" class="f-bottom-base-option" value="黑底板"> 黑底板</label>
+                            <label><input type="checkbox" class="f-bottom-base-option" value="透明底板"> 透明底板</label>
                           </div>
-                        </div>
-                        <div class="f-rgb-light-section">
-                          <div style="font-weight:700;color:#7c3aed;margin:9px 0 4px;">彩燈（多色／USB）</div>
-                          <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
-                            <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上燈板" value="0" style="width:58px;">
-                            <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立下燈板" value="0" style="width:58px;">
-                            <label>彩燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上下燈板" value="0" style="width:58px;">
-                            <label>彩燈｜上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜上下燈" value="0" style="width:58px;">
+                          <div class="f-integrated-bottom-note" style="display:none;margin:0 8px 8px;color:#6b7280;line-height:1.4;">一體磁吸結構選單燈時，可選黑色底板或透明底板。</div>
+                        </details>
+                        <details class="f-accessory-group">
+                          <summary>燈</summary>
+                          <div class="f-accessory-group-body">
+                            <div class="f-standard-light-section">
+                              <div class="f-accessory-subtitle">三圈燈（三圈光／火牛配三腳插）</div>
+                              <div class="f-acc-qty-wrap f-accessory-grid">
+                                <label>三圈燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 上燈" value="0">
+                                <label>三圈燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 下燈" value="0">
+                                <label>三圈燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="獨立燈板 - 上下燈" value="0">
+                                <label>三圈上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="上下燈" value="0">
+                              </div>
+                            </div>
+                            <div class="f-rgb-light-section">
+                              <div class="f-accessory-subtitle" style="color:#7c3aed;">彩燈（多色／USB）</div>
+                              <div class="f-acc-qty-wrap f-accessory-grid">
+                                <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上燈板" value="0">
+                                <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立下燈板" value="0">
+                                <label>彩燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上下燈板" value="0">
+                                <label>彩燈｜上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜上下燈" value="0">
+                              </div>
+                            </div>
+                            <div class="f-integrated-rgb-section" style="display:none;padding:8px;border-radius:5px;background:#f5f3ff;">
+                              <label class="f-accessory-subtitle" style="color:#7c3aed;">一體磁吸結構燈款</label>
+                              <select class="f-integrated-rgb-select" style="width:100%;">
+                                <option value="">無燈</option>
+                                <option value="獨立燈板 - 上燈">三圈燈｜上燈</option>
+                                <option value="獨立燈板 - 下燈">三圈燈｜下燈</option>
+                                <option value="上下燈">三圈燈｜上下燈</option>
+                                <option value="彩燈｜獨立上燈板">彩燈｜上燈</option>
+                                <option value="彩燈｜獨立下燈板">彩燈｜下燈</option>
+                                <option value="彩燈｜上下燈">彩燈｜上下燈</option>
+                              </select>
+                              <div style="margin-top:5px;color:#6b7280;line-height:1.4;">一體磁吸結構沒有獨立燈板。</div>
+                            </div>
+                            <div class="f-accessory-grid" style="margin-top:8px;"><label>背燈</label><input type="number" min="0" class="f-acc-qty" data-name="背燈" value="0"></div>
+                            <div class="f-rgb-meta" style="display:none;margin-top:7px;padding:6px 8px;border-radius:5px;background:#f5f3ff;color:#5b21b6;line-height:1.45;"></div>
                           </div>
-                        </div>
-                        <div class="f-integrated-rgb-section" style="display:none;margin-top:9px;padding:8px;border-radius:5px;background:#f5f3ff;">
-                          <label style="display:block;font-weight:700;color:#7c3aed;margin-bottom:5px;">一體磁吸結構燈款</label>
-                          <select class="f-integrated-rgb-select" style="width:100%;">
-                            <option value="">無燈</option>
-                            <option value="獨立燈板 - 上燈">三圈燈｜上燈</option>
-                            <option value="獨立燈板 - 下燈">三圈燈｜下燈</option>
-                            <option value="上下燈">三圈燈｜上下燈</option>
-                            <option value="彩燈｜獨立上燈板">彩燈｜上燈</option>
-                            <option value="彩燈｜獨立下燈板">彩燈｜下燈</option>
-                            <option value="彩燈｜上下燈">彩燈｜上下燈</option>
-                          </select>
-                          <div style="margin-top:5px;color:#6b7280;line-height:1.4;">一體磁吸結構沒有獨立燈板。</div>
-                        </div>
-                        <div class="f-rgb-meta" style="display:none;margin:7px 0;padding:6px 8px;border-radius:5px;background:#f5f3ff;color:#5b21b6;line-height:1.45;"></div>
-                        <div style="font-weight:700;color:#d8833b;margin:9px 0 4px;">其他數量配件</div>
-                        <div class="f-acc-qty-wrap" style="display:grid;grid-template-columns:1fr 58px;gap:4px 6px;align-items:center;">
-                          <label>背燈</label><input type="number" min="0" class="f-acc-qty" data-name="背燈" value="0" style="width:58px;">
+                        </details>
+                        <details class="f-accessory-group">
+                          <summary>背景</summary>
+                          <div class="f-acc-qty-wrap f-accessory-grid f-accessory-group-body">
+                            <label>左板背景</label><input type="number" min="0" class="f-acc-qty" data-name="左板圖片" value="0">
+                            <label>右板背景</label><input type="number" min="0" class="f-acc-qty" data-name="右板圖片" value="0">
+                            <label>底板背景</label><input type="number" min="0" class="f-acc-qty" data-name="底板圖片" value="0">
+                            <label>頂板背景</label><input type="number" min="0" class="f-acc-qty" data-name="頂板圖片" value="0">
+                            <label>背板背景</label><input type="number" min="0" class="f-acc-qty" data-name="背板圖片" value="0">
+                          </div>
+                        </details>
+                        <details class="f-accessory-group">
+                          <summary>鏡面</summary>
+                          <div class="f-acc-qty-wrap f-accessory-grid f-accessory-group-body">
+                            <label>左板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="左板鏡面" value="0">
+                            <label>右板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="右板鏡面" value="0">
+                            <label>底板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="底板鏡面" value="0">
+                            <label>頂板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="頂板鏡面" value="0">
+                            <label>背板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="背板鏡面" value="0">
+                          </div>
+                        </details>
+                        <details class="f-accessory-group">
+                          <summary>刻字</summary>
+                          <div class="f-acc-qty-wrap f-accessory-grid f-accessory-group-body">
                           <label>前板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="前板白色刻字" value="0" style="width:58px;">
+                          <label>背板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="背板白色刻字" value="0" style="width:58px;">
+                          <label>左板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="左板白色刻字" value="0" style="width:58px;">
+                          <label>右板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="右板白色刻字" value="0" style="width:58px;">
+                          <label>底板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="底板白色刻字" value="0" style="width:58px;">
+                          <label>頂板白色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="頂板白色刻字" value="0" style="width:58px;">
                           <label>前板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="前板彩色刻字" value="0" style="width:58px;">
-                          <label>左板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="左板圖片" value="0" style="width:58px;">
-                          <label>右板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="右板圖片" value="0" style="width:58px;">
-                          <label>底板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="底板圖片" value="0" style="width:58px;">
-                          <label>頂板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="頂板圖片" value="0" style="width:58px;">
-                          <label>背板圖片</label><input type="number" min="0" class="f-acc-qty" data-name="背板圖片" value="0" style="width:58px;">
-                          <label>左板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="左板鏡面" value="0" style="width:58px;">
-                          <label>右板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="右板鏡面" value="0" style="width:58px;">
-                          <label>底板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="底板鏡面" value="0" style="width:58px;">
-                          <label>頂板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="頂板鏡面" value="0" style="width:58px;">
-                          <label>背板鏡面</label><input type="number" min="0" class="f-acc-qty" data-name="背板鏡面" value="0" style="width:58px;">
-                        </div>
+                          <label>背板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="背板彩色刻字" value="0" style="width:58px;">
+                          <label>左板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="左板彩色刻字" value="0" style="width:58px;">
+                          <label>右板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="右板彩色刻字" value="0" style="width:58px;">
+                          <label>底板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="底板彩色刻字" value="0" style="width:58px;">
+                          <label>頂板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="頂板彩色刻字" value="0" style="width:58px;">
+                          </div>
+                        </details>
+                        <details class="f-accessory-group f-optional-addons-group">
+                          <summary>可加購配件（只顯示價錢）</summary>
+                          <div class="f-accessory-group-body">
+                            <div class="f-accessory-subtitle">背景</div>
+                            <div class="f-optional-addon-grid">
+                              <label><input type="checkbox" class="f-optional-addon" value="左板圖片"> 左板背景</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="右板圖片"> 右板背景</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="底板圖片"> 底板背景</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="頂板圖片"> 頂板背景</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="背板圖片"> 背板背景</label>
+                            </div>
+                            <div class="f-accessory-subtitle">鏡面</div>
+                            <div class="f-optional-addon-grid">
+                              <label><input type="checkbox" class="f-optional-addon" value="左板鏡面"> 左板鏡面</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="右板鏡面"> 右板鏡面</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="底板鏡面"> 底板鏡面</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="頂板鏡面"> 頂板鏡面</label>
+                              <label><input type="checkbox" class="f-optional-addon" value="背板鏡面"> 背板鏡面</label>
+                            </div>
+                            <div class="f-accessory-subtitle">刻字</div>
+                            <div class="f-optional-addon-grid">
+                              ${['前板','背板','左板','右板','底板','頂板'].flatMap(face => [
+                                `<label><input type="checkbox" class="f-optional-addon" value="${face}白色刻字"> ${face}白色刻字</label>`,
+                                `<label><input type="checkbox" class="f-optional-addon" value="${face}彩色刻字"> ${face}彩色刻字</label>`,
+                              ]).join('')}
+                            </div>
+                            <div class="f-optional-addon-note">剔選後只會顯示俾客人參考，唔會計入目前總價。</div>
+                          </div>
+                        </details>
                       </div>
                     </td>
                     <td><input type="text" class="f-desc" placeholder="Remarks"></td>
@@ -5050,6 +5316,19 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
     .freight-estimate-hint strong{color:#166534;font-size:12px}
     .freight-estimate-hint .freight-warning{display:block;margin-top:3px;color:#b91c1c;font-weight:700}
     .freight-estimate-hint .freight-caution{display:block;margin-top:3px;color:#9a3412;font-weight:700}
+    .f-accessory-group{border:1px solid #e5e7eb;border-radius:6px;margin-bottom:6px;background:#fff}
+    .f-accessory-group>summary{cursor:pointer;padding:8px 10px;font-weight:700;color:#9a5a20;background:#fffaf5;list-style-position:inside}
+    .f-accessory-group[open]>summary{border-bottom:1px solid #f3e8dc}
+    .f-accessory-group-body{padding:8px 10px;display:flex;flex-direction:column;gap:5px}
+    .f-accessory-group-body label{display:block}
+    .f-accessory-subtitle{font-weight:700;color:#d8833b;margin:3px 0 2px}
+    .f-accessory-grid{display:grid;grid-template-columns:1fr 58px;gap:5px 7px;align-items:center}
+    .f-accessory-grid input[type=number]{width:58px}
+    .f-optional-addons-group>summary{color:#2563eb;background:#eff6ff}
+    .f-optional-addon-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px 8px}
+    .f-optional-addon-grid label{display:flex;align-items:center;gap:6px;line-height:1.35}
+    .f-optional-addon-grid input[type="checkbox"]{width:auto;min-width:14px;margin:0;flex:0 0 auto}
+    .f-optional-addon-note{margin-top:6px;padding:7px 8px;border-radius:5px;background:#fef3c7;color:#92400e;line-height:1.45}
   </style>
   <script>
     var RMB_DIVISOR = 0.85;
@@ -5271,6 +5550,13 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       return map;
     }
 
+    function getOptionalAddonSelections(row) {
+      var included = getAccessoryQtyMap(row);
+      return Array.from(row.querySelectorAll('.f-optional-addon:checked'))
+        .map(function(input) { return String(input.value || ''); })
+        .filter(function(name) { return name && !(included[name] > 0); });
+    }
+
     function getAccessories(row) {
       var single = getSingleAccessories(row);
       var qtyMap = getAccessoryQtyMap(row);
@@ -5426,6 +5712,9 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       row.querySelectorAll('.f-acc-qty').forEach(function(input) {
         input.value = '0';
       });
+      row.querySelectorAll('.f-optional-addon').forEach(function(input) {
+        input.checked = false;
+      });
       var integratedRgb = row.querySelector('.f-integrated-rgb-select');
       if (integratedRgb) integratedRgb.value = '';
     }
@@ -5495,6 +5784,14 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
 
     function calcLdPanelRmb(l, d) {
       return l * d * 0.025;
+    }
+
+    function calcPanelAccessoryRmb(name, l, d, h) {
+      if (String(name).indexOf('背板') === 0) return calcBackPanelRmb(l, h);
+      if (String(name).indexOf('左板') === 0 || String(name).indexOf('右板') === 0) {
+        return calcLdPanelRmb(d, h);
+      }
+      return calcLdPanelRmb(l, d);
     }
 
     function calcPowerRmb() {
@@ -5747,34 +6044,27 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         accessoryRmb += calcBackLightRmb(l, accessoryHeight) * backLightCount;
       }
 
-      var backImageCount = qtyMap['背板圖片'] || 0;
-      if (backImageCount > 0) {
-        accessoryRmb += calcBackPanelRmb(l, accessoryHeight) * backImageCount;
-        hkdAddons += 100 * backImageCount;
-      }
-
-      ['左板圖片','右板圖片','底板圖片','頂板圖片'].forEach(function(name) {
+      ['左板圖片','右板圖片','底板圖片','頂板圖片','背板圖片'].forEach(function(name) {
         var c = qtyMap[name] || 0;
         if (c > 0) {
-          accessoryRmb += calcLdPanelRmb(l, d) * c;
+          accessoryRmb += calcPanelAccessoryRmb(name, l, d, accessoryHeight) * c;
           hkdAddons += 100 * c;
         }
       });
 
-      ['左板鏡面','右板鏡面','底板鏡面','頂板鏡面'].forEach(function(name) {
+      ['左板鏡面','右板鏡面','底板鏡面','頂板鏡面','背板鏡面'].forEach(function(name) {
         var c = qtyMap[name] || 0;
         if (c > 0) {
-          accessoryRmb += calcLdPanelRmb(l, d) * c;
+          accessoryRmb += calcPanelAccessoryRmb(name, l, d, accessoryHeight) * c;
         }
       });
 
-      var backMirrorCount = qtyMap['背板鏡面'] || 0;
-      if (backMirrorCount > 0) {
-        accessoryRmb += calcBackPanelRmb(l, accessoryHeight) * backMirrorCount;
-      }
-
-      hkdAddons += (qtyMap['前板白色刻字'] || 0) * 70;
-      hkdAddons += (qtyMap['前板彩色刻字'] || 0) * 90;
+      ['前板白色刻字','背板白色刻字','左板白色刻字','右板白色刻字','底板白色刻字','頂板白色刻字'].forEach(function(name) {
+        hkdAddons += (qtyMap[name] || 0) * 90;
+      });
+      ['前板彩色刻字','背板彩色刻字','左板彩色刻字','右板彩色刻字','底板彩色刻字','頂板彩色刻字'].forEach(function(name) {
+        hkdAddons += (qtyMap[name] || 0) * 120;
+      });
 
       if (lightBoardCount > 0 || backLightCount > 0) {
         accessoryRmb += calcPowerRmb();
@@ -6094,6 +6384,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
           levelHeights: (row.querySelector('.f-lh') || {}).value || '',
           accessories: acc,
           accessoryQty: getAccessoryQtyMap(row),
+          optionalAddonSelections: getOptionalAddonSelections(row),
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
           freight: (row.querySelector('.f-freight') || {}).value || '0',
@@ -6382,6 +6673,13 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       rgbCustomerSurchargeHkd: parseFloat(String(item.rgbCustomerSurchargeHkd)) || 0,
       internalWarnings: Array.isArray(item.internalWarnings)
         ? item.internalWarnings.map((warning: unknown) => String(warning))
+        : [],
+      optionalAddons: Array.isArray(item.optionalAddons)
+        ? item.optionalAddons.map((addon: any) => ({
+          name: String(addon.name || ''),
+          label: String(addon.label || ''),
+          amountHkd: Math.max(0, Number(addon.amountHkd || 0)),
+        })).filter((addon: any) => addon.name && addon.label && addon.amountHkd > 0)
         : [],
       amount: parseFloat(String(item.amount)) || 0,
     }));
@@ -6823,7 +7121,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
             <td class="item-sub-description" colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td class="item-sub-qty" style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td class="item-sub-amount" style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
-          </tr>${(() => {
+          </tr>${renderOptionalAddonsRow(item, itemColumnCount, isEnglish)}${(() => {
             const presentation = quotationImagePresentations.get(String(item.item_id || ''));
             return renderOptionalQuotationImageRow(
               presentation,
@@ -6908,6 +7206,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
           </div>
 
           ${quote['Notes'] ? `<div class="section" style="margin-top:16px;"><div class="section-title">${L.notes}</div><p style="font-size:14px;">${nl2br(isEnglish ? DEFAULT_QUOTE_NOTES_EN : String(quote['Notes'] || ''))}</p></div>` : ''}
+          ${renderQuoteResourceLinks(isEnglish)}
           ${quote['Terms and Conditions'] ? `<div class="section"><div class="section-title">${L.terms}</div><p style="font-size:13px;color:#374151;">${nl2br(isEnglish ? DEFAULT_TERMS_EN : String(quote['Terms and Conditions'] || ''))}</p></div>` : ''}
 
           <div class="thank-you">${L.thankYou}</div>

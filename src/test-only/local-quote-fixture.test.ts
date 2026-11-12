@@ -91,6 +91,10 @@ test('local original-route fixture keeps every conditional bottom section popula
     assert.equal(quoteItems.length, 4);
     assert.ok(String(quoteItems[0].description || '').includes('mobile layout verification'));
     assert.ok(Array.isArray(quoteItems[1].accessories));
+    assert.deepEqual(quoteItems[0].optionalAddons, [
+      { name: '左板圖片', label: '左板背景', amountHkd: 80 },
+      { name: '頂板白色刻字', label: '頂板白色刻字', amountHkd: 90 },
+    ]);
     assert.equal(quoteItems[2].itemType, '單塊燈板');
     assert.equal(quoteItems[2].dimensionBasis, '外尺寸為準');
     assert.deepEqual([quoteItems[2].outerL, quoteItems[2].outerD, quoteItems[2].outerH], ['30', '20', '']);
