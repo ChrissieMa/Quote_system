@@ -130,7 +130,9 @@ import {
 } from './dimension-basis';
 import {
   buildLegacyCustomerMergeFields,
+  customerSearchValuesMatch,
   extractCustomerId,
+  loadCustomerSearchSources,
   nonBlankCustomerUpdates,
   normalizePhone,
   reconcileCustomerSearchResults,
@@ -2770,25 +2772,33 @@ const searchCustomers = async (query: unknown) => {
   const normalizedQ = normalizePhone(q);
   if (!q && !normalizedQ) return [];
 
-  const officialRecords = await tableCustomers.select({
-    fields: ['Customer Display', 'Customer ID', 'Customer Name', 'Phone', 'Email', 'Address']
-  }).all();
+  const {
+    officialRecords,
+    legacyRecords,
+    failedSources,
+  } = await loadCustomerSearchSources(
+    () => tableCustomers.select({
+      fields: ['Customer Display', 'Customer ID', 'Customer Name', 'Phone', 'Email', 'Address']
+    }).all(),
+    () => tableCustomersActive.select({
+      fields: ['Customer Display', 'Company Name', 'Last Name', 'Shipping Address', 'Shipping Phone', 'EmailID', 'MobilePhone', 'CF.Find Us', 'CF.Social Media', 'CF.Keyword', 'CF.Why choose us', 'Department', 'Designation']
+    }).all(),
+  );
+  if (failedSources.length > 0) {
+    console.warn(`Customer search continued without source: ${failedSources.join(', ')}`);
+  }
 
   const officialResults = officialRecords
     .filter((record: any) => {
       const f = record.fields;
-      const textFields = [
+      return customerSearchValuesMatch(q, [
         getCustomerText(f, 'Customer Display'),
         getCustomerText(f, 'Customer ID'),
         getCustomerText(f, 'Customer Name'),
         getCustomerText(f, 'Phone'),
         getCustomerText(f, 'Email'),
         getCustomerText(f, 'Address'),
-      ].map(v => v.toLowerCase());
-
-      const textMatch = textFields.some(v => v.includes(q));
-      const phoneMatch = normalizedQ.length >= 4 && normalizePhone(getCustomerText(f, 'Phone')).includes(normalizedQ);
-      return textMatch || phoneMatch;
+      ], [getCustomerText(f, 'Phone')]);
     })
     .map((record: any) => {
       const f = record.fields;
@@ -2804,14 +2814,10 @@ const searchCustomers = async (query: unknown) => {
       };
     });
 
-  const legacyRecords = await tableCustomersActive.select({
-    fields: ['Customer Display', 'Company Name', 'Last Name', 'Shipping Address', 'Shipping Phone', 'EmailID', 'MobilePhone', 'CF.Find Us', 'CF.Social Media', 'CF.Keyword', 'CF.Why choose us', 'Department', 'Designation']
-  }).all();
-
   const legacyResults = legacyRecords
     .filter((record: any) => {
       const f = record.fields;
-      const textFields = [
+      return customerSearchValuesMatch(q, [
         getCustomerText(f, 'Customer Display'),
         getCustomerText(f, 'Company Name'),
         getCustomerText(f, 'Last Name'),
@@ -2819,13 +2825,7 @@ const searchCustomers = async (query: unknown) => {
         getCustomerText(f, 'Shipping Phone'),
         getCustomerText(f, 'EmailID'),
         getCustomerText(f, 'MobilePhone'),
-      ].map(v => v.toLowerCase());
-
-      const textMatch = textFields.some(v => v.includes(q));
-      const phoneMatch = normalizedQ.length >= 4 && [getCustomerText(f, 'MobilePhone'), getCustomerText(f, 'Shipping Phone')]
-        .map(normalizePhone)
-        .some(value => value.includes(normalizedQ));
-      return textMatch || phoneMatch;
+      ], [getCustomerText(f, 'MobilePhone'), getCustomerText(f, 'Shipping Phone')]);
     })
     .map((record: any) => {
       const f = record.fields;
@@ -6435,9 +6435,21 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         return;
       }
       fetch('/api/customers/search?q=' + encodeURIComponent(q))
-        .then(function(res) { return res.json(); })
+        .then(function(res) {
+          return res.json().then(function(data) {
+            if (!res.ok) throw new Error(data.error || 'Customer search failed');
+            return data;
+          });
+        })
         .then(function(data) { renderCustomerResults(data.customers || []); })
-        .catch(function(err) { alert('Customer search error: ' + err.message); });
+        .catch(function(err) {
+          var box = document.getElementById('customerSearchResults');
+          if (box) {
+            box.style.display = 'block';
+            box.innerHTML = '<div style="padding:10px 12px;color:#b91c1c;font-size:13px;">客戶搜尋暫時失敗，請再試一次。資料未有被建立或修改。</div>';
+          }
+          alert('Customer search error: ' + err.message);
+        });
     }
 
     function selectExistingCustomer(customer) {
