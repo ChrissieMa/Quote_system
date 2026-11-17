@@ -25,7 +25,7 @@ export const STANDALONE_PANEL_FACES = [
 export type StandalonePanelFace = typeof STANDALONE_PANEL_FACES[number];
 
 export const PILOT_ACCESSORIES = [
-  '趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板',
+  '趟門', '磁石門', '一體磁吸結構', '黑頂板', '透明頂板', '黑底板', '透明底板',
   '獨立燈板 - 上燈', '獨立燈板 - 下燈', '獨立燈板 - 上下燈', '上下燈', '背燈',
   '彩燈｜獨立上燈板', '彩燈｜獨立下燈板', '彩燈｜獨立上下燈板', '彩燈｜上下燈',
   '前板白色刻字', '背板白色刻字', '左板白色刻字', '右板白色刻字', '底板白色刻字', '頂板白色刻字',
@@ -47,7 +47,15 @@ export type OptionalAddonQuote = {
   amountHkd: number;
 };
 
-const SINGLE_ACCESSORIES = new Set(['趟門', '磁石門', '一體磁吸結構', '黑底板', '透明底板']);
+export type CustomAccessory = {
+  name: string;
+  amountHkd: number;
+};
+
+const SINGLE_ACCESSORIES = new Set([
+  '趟門', '磁石門', '一體磁吸結構',
+  '黑頂板', '透明頂板', '黑底板', '透明底板',
+]);
 const ALLOWED_ACCESSORIES = new Set<string>(PILOT_ACCESSORIES);
 const RMB_DIVISOR = 0.85;
 
@@ -102,6 +110,7 @@ export type PilotItemInput = {
   levels?: number;
   levelHeights?: string;
   accessories?: Record<string, number>;
+  customAccessories?: CustomAccessory[];
   description?: string;
   chinaFreight: number;
   hongKongDelivery: number;
@@ -173,6 +182,7 @@ export type CalculatedPilotItem = {
   levelHeights: string;
   accessories: string[];
   accessoryQty: Record<string, number>;
+  customAccessories: CustomAccessory[];
   description: string;
   qty: number;
   freight: number;
@@ -248,6 +258,32 @@ const positiveInteger = (value: unknown, label: string): number => {
 };
 
 const money = (value: number): number => Math.round(value * 100) / 100;
+
+export const legacyDiscountMultiplier = (
+  discountType: unknown,
+  discountMultiplier: unknown,
+): number => {
+  if (String(discountType || '') !== '百分比折扣') return 1;
+  const multiplier = Number(discountMultiplier);
+  if (!Number.isFinite(multiplier) || multiplier < 0 || multiplier > 1) {
+    throw new Error('Discount multiplier must be between 0 and 1.');
+  }
+  return multiplier;
+};
+
+const normalizeCustomAccessories = (raw: CustomAccessory[] | undefined): CustomAccessory[] => {
+  if (!Array.isArray(raw)) return [];
+  if (raw.length > 10) throw new Error('每個 Item 最多可加入 10 項自訂配件。');
+  return raw.map((entry, index) => {
+    const name = String(entry?.name || '').trim();
+    if (!name) throw new Error(`自訂配件 ${index + 1} 必須輸入名稱。`);
+    if (name.length > 80) throw new Error(`自訂配件 ${index + 1} 名稱不可多於 80 個字。`);
+    return {
+      name,
+      amountHkd: money(finiteNonNegative(entry?.amountHkd, `自訂配件 ${index + 1} 價錢`)),
+    };
+  });
+};
 
 export const formatDimensionValue = (value: unknown): string => {
   const text = String(value ?? '').trim();
@@ -456,11 +492,27 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
         : finitePositive(input.innerDimensions?.height, 'Inner height'),
   };
   const quantity = positiveInteger(input.quantity, 'Quantity');
-  if ((isStair || isStandalone) && Object.keys(input.accessories || {}).length > 0) {
+  const customAccessories = normalizeCustomAccessories(input.customAccessories);
+  if ((isStair || isStandalone) && (Object.keys(input.accessories || {}).length > 0 || customAccessories.length > 0)) {
     throw new Error(`${input.itemType} 不使用 Accessories。`);
   }
   const accessories = isStair || isStandalone ? {} : normalizeAccessories(input.accessories);
   const hasIntegratedMagnetic = (accessories['一體磁吸結構'] || 0) > 0;
+  const hasSlidingDoor = (accessories['趟門'] || 0) > 0;
+  const hasLegacyMagneticDoor = (accessories['磁石門'] || 0) > 0;
+  const selectedStructures = [hasIntegratedMagnetic, hasSlidingDoor, hasLegacyMagneticDoor].filter(Boolean).length;
+  if (selectedStructures > 1) throw new Error('門款／結構每件只可選擇一款。');
+
+  const selectedTopPanels = ['黑頂板', '透明頂板'].filter(name => (accessories[name] || 0) > 0);
+  const selectedBottomPanels = ['黑底板', '透明底板'].filter(name => (accessories[name] || 0) > 0);
+  if (selectedTopPanels.length > 1) throw new Error('頂板只可選擇黑色或透明其中一款。');
+  if (selectedBottomPanels.length > 1) throw new Error('底板只可選擇黑色或透明其中一款。');
+  if (selectedTopPanels.length > 0 && !hasIntegratedMagnetic) {
+    throw new Error('只有一體磁吸結構可以選擇頂板顏色。');
+  }
+  if (selectedBottomPanels.length > 0 && !(hasIntegratedMagnetic || hasSlidingDoor || hasLegacyMagneticDoor)) {
+    throw new Error('請先選擇門款／結構，再選擇底板顏色。');
+  }
   if (hasIntegratedMagnetic) {
     const forbiddenLights = [
       '獨立燈板 - 上下燈',
@@ -483,9 +535,6 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
     }
     if (selectedIntegratedLights.some(name => accessories[name] !== 1)) {
       throw new Error('一體磁吸結構燈款數量必須為 1。');
-    }
-    if ((accessories['黑底板'] || 0) > 0 && (accessories['透明底板'] || 0) > 0) {
-      throw new Error('一體磁吸結構底板只可選擇黑色或透明其中一款。');
     }
   }
   const panelFace = String(input.forWhat || '').trim() as StandalonePanelFace;
@@ -567,6 +616,7 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
   for (const name of ['前板彩色刻字', '背板彩色刻字', '左板彩色刻字', '右板彩色刻字', '底板彩色刻字', '頂板彩色刻字']) {
     hkdAddons += (accessories[name] || 0) * 120;
   }
+  hkdAddons += customAccessories.reduce((sum, accessory) => sum + accessory.amountHkd, 0);
   if (lightBoardCount > 0 || backLightCount > 0) accessoryRmb += 30;
 
   const baseProductAmountHkd = money(sizeRmb / RMB_DIVISOR);
@@ -605,6 +655,7 @@ export const calculatePilotItem = (input: PilotItemInput): CalculatedPilotItem =
       : '',
     accessories: accessoriesList,
     accessoryQty: accessories,
+    customAccessories,
     description: String(input.description || ''),
     qty: quantity,
     freight: chinaFreight,

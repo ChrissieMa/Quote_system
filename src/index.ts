@@ -13,6 +13,7 @@ import {
   formatDimensionWithUnit,
   idempotencyPublicToken,
   issueConfirmationId,
+  legacyDiscountMultiplier,
   PILOT_CONFIRMATION_TEXT,
   PILOT_CONFIRMATION_TEXTS,
   resolveAuthoritativeOffer,
@@ -666,6 +667,14 @@ const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = fals
         levels: item?.noOfLevels ? Number(item.noOfLevels) : undefined,
         levelHeights: String(item?.levelHeights || ''),
         accessories: accessoryQty,
+        customAccessories: Array.isArray(item?.customAccessories)
+          ? item.customAccessories
+            .map((entry: any) => ({
+              name: String(entry?.name || '').trim(),
+              amountHkd: Number(entry?.amountHkd || 0),
+            }))
+            .filter((entry: any) => entry.name)
+          : [],
         description: String(item?.description || ''),
         chinaFreight: Number(item?.freight || 0),
         hongKongDelivery: Number(item?.hongKongDelivery ?? item?.deliveryCostReserve ?? item?.localDelivery ?? 0),
@@ -3663,9 +3672,21 @@ const parseAccessories = (raw: unknown): string[] => {
   return [];
 };
 
-const renderAccTags = (raw: unknown): string => {
+type StoredCustomAccessory = { name: string; amountHkd: number };
+
+const storedCustomAccessories = (raw: unknown): StoredCustomAccessory[] => (
+  Array.isArray(raw)
+    ? raw.map((entry: any) => ({
+      name: String(entry?.name || '').trim(),
+      amountHkd: Math.max(0, Number(entry?.amountHkd || 0)),
+    })).filter((entry: StoredCustomAccessory) => entry.name && Number.isFinite(entry.amountHkd))
+    : []
+);
+
+const renderAccTags = (raw: unknown, customRaw: unknown = []): string => {
   const tags = parseAccessories(raw);
-  if (tags.length === 0) return '<span style="color:#9ca3af">-</span>';
+  const customAccessories = storedCustomAccessories(customRaw);
+  if (tags.length === 0 && customAccessories.length === 0) return '<span style="color:#9ca3af">-</span>';
   const hasIntegratedMagnetic = tags.some(tag => String(tag || '').trim().startsWith('一體磁吸結構'));
   const displayTag = (rawTag: string): string => {
     const tag = String(rawTag || '').trim();
@@ -3693,7 +3714,9 @@ const renderAccTags = (raw: unknown): string => {
     if (tag.startsWith('上下燈')) return tag.replace(/^上下燈/, '三圈燈（三圈光／火牛配三腳插）｜上下燈');
     return tag;
   };
-  return `<div class="acc-tags">${tags.map(t => `<span class="acc-tag">${escapeHtml(displayTag(t))}</span>`).join('')}</div>`;
+  const standardTags = tags.map(t => `<span class="acc-tag">${escapeHtml(displayTag(t))}</span>`);
+  const customTags = customAccessories.map(accessory => `<span class="acc-tag">${escapeHtml(accessory.name)}（+HK$${accessory.amountHkd.toFixed(2)}）</span>`);
+  return `<div class="acc-tags">${standardTags.concat(customTags).join('')}</div>`;
 };
 
 type StoredOptionalAddon = { name: string; label: string; amountHkd: number };
@@ -5090,13 +5113,25 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                           </div>
                           <div class="f-structure-summary" style="display:none;margin:0 8px 8px;padding:6px 8px;border-radius:5px;background:#fff7ed;color:#9a3412;font-weight:700;line-height:1.45;"></div>
                         </details>
-                        <details class="f-accessory-group f-bottom-base-section">
-                          <summary>底板</summary>
-                          <div class="f-acc-wrap f-accessory-group-body">
-                            <label><input type="checkbox" class="f-bottom-base-option" value="黑底板"> 黑底板</label>
-                            <label><input type="checkbox" class="f-bottom-base-option" value="透明底板"> 透明底板</label>
+                        <details class="f-accessory-group f-panel-colour-section" style="display:none;">
+                          <summary>頂板／底板</summary>
+                          <div class="f-accessory-group-body">
+                            <div class="f-top-panel-section" style="display:none;">
+                              <div class="f-accessory-subtitle">頂板（一體磁吸結構）</div>
+                              <div class="f-acc-wrap">
+                                <label><input type="checkbox" class="f-top-panel-option" value="黑頂板"> 黑色頂板</label>
+                                <label><input type="checkbox" class="f-top-panel-option" value="透明頂板"> 透明頂板</label>
+                              </div>
+                            </div>
+                            <div class="f-bottom-panel-section">
+                              <div class="f-accessory-subtitle">底板</div>
+                              <div class="f-acc-wrap">
+                                <label><input type="checkbox" class="f-bottom-base-option" value="黑底板"> 黑色底板</label>
+                                <label><input type="checkbox" class="f-bottom-base-option" value="透明底板"> 透明底板</label>
+                              </div>
+                            </div>
                           </div>
-                          <div class="f-integrated-bottom-note" style="display:none;margin:0 8px 8px;color:#6b7280;line-height:1.4;">一體磁吸結構選單燈時，可選黑色底板或透明底板。</div>
+                          <div class="f-panel-colour-note" style="margin:0 8px 8px;color:#6b7280;line-height:1.4;"></div>
                         </details>
                         <details class="f-accessory-group">
                           <summary>燈</summary>
@@ -5171,6 +5206,20 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                           <label>右板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="右板彩色刻字" value="0" style="width:58px;">
                           <label>底板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="底板彩色刻字" value="0" style="width:58px;">
                           <label>頂板彩色刻字</label><input type="number" min="0" class="f-acc-qty" data-name="頂板彩色刻字" value="0" style="width:58px;">
+                          </div>
+                        </details>
+                        <details class="f-accessory-group f-custom-accessory-group">
+                          <summary>自訂配件</summary>
+                          <div class="f-accessory-group-body">
+                            <div class="f-custom-accessories-list">
+                              <div class="f-custom-accessory-row" style="display:grid;grid-template-columns:minmax(150px,1fr) 105px 34px;gap:6px;align-items:center;">
+                                <input type="text" class="f-custom-accessory-name" maxlength="80" placeholder="配件名稱">
+                                <input type="number" class="f-custom-accessory-price" min="0" step="0.01" value="0" placeholder="價錢">
+                                <button type="button" class="btn btn-danger btn-sm" onclick="removeCustomAccessory(this)" aria-label="刪除自訂配件">✕</button>
+                              </div>
+                            </div>
+                            <button type="button" class="btn btn-outline btn-sm" onclick="addCustomAccessory(this)">+ 加多一項</button>
+                            <div style="color:#6b7280;line-height:1.4;">價錢會計入每件產品；不需要加錢請輸入 0。</div>
                           </div>
                         </details>
                         <details class="f-accessory-group f-optional-addons-group">
@@ -5557,6 +5606,56 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         .filter(function(name) { return name && !(included[name] > 0); });
     }
 
+    function getCustomAccessories(row) {
+      return Array.from(row.querySelectorAll('.f-custom-accessory-row')).map(function(entry) {
+        var nameInput = entry.querySelector('.f-custom-accessory-name');
+        var priceInput = entry.querySelector('.f-custom-accessory-price');
+        return {
+          name: String((nameInput && nameInput.value) || '').trim(),
+          amountHkd: Math.max(0, parseNum((priceInput && priceInput.value) || 0))
+        };
+      }).filter(function(entry) { return entry.name; });
+    }
+
+    function bindCustomAccessoryRow(entry) {
+      entry.querySelectorAll('input').forEach(function(input) {
+        input.addEventListener('input', recalcSubtotal);
+      });
+    }
+
+    function addCustomAccessory(button) {
+      var group = button.closest('.f-custom-accessory-group');
+      var list = group && group.querySelector('.f-custom-accessories-list');
+      if (!list || list.querySelectorAll('.f-custom-accessory-row').length >= 10) return;
+      var entry = document.createElement('div');
+      entry.className = 'f-custom-accessory-row';
+      entry.style.cssText = 'display:grid;grid-template-columns:minmax(150px,1fr) 105px 34px;gap:6px;align-items:center;';
+      entry.innerHTML = '<input type="text" class="f-custom-accessory-name" maxlength="80" placeholder="配件名稱">'
+        + '<input type="number" class="f-custom-accessory-price" min="0" step="0.01" value="0" placeholder="價錢">'
+        + '<button type="button" class="btn btn-danger btn-sm" onclick="removeCustomAccessory(this)" aria-label="刪除自訂配件">✕</button>';
+      list.appendChild(entry);
+      bindCustomAccessoryRow(entry);
+      entry.querySelector('.f-custom-accessory-name').focus();
+    }
+
+    function removeCustomAccessory(button) {
+      var group = button.closest('.f-custom-accessory-group');
+      var list = group && group.querySelector('.f-custom-accessories-list');
+      var entries = list ? list.querySelectorAll('.f-custom-accessory-row') : [];
+      if (entries.length <= 1) {
+        var entry = button.closest('.f-custom-accessory-row');
+        if (entry) {
+          var nameInput = entry.querySelector('.f-custom-accessory-name');
+          var priceInput = entry.querySelector('.f-custom-accessory-price');
+          if (nameInput) nameInput.value = '';
+          if (priceInput) priceInput.value = '0';
+        }
+      } else {
+        button.closest('.f-custom-accessory-row').remove();
+      }
+      recalcSubtotal();
+    }
+
     function getAccessories(row) {
       var single = getSingleAccessories(row);
       var qtyMap = getAccessoryQtyMap(row);
@@ -5715,6 +5814,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       row.querySelectorAll('.f-optional-addon').forEach(function(input) {
         input.checked = false;
       });
+      row.querySelectorAll('.f-custom-accessory-name').forEach(function(input) { input.value = ''; });
+      row.querySelectorAll('.f-custom-accessory-price').forEach(function(input) { input.value = '0'; });
       var integratedRgb = row.querySelector('.f-integrated-rgb-select');
       if (integratedRgb) integratedRgb.value = '';
     }
@@ -5722,12 +5823,14 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
     function updateIntegratedMagneticOptions(row) {
       var singles = getSingleAccessories(row);
       var integrated = singles.indexOf('一體磁吸結構') !== -1;
+      var sliding = singles.indexOf('趟門') !== -1;
       var integratedSection = row.querySelector('.f-integrated-rgb-section');
       var integratedSelect = row.querySelector('.f-integrated-rgb-select');
       var standardSection = row.querySelector('.f-standard-light-section');
       var rgbSection = row.querySelector('.f-rgb-light-section');
-      var bottomSection = row.querySelector('.f-bottom-base-section');
-      var bottomNote = row.querySelector('.f-integrated-bottom-note');
+      var panelSection = row.querySelector('.f-panel-colour-section');
+      var topPanelSection = row.querySelector('.f-top-panel-section');
+      var panelNote = row.querySelector('.f-panel-colour-note');
 
       if (integratedSection) integratedSection.style.display = integrated ? 'block' : 'none';
       if (standardSection) standardSection.style.display = integrated ? 'none' : 'block';
@@ -5738,14 +5841,17 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
         integratedSelect.value = '';
       }
 
-      var singleIntegratedLight = integrated && integratedSelect
-        && (integratedSelect.value === '獨立燈板 - 上燈'
-          || integratedSelect.value === '獨立燈板 - 下燈'
-          || integratedSelect.value === '彩燈｜獨立上燈板'
-          || integratedSelect.value === '彩燈｜獨立下燈板');
-      if (bottomSection) bottomSection.style.display = integrated ? (singleIntegratedLight ? 'block' : 'none') : 'block';
-      if (bottomNote) bottomNote.style.display = singleIntegratedLight ? 'block' : 'none';
-      if (integrated && !singleIntegratedLight) {
+      if (panelSection) panelSection.style.display = (integrated || sliding) ? 'block' : 'none';
+      if (topPanelSection) topPanelSection.style.display = integrated ? 'block' : 'none';
+      if (panelNote) {
+        panelNote.textContent = integrated
+          ? '一體磁吸結構可分別選擇頂板及底板顏色。'
+          : (sliding ? '趟門只需選擇底板顏色。' : '');
+      }
+      if (!integrated) {
+        row.querySelectorAll('.f-top-panel-option').forEach(function(input) { input.checked = false; });
+      }
+      if (!integrated && !sliding) {
         row.querySelectorAll('.f-bottom-base-option').forEach(function(input) { input.checked = false; });
       }
     }
@@ -6065,6 +6171,9 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       ['前板彩色刻字','背板彩色刻字','左板彩色刻字','右板彩色刻字','底板彩色刻字','頂板彩色刻字'].forEach(function(name) {
         hkdAddons += (qtyMap[name] || 0) * 120;
       });
+      getCustomAccessories(row).forEach(function(accessory) {
+        hkdAddons += accessory.amountHkd;
+      });
 
       if (lightBoardCount > 0 || backLightCount > 0) {
         accessoryRmb += calcPowerRmb();
@@ -6101,9 +6210,13 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
               if (option !== el) option.checked = false;
             });
           }
-          if (el.classList.contains('f-bottom-base-option') && el.checked
-            && getSingleAccessories(row).indexOf('一體磁吸結構') !== -1) {
+          if (el.classList.contains('f-bottom-base-option') && el.checked) {
             row.querySelectorAll('.f-bottom-base-option').forEach(function(option) {
+              if (option !== el) option.checked = false;
+            });
+          }
+          if (el.classList.contains('f-top-panel-option') && el.checked) {
+            row.querySelectorAll('.f-top-panel-option').forEach(function(option) {
               if (option !== el) option.checked = false;
             });
           }
@@ -6127,6 +6240,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       var tbody = document.getElementById('itemsBody');
       var first = tbody.querySelector('tr');
       var clone = first.cloneNode(true);
+      Array.from(clone.querySelectorAll('.f-custom-accessory-row')).slice(1).forEach(function(entry) { entry.remove(); });
       // Give the detached clone its own radio group before checking its default.
       // Otherwise inserting a checked clone with the original group name can
       // silently clear the first row's dimension-basis selection.
@@ -6142,6 +6256,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
           if (el.classList.contains('f-qty')) {
             el.value = '1';
           } else if (el.classList.contains('f-acc-qty')) {
+            el.value = '0';
+          } else if (el.classList.contains('f-custom-accessory-price')) {
             el.value = '0';
           } else {
             el.value = '';
@@ -6384,6 +6500,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
           levelHeights: (row.querySelector('.f-lh') || {}).value || '',
           accessories: acc,
           accessoryQty: getAccessoryQtyMap(row),
+          customAccessories: getCustomAccessories(row),
           optionalAddonSelections: getOptionalAddonSelections(row),
           description: (row.querySelector('.f-desc') || {}).value || '',
           qty: (row.querySelector('.f-qty') || {}).value || '1',
@@ -6659,6 +6776,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
       levelHeights: String(item.levelHeights || ''),
       accessories: Array.isArray(item.accessories) ? item.accessories.map((a: any) => String(a)) : [],
       accessoryQty: (item.accessoryQty && typeof item.accessoryQty === 'object') ? item.accessoryQty : {},
+      customAccessories: storedCustomAccessories(item.customAccessories),
       description: String(item.description || ''),
       qty: parseInt(String(item.qty)) || 1,
       freight: parseFloat(String(item.freight)) || 0,
@@ -6705,6 +6823,9 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
           item.noOfLevels ? `${item.noOfLevels}層` : '',
           item.levelHeights ? `層高 ${item.levelHeights}` : '',
           item.accessories ? `配件 ${Array.isArray(item.accessories) ? item.accessories.join(', ') : item.accessories}` : '',
+          item.customAccessories?.length
+            ? `自訂配件 ${item.customAccessories.map((entry: StoredCustomAccessory) => `${entry.name} +$${entry.amountHkd.toFixed(2)}`).join(', ')}`
+            : '',
           item.qty ? `QTY ${item.qty}` : '',
           item.freight ? `內地運費 $${item.freight}` : '',
           item.hongKongDelivery ? `香港運費 $${item.hongKongDelivery}` : '',
@@ -6740,7 +6861,13 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     discountValueHkd = Math.round(discountValueHkd * 100) / 100;
 
     const total = Math.max(0, Math.ceil(subtotal - discountValueHkd));
-    const discountRate = subtotal > 0 ? Math.max(0, Math.round((total / subtotal) * 10000) / 10000) : 1;
+    // Airtable's legacy Order formula multiplies Product Amount by this field.
+    // Saving a rounded total/subtotal ratio can push the raw value just above
+    // the intended whole-dollar total (for example 1735.06 -> invoice 1736).
+    // Keep no/fixed-discount records at 1; percentage discounts use the exact
+    // approved multiplier. The authoritative Quote Total remains separately
+    // rounded up to whole HKD.
+    const discountRate = legacyDiscountMultiplier(discountType, discountMultiplier);
 
     const discountDisplayText = String(b.discountDisplayText || (discountValueHkd > 0
       ? (discountType === '百分比折扣' && discountReason && discountMultiplier
@@ -7117,7 +7244,7 @@ app.get(['/quote/:token', '/q/:token'], async (req: Request, res: Response) => {
           </tr>
           <tr class="item-sub-detail">
             <td class="item-sub-spacer"></td>
-            <td class="item-sub-accessories" colspan="${hasLevels ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories)}</td>
+            <td class="item-sub-accessories" colspan="${hasLevels ? 4 : 3}"><div class="mini-label">${L.accessories}</div>${renderAccTags(item.accessories, item.customAccessories)}</td>
             <td class="item-sub-description" colspan="3"><div class="mini-label">${L.description}</div>${escapeHtml(item.description) || '-'}</td>
             <td class="item-sub-qty" style="text-align:center;"><div class="mini-label">${L.qty}</div>${item.qty || 1}</td>
             <td class="item-sub-amount" style="text-align:right;"><div class="mini-label">${L.amount}</div>$${item.amount || 0}</td>
@@ -7644,10 +7771,34 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       } else {
         const orderItemsPayload = items.map((item: any, itemIndex: number) => {
           // Accessories: Airtable Multiple Select requires an array of strings
-          const rawAccArray: string[] = Array.isArray(item.accessories)
-            ? item.accessories.filter(Boolean)
-            : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []);
-          const accArray: string[] = Array.from(new Set(rawAccArray.map(accessoryOrderItemName).filter(Boolean)));
+          // from the existing approved option list. New top-panel colours and
+          // free-text custom accessories stay in the authoritative Quote JSON
+          // and are copied into the Order Item description, rather than trying
+          // to create Airtable select options during conversion.
+          const rawAccArray: string[] = item.accessoryQty && typeof item.accessoryQty === 'object'
+            ? Object.keys(item.accessoryQty).filter(name => Number(item.accessoryQty[name]) > 0)
+            : (Array.isArray(item.accessories)
+              ? item.accessories.filter(Boolean)
+              : (item.accessories ? String(item.accessories).split(',').map((s: string) => s.trim()).filter(Boolean) : []));
+          const nonSelectAccessoryNames = new Set(['黑頂板', '透明頂板']);
+          const topPanelSelections = rawAccArray
+            .map(accessoryOrderItemName)
+            .filter(name => nonSelectAccessoryNames.has(name));
+          const accArray: string[] = Array.from(new Set(
+            rawAccArray
+              .map(accessoryOrderItemName)
+              .filter(name => name && !nonSelectAccessoryNames.has(name)),
+          ));
+          const customAccessories = storedCustomAccessories(item.customAccessories);
+          const operationalDetails = [
+            topPanelSelections.length ? `頂板：${topPanelSelections.join('、')}` : '',
+            customAccessories.length
+              ? `自訂配件：${customAccessories.map(accessory => `${accessory.name}（HK$${accessory.amountHkd.toFixed(2)}）`).join('、')}`
+              : '',
+          ].filter(Boolean);
+          const orderItemDescription = [String(item.description || '').trim(), ...operationalDetails]
+            .filter(Boolean)
+            .join('｜');
 
           const safeStr = (v: any) => (v != null && v !== '') ? String(v) : '';
           const dimensionBasis = storedDimensionBasis(item.dimensionBasis);
@@ -7657,9 +7808,9 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
             'Month': itemMonthSelect,
             'Order': [orderRecordId],
             // Item Type and For What already have their own Airtable fields.
-            // Description must remain the customer's Quote Description only so
-            // production notes and Package Detail do not repeat product data.
-            'Description': safeStr(item.description),
+            // Keep the customer description, then append only operational
+            // details that cannot safely be written as new Airtable options.
+            'Description': orderItemDescription,
             'QTY': item.qty || 1,
             'Product Amount': item.amount || 0,
             'Quoted China Freight HKD': Number(item.freight) || 0,
@@ -7821,7 +7972,7 @@ app.get(['/invoice/:token', '/i/:token'], async (req: Request, res: Response) =>
             <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerL)) || '-'}</td>
             <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerD)) || '-'}</td>
             <td style="text-align:center;">${escapeHtml(formatDimensionWithUnit(item.outerH)) || '-'}</td>
-            <td>${renderAccTags(item.accessories)}</td>
+            <td>${renderAccTags(item.accessories, item.customAccessories)}</td>
             <td>${escapeHtml(item.description) || '-'}</td>
             <td style="text-align:center;">${item.qty || 1}</td>
             <td style="text-align:right;">$${item.amount || 0}</td>

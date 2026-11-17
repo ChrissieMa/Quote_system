@@ -283,7 +283,10 @@ test('一體磁吸及彩燈使用 3D renderer 已驗證的 canonical mapping', (
   // Quote quantity remains commercial data. A single product image needs one
   // visual mode regardless of whether the customer orders one or two units.
   assert.equal(item.accessoryQty['彩燈｜獨立上燈板'], 2);
-  assert.equal(quotationImageDisclaimer(item, false, true), '');
+  assert.equal(
+    quotationImageDisclaimer(item, false, true),
+    '圖片只供參考，實際製作以本文件所列尺寸為準。',
+  );
 
   const displayLabelOnly = buildQuotationRenderRequestFromQuoteItem({
     ...storedQuoteItem(),
@@ -347,6 +350,23 @@ test('四款彩燈均可建立 Quote 圖片 request，舊三圈燈 mapping 不�
     'light_board_both_standard',
     'light_top_outer_ring', 'light_top_middle_ring', 'light_top_inner_ring',
     'light_bottom_outer_ring', 'light_bottom_middle_ring', 'light_bottom_inner_ring',
+  ]);
+});
+
+test('一體磁吸頂板顏色保留於 Quote，但 3D 未支援前安全忽略', () => {
+  const request = buildQuotationRenderRequestFromQuoteItem({
+    ...storedQuoteItem(),
+    accessories: ['一體磁吸結構', '黑頂板', '透明底板'],
+    accessoryQty: {
+      '一體磁吸結構': 1,
+      '黑頂板': 1,
+      '透明底板': 1,
+    },
+  });
+  assert.ok(request);
+  assert.deepEqual(request.accessories, [
+    { accessory_type: 'door_magnetic', quantity: 1 },
+    { accessory_type: 'bottom_base_clear', quantity: 1 },
   ]);
 });
 
@@ -490,14 +510,17 @@ test('back-panel artwork and clear-plus-black base use an accurate render-only s
   );
   assert.equal(
     quotationImageDisclaimer(item, false, true),
-    '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。',
+    '圖片只供參考，實際製作以本文件所列尺寸為準。 背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。',
   );
   assert.equal(
     quotationImageDisclaimer(item, true, true),
-    'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.',
+    'Image is for reference only. Actual production follows the dimensions stated in this document. Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.',
   );
   assert.equal(quotationImageDisclaimer(item, false, false), '');
-  assert.equal(quotationImageDisclaimer(storedQuoteItem(), false, true), '');
+  assert.equal(
+    quotationImageDisclaimer(storedQuoteItem(), false, true),
+    '圖片只供參考，實際製作以本文件所列尺寸為準。',
+  );
 });
 
 test('Quote item type mapping matches 3D applicator canonical fixtures and rejects unsupported types', () => {

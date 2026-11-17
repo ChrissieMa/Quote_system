@@ -542,7 +542,7 @@ const storedAccessories = (item: QuoteItemWithQuotationImage): RenderRequestV1['
   // cannot reproduce it without the approved asset provider. Omit only this
   // exact provider-dependent visual from the render request; do not weaken
   // the unknown-accessory or quantity checks below.
-  const renderOnlyOmissions = new Set(['背板圖片']);
+  const renderOnlyOmissions = new Set(['背板圖片', '黑頂板', '透明頂板']);
   if (stored.some(entry => !QUOTE_TO_3D_ACCESSORIES[entry.name] && !renderOnlyOmissions.has(entry.name))) {
     return null;
   }
@@ -573,13 +573,16 @@ export const quotationImageDisclaimer = (
 ): string => {
   if (!hasPresentation) return '';
   const stored = parseStoredAccessories(item);
-  if (!stored) return '';
+  const referenceOnly = isEnglish
+    ? 'Image is for reference only. Actual production follows the dimensions stated in this document.'
+    : '圖片只供參考，實際製作以本文件所列尺寸為準。';
+  if (!stored) return referenceOnly;
   const hasBackPanelArtwork = stored.some(entry => entry.name === '背板圖片' && entry.quantity === 1);
-  if (!hasBackPanelArtwork) return '';
+  if (!hasBackPanelArtwork) return referenceOnly;
   if (isEnglish) {
-    return 'Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.';
+    return `${referenceOnly} Back-panel artwork follows the final approved design; the 3D image shows only accessories that can be reproduced accurately.`;
   }
-  return '背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。';
+  return `${referenceOnly} 背板圖片按最終設計稿為準；3D圖只顯示可準確重現配件。`;
 };
 
 const storedCabinetLayers = (item: QuoteItemWithQuotationImage): RenderRequestV1['cabinet_layers'] => {

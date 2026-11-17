@@ -12,6 +12,7 @@ import {
   formatDimensionWithUnit,
   idempotencyPublicToken,
   issueConfirmationId,
+  legacyDiscountMultiplier,
   PILOT_CONFIRMATION_TEXT,
   RGB_LIGHT_WARNING,
   resolveAuthoritativeOffer,
@@ -61,6 +62,13 @@ test('v4.6 pricing preview calculates outer dimensions, costs and final total', 
   assert.equal(preview.subtotal, preview.items[0].amount);
   assert.equal(preview.discountValueHkd, 100);
   assert.equal(preview.finalTotal, Math.ceil(preview.subtotal - 100));
+});
+
+test('legacy Airtable Discount never derives a rounded total/subtotal ratio', () => {
+  assert.equal(legacyDiscountMultiplier('無折扣', null), 1);
+  assert.equal(legacyDiscountMultiplier('指定金額扣減', null), 1);
+  assert.equal(legacyDiscountMultiplier('百分比折扣', 0.9), 0.9);
+  assert.throws(() => legacyDiscountMultiplier('百分比折扣', 1.2), /between 0 and 1/);
 });
 
 test('dimension display removes trailing zeroes but preserves real decimals', () => {
@@ -207,7 +215,7 @@ test('可加購背景、鏡面及刻字按實際板位計單價，但不加入�
 
 test('Create Quote用箭嘴分類配件，並只收集已剔選的可加購板位', () => {
   const source = readFileSync(__dirname + '/index.ts', 'utf8');
-  for (const category of ['門款／結構', '底板', '燈', '背景', '鏡面', '刻字', '可加購配件（只顯示價錢）']) {
+  for (const category of ['門款／結構', '頂板／底板', '燈', '背景', '鏡面', '刻字', '自訂配件', '可加購配件（只顯示價錢）']) {
     assert.match(source, new RegExp(`<summary>${category.replace(/[（）]/g, '\\$&')}<\\/summary>`));
   }
   assert.match(source, /class="f-optional-addon" value="背板圖片"/);
@@ -260,7 +268,7 @@ test('一體磁吸結構尺寸按無燈、單燈、上下燈及背燈組合計�
   }
 });
 
-test('一體磁吸顯示三圈燈和彩燈各三款，並容許單燈選一款底板', () => {
+test('一體磁吸顯示三圈燈和彩燈各三款，並可分別選擇頂板及底板', () => {
   const top = displayBoxItem({
     '一體磁吸結構': 1,
     '彩燈｜獨立上燈板': 1,
@@ -295,6 +303,54 @@ test('一體磁吸顯示三圈燈和彩燈各三款，並容許單燈選一款�
     '黑底板': 1,
     '透明底板': 1,
   }), /底板只可選擇黑色或透明其中一款/);
+
+  const panels = displayBoxItem({
+    '一體磁吸結構': 1,
+    '黑頂板': 1,
+    '透明底板': 1,
+  });
+  assert.ok(panels.accessories.includes('黑頂板'));
+  assert.ok(panels.accessories.includes('透明底板'));
+  assert.throws(() => displayBoxItem({
+    '一體磁吸結構': 1,
+    '黑頂板': 1,
+    '透明頂板': 1,
+  }), /頂板只可選擇黑色或透明其中一款/);
+  assert.throws(() => displayBoxItem({
+    '趟門': 1,
+    '黑頂板': 1,
+  }), /只有一體磁吸結構可以選擇頂板顏色/);
+  assert.ok(displayBoxItem({ '趟門': 1, '黑底板': 1 }).accessories.includes('黑底板'));
+});
+
+test('自訂配件保留 HKD 0，正數按每件產品計入總價', () => {
+  const base = calculatePilotItem({
+    itemType: 'Display box 展示盒',
+    innerDimensions: { length: 27, depth: 27, height: 36 },
+    quantity: 3,
+    accessories: { '趟門': 1 },
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  const item = calculatePilotItem({
+    itemType: 'Display box 展示盒',
+    innerDimensions: { length: 27, depth: 27, height: 36 },
+    quantity: 3,
+    accessories: { '趟門': 1 },
+    customAccessories: [
+      { name: '特別出線位', amountHkd: 0 },
+      { name: '額外固定件', amountHkd: 50 },
+    ],
+    chinaFreight: 0,
+    hongKongDelivery: 0,
+    profit: 0,
+  });
+  assert.deepEqual(item.customAccessories, [
+    { name: '特別出線位', amountHkd: 0 },
+    { name: '額外固定件', amountHkd: 50 },
+  ]);
+  assert.equal(Math.round((item.amount - base.amount) * 100) / 100, 150);
 });
 
 test('彩燈客人加價按 accessory quantity，不按米數', () => {
@@ -344,7 +400,11 @@ test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () 
   assert.match(source, /<option value="彩燈｜獨立上燈板">彩燈｜上燈<\/option>/);
   assert.match(source, /<option value="彩燈｜獨立下燈板">彩燈｜下燈<\/option>/);
   assert.match(source, /一體磁吸結構沒有獨立燈板/);
-  assert.match(source, /一體磁吸結構選單燈時，可選黑色底板或透明底板/);
+  assert.match(source, /一體磁吸結構可分別選擇頂板及底板顏色/);
+  assert.match(source, /趟門只需選擇底板顏色/);
+  assert.match(source, /value="黑頂板"/);
+  assert.match(source, /value="透明頂板"/);
+  assert.match(source, /價錢會計入每件產品；不需要加錢請輸入 0/);
   assert.match(source, /購買任何展示盒或展示櫃，附送趟門或一體磁吸結構/);
 });
 
