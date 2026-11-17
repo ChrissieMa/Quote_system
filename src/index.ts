@@ -3699,11 +3699,14 @@ const renderAccTags = (raw: unknown, customRaw: unknown = []): string => {
     if (hasIntegratedMagnetic && tag.startsWith('三圈上下燈')) {
       return tag.replace(/^三圈上下燈/, '三圈燈（三圈光／火牛配三腳插）｜上下燈');
     }
-    if (hasIntegratedMagnetic && tag.startsWith('彩燈｜獨立上燈板')) {
-      return tag.replace(/^彩燈｜獨立上燈板/, '彩燈（多色／USB）｜上燈');
+    if (tag.startsWith('彩燈｜獨立上燈板')) {
+      return tag.replace(/^彩燈｜獨立上燈板/, '彩燈（多色／USB）｜上燈板');
     }
-    if (hasIntegratedMagnetic && tag.startsWith('彩燈｜獨立下燈板')) {
-      return tag.replace(/^彩燈｜獨立下燈板/, '彩燈（多色／USB）｜下燈');
+    if (tag.startsWith('彩燈｜獨立下燈板')) {
+      return tag.replace(/^彩燈｜獨立下燈板/, '彩燈（多色／USB）｜下燈板');
+    }
+    if (tag.startsWith('彩燈｜獨立上下燈板')) {
+      return tag.replace(/^彩燈｜獨立上下燈板/, '彩燈（多色／USB）｜上下燈');
     }
     if (tag.startsWith('彩燈｜')) return tag.replace(/^彩燈｜/, '彩燈（多色／USB）｜');
     if (tag.startsWith('三圈燈｜')) return tag.replace(/^三圈燈｜/, '三圈燈（三圈光／火牛配三腳插）｜');
@@ -5148,9 +5151,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                             <div class="f-rgb-light-section">
                               <div class="f-accessory-subtitle" style="color:#7c3aed;">彩燈（多色／USB）</div>
                               <div class="f-acc-qty-wrap f-accessory-grid">
-                                <label>彩燈｜獨立上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上燈板" value="0">
-                                <label>彩燈｜獨立下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立下燈板" value="0">
-                                <label>彩燈｜獨立上下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上下燈板" value="0">
+                                <label>彩燈｜上燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立上燈板" value="0">
+                                <label>彩燈｜下燈板</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜獨立下燈板" value="0">
                                 <label>彩燈｜上下燈</label><input type="number" min="0" class="f-acc-qty f-regular-light-input" data-name="彩燈｜上下燈" value="0">
                               </div>
                             </div>
@@ -5161,8 +5163,8 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
                                 <option value="獨立燈板 - 上燈">三圈燈｜上燈</option>
                                 <option value="獨立燈板 - 下燈">三圈燈｜下燈</option>
                                 <option value="上下燈">三圈燈｜上下燈</option>
-                                <option value="彩燈｜獨立上燈板">彩燈｜上燈</option>
-                                <option value="彩燈｜獨立下燈板">彩燈｜下燈</option>
+                                <option value="彩燈｜獨立上燈板">彩燈｜上燈板</option>
+                                <option value="彩燈｜獨立下燈板">彩燈｜下燈板</option>
                                 <option value="彩燈｜上下燈">彩燈｜上下燈</option>
                               </select>
                               <div style="margin-top:5px;color:#6b7280;line-height:1.4;">一體磁吸結構沒有獨立燈板。</div>

@@ -231,6 +231,9 @@ test('舊三圈燈保留 internal keys 並只改客人顯示名稱', () => {
     '獨立燈板 - 下燈': '三圈燈｜獨立下燈板',
     '獨立燈板 - 上下燈': '三圈燈｜獨立上下燈板',
     '上下燈': '三圈上下燈',
+    '彩燈｜獨立上燈板': '彩燈｜上燈板',
+    '彩燈｜獨立下燈板': '彩燈｜下燈板',
+    '彩燈｜獨立上下燈板': '彩燈｜上下燈',
   });
   const item = displayBoxItem({ '獨立燈板 - 上燈': 1 });
   assert.deepEqual(item.accessoryQty, { '獨立燈板 - 上燈': 1 });
@@ -274,7 +277,7 @@ test('一體磁吸顯示三圈燈和彩燈各三款，並可分別選擇頂板�
     '彩燈｜獨立上燈板': 1,
     '黑底板': 1,
   });
-  assert.ok(top.accessories.includes('彩燈｜上燈 x1'));
+  assert.ok(top.accessories.includes('彩燈｜上燈板 x1'));
   assert.ok(top.accessories.includes('黑底板'));
   assert.equal(accessoryOrderItemName('彩燈｜上燈 x1'), '彩燈｜獨立上燈板');
 
@@ -393,12 +396,16 @@ test('Create Quote 畫面顯示新命名並保留舊三圈燈 internal key', () 
   assert.match(source, /三圈燈（三圈光／火牛配三腳插）/);
   assert.match(source, /彩燈（多色／USB）/);
   assert.match(source, /三圈燈｜獨立上燈板<\/label><input[^>]+data-name="獨立燈板 - 上燈"/);
-  assert.match(source, /data-name="彩燈｜獨立上下燈板"/);
+  assert.match(source, /<label>彩燈｜上燈板<\/label><input[^>]+data-name="彩燈｜獨立上燈板"/);
+  assert.match(source, /<label>彩燈｜下燈板<\/label><input[^>]+data-name="彩燈｜獨立下燈板"/);
+  assert.match(source, /<label>彩燈｜上下燈<\/label><input[^>]+data-name="彩燈｜上下燈"/);
+  assert.doesNotMatch(source, /<label>彩燈｜獨立(?:上|下|上下)燈板<\/label>/);
+  assert.doesNotMatch(source, /data-name="彩燈｜獨立上下燈板"/);
   assert.match(source, /<option value="獨立燈板 - 上燈">三圈燈｜上燈<\/option>/);
   assert.match(source, /<option value="獨立燈板 - 下燈">三圈燈｜下燈<\/option>/);
   assert.match(source, /<option value="上下燈">三圈燈｜上下燈<\/option>/);
-  assert.match(source, /<option value="彩燈｜獨立上燈板">彩燈｜上燈<\/option>/);
-  assert.match(source, /<option value="彩燈｜獨立下燈板">彩燈｜下燈<\/option>/);
+  assert.match(source, /<option value="彩燈｜獨立上燈板">彩燈｜上燈板<\/option>/);
+  assert.match(source, /<option value="彩燈｜獨立下燈板">彩燈｜下燈板<\/option>/);
   assert.match(source, /一體磁吸結構沒有獨立燈板/);
   assert.match(source, /一體磁吸結構可分別選擇頂板及底板顏色/);
   assert.match(source, /趟門只需選擇底板顏色/);

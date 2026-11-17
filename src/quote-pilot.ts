@@ -64,6 +64,11 @@ export const ACCESSORY_DISPLAY_LABELS: Readonly<Record<string, string>> = Object
   '獨立燈板 - 下燈': '三圈燈｜獨立下燈板',
   '獨立燈板 - 上下燈': '三圈燈｜獨立上下燈板',
   '上下燈': '三圈上下燈',
+  // Keep the established storage keys for Airtable and old Quotes, while new
+  // customer-facing Quotes use the three approved colour-light names.
+  '彩燈｜獨立上燈板': '彩燈｜上燈板',
+  '彩燈｜獨立下燈板': '彩燈｜下燈板',
+  '彩燈｜獨立上下燈板': '彩燈｜上下燈',
 });
 
 const ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freeze({
@@ -72,6 +77,8 @@ const ACCESSORY_STORAGE_ALIASES: Readonly<Record<string, string>> = Object.freez
   '三圈燈｜上下燈': '上下燈',
   '彩燈｜上燈': '彩燈｜獨立上燈板',
   '彩燈｜下燈': '彩燈｜獨立下燈板',
+  '彩燈｜上燈板': '彩燈｜獨立上燈板',
+  '彩燈｜下燈板': '彩燈｜獨立下燈板',
   '彩燈｜上下燈': '彩燈｜上下燈',
 });
 
@@ -79,8 +86,9 @@ const INTEGRATED_MAGNETIC_LIGHT_LABELS: Readonly<Record<string, string>> = Objec
   '獨立燈板 - 上燈': '三圈燈｜上燈',
   '獨立燈板 - 下燈': '三圈燈｜下燈',
   '上下燈': '三圈燈｜上下燈',
-  '彩燈｜獨立上燈板': '彩燈｜上燈',
-  '彩燈｜獨立下燈板': '彩燈｜下燈',
+  '彩燈｜獨立上燈板': '彩燈｜上燈板',
+  '彩燈｜獨立下燈板': '彩燈｜下燈板',
+  '彩燈｜獨立上下燈板': '彩燈｜上下燈',
   '彩燈｜上下燈': '彩燈｜上下燈',
 });
 
