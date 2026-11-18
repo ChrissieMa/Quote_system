@@ -3853,7 +3853,7 @@ const getTableSelectOptions = async (tableName: string, fieldName: string, fallb
 const rememberManualCampaignOption = async (
   campaignName: string,
   channel: string,
-  quoteNumber: string,
+  sourceReference: string,
 ): Promise<void> => {
   const normalizedName = campaignName.trim();
   if (!normalizedName) return;
@@ -3869,9 +3869,26 @@ const rememberManualCampaignOption = async (
       'Campaign Name': normalizedName,
       'Channel': channel,
       'Status': 'Active',
-      'Notes': `Auto-saved from Create Quote ${quoteNumber}`,
+      'Notes': `Auto-saved from ${sourceReference}`,
     },
   }]);
+};
+
+type SavedCampaignOption = { name: string; channel: string };
+
+const getActiveCampaignOptions = async (): Promise<SavedCampaignOption[]> => {
+  const records = await tableCampaigns.select({
+    fields: ['Campaign Name', 'Channel', 'Status'],
+    sort: [{ field: 'Campaign Name', direction: 'asc' }],
+    maxRecords: 200,
+  }).all();
+  return records
+    .filter(record => !['inactive', 'paused', 'ended', 'archive', 'archived'].includes(String(record.fields['Status'] || '').trim().toLowerCase()))
+    .map(record => ({
+      name: String(record.fields['Campaign Name'] || '').trim(),
+      channel: String(record.fields['Channel'] || '').trim(),
+    }))
+    .filter(option => Boolean(option.name));
 };
 
 const mapQuoteChannelToInquiryChannel = (channel: string): string =>
@@ -3894,11 +3911,15 @@ const renderQuickInquiryForm = (
   errorMessage = '',
   channelOptions: string[] = [],
   productOptions: string[] = [],
+  campaignOptions: SavedCampaignOption[] = [],
 ): string => {
   const optionTags = (options: string[], selected: string) => options.map(option =>
     `<option value="${escapeHtml(option)}"${option === selected ? ' selected' : ''}>${escapeHtml(option)}</option>`
   ).join('');
   const displayedChannels = Array.from(new Set([...channelOptions, 'Threads Organic']));
+  const campaignOptionTags = campaignOptions.map(option =>
+    `<option value="${escapeHtml(option.name)}" label="${escapeHtml(option.channel)}"></option>`
+  ).join('');
   const hasBlockingMatch = matches.some(match => match.blocksNewInquiry === true);
   return `
     <div class="doc-card">
@@ -3918,7 +3939,7 @@ const renderQuickInquiryForm = (
           </div>
           <div class="form-row form-row-2">
             <div class="form-group"><label>想問產品（選填）</label><select name="productInterest"><option value="">未決定</option>${optionTags(productOptions, values.productInterest || '')}</select></div>
-            <div class="form-group"><label>Campaign / Source Detail（選填）</label><input name="campaignSourceDetail" value="${escapeHtml(values.campaignSourceDetail || '')}" placeholder="例如 MAY2604 客人片／某個廣告"></div>
+            <div class="form-group"><label>Campaign / Source Detail（選填）</label><input name="campaignSourceDetail" list="quickInquiryCampaignOptions" value="${escapeHtml(values.campaignSourceDetail || '')}" placeholder="可直接揀舊來源，或輸入新名稱"><datalist id="quickInquiryCampaignOptions">${campaignOptionTags}</datalist></div>
           </div>
           <div class="form-group"><label>簡短備註（選填）</label><textarea name="notes" rows="3" placeholder="例如：問 Hot Toys 展示盒，未提供尺寸">${escapeHtml(values.notes || '')}</textarea></div>
           ${hasBlockingMatch ? `<label style="display:flex;align-items:flex-start;gap:8px;margin:4px 0 16px;"><input type="checkbox" name="forceNew" value="1" style="margin-top:4px;"><span>今次係另一件新產品，確認仍然建立一筆新查詢</span></label>` : ''}
@@ -4381,9 +4402,10 @@ app.get('/api/inquiries/check-phone', requireAdmin, async (req: Request, res: Re
 });
 
 app.get('/inquiry/create', requireAdmin, async (_req: Request, res: Response) => {
-  const [channels, products] = await Promise.all([
+  const [channels, products, campaigns] = await Promise.all([
     getTableSelectOptions('Inquiries', 'Channel', ['Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic', 'Carousell', 'KOL / ToyTV', 'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other']),
     getTableSelectOptions('Inquiries', 'Product Interest', ['Display Box', 'Display Case', 'Ready Stock', 'Reissue', 'Other']),
+    getActiveCampaignOptions().catch(() => []),
   ]);
   const extraHead = `<script>
     document.addEventListener('DOMContentLoaded', function() {
@@ -4419,7 +4441,7 @@ app.get('/inquiry/create', requireAdmin, async (_req: Request, res: Response) =>
       input.addEventListener('blur', checkPhone);
     });
   </script>`;
-  res.send(renderPage('Quick Inquiry', renderQuickInquiryForm({}, [], '', channels, products), extraHead));
+  res.send(renderPage('Quick Inquiry', renderQuickInquiryForm({}, [], '', channels, products, campaigns), extraHead));
 });
 
 app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request, res: Response) => {
@@ -4431,18 +4453,19 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
     campaignSourceDetail: String(req.body.campaignSourceDetail || '').trim(),
     notes: String(req.body.notes || '').trim(),
   };
-  const [channels, products] = await Promise.all([
+  const [channels, products, campaigns] = await Promise.all([
     getTableSelectOptions('Inquiries', 'Channel', ['Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic', 'Carousell', 'KOL / ToyTV', 'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other']),
     getTableSelectOptions('Inquiries', 'Product Interest', ['Display Box', 'Display Case', 'Ready Stock', 'Reissue', 'Other']),
+    getActiveCampaignOptions().catch(() => []),
   ]);
 
   try {
     const normalizedPhone = normalizePhone(values.phone);
     if (normalizedPhone.length < 7 || normalizedPhone.length > 15) {
-      return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請輸入正確電話號碼。', channels, products)));
+      return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請輸入正確電話號碼。', channels, products, campaigns)));
     }
     if (!values.channel) {
-      return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請選擇查詢來源。', channels, products)));
+      return res.status(400).send(renderPage('Quick Inquiry', renderQuickInquiryForm(values, [], '請選擇查詢來源。', channels, products, campaigns)));
     }
 
     const [matches, activeInquiry] = await Promise.all([
@@ -4455,7 +4478,7 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
     }));
     const blockingMatches = cycleAwareMatches.filter(match => match.blocksNewInquiry);
     if (blockingMatches.length > 0 && String(req.body.forceNew || '') !== '1') {
-      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, cycleAwareMatches, '', channels, products)));
+      return res.status(409).send(renderPage('Duplicate Inquiry', renderQuickInquiryForm(values, cycleAwareMatches, '', channels, products, campaigns)));
     }
 
     const existingCustomer = await findCustomerByPhone(values.phone);
@@ -4484,6 +4507,20 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
       inquiryNo = String(refreshed.fields['Inquiry No'] || '');
     } catch { /* The record is already saved; formula refresh is optional. */ }
 
+    if (values.campaignSourceDetail) {
+      try {
+        await rememberManualCampaignOption(
+          values.campaignSourceDetail,
+          airtableChannel,
+          `Quick Inquiry ${inquiryNo || inquiryId}`,
+        );
+      } catch (campaignError) {
+        // The Inquiry is already safely created. Remembering a reusable option
+        // is a convenience and must never duplicate or block the Inquiry.
+        console.error('Unable to remember Quick Inquiry Campaign / Source Detail:', campaignError);
+      }
+    }
+
     const customerMessage = existingCustomer
       ? `<div class="alert alert-info">已認出舊客並連接 Customer：${escapeHtml(String(existingCustomer.fields['Customer ID'] || existingCustomer.fields['Customer Name'] || existingCustomer.id))}</div>`
       : '';
@@ -4496,7 +4533,7 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
       </div></div>`));
   } catch (error: any) {
     console.error('Quick Inquiry create failed:', error);
-    return res.status(500).send(renderPage('Quick Inquiry Error', renderQuickInquiryForm(values, [], `儲存失敗：${error.message || 'Unknown error'}`, channels, products)));
+    return res.status(500).send(renderPage('Quick Inquiry Error', renderQuickInquiryForm(values, [], `儲存失敗：${error.message || 'Unknown error'}`, channels, products, campaigns)));
   }
 });
 
@@ -4888,8 +4925,12 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       const f = record.fields;
       const label = String(f['Inquiry Ref'] || f['Inquiry No'] || f['Customer Name'] || f['Phone'] || record.id);
       const channel = f['Channel'] ? ` · ${String(f['Channel'])}` : '';
+      const relatedQuoteNumbers = Array.isArray(f['Related Quote Numbers'])
+        ? f['Related Quote Numbers'].map(value => String(value).trim()).filter(Boolean)
+        : [];
+      const quoteHistory = relatedQuoteNumbers.length ? ` · 已有 Quote: ${relatedQuoteNumbers.join('、')}` : '';
       const linkedMonthId = getLinkedRecordId(f['Monthly Performance']) || '';
-      return `<option value="${record.id}"${record.id === selectedInquiryRecordId ? ' selected' : ''} data-name="${escapeHtml(String(f['Customer Name'] || ''))}" data-phone="${escapeHtml(String(f['Phone'] || ''))}" data-channel="${escapeHtml(String(f['Channel'] || ''))}" data-campaign="${escapeHtml(String(f['Campaign / Source Detail'] || ''))}" data-month="${escapeHtml(linkedMonthId)}">${escapeHtml(label + channel)}</option>`;
+      return `<option value="${record.id}"${record.id === selectedInquiryRecordId ? ' selected' : ''} data-name="${escapeHtml(String(f['Customer Name'] || ''))}" data-phone="${escapeHtml(String(f['Phone'] || ''))}" data-channel="${escapeHtml(String(f['Channel'] || ''))}" data-campaign="${escapeHtml(String(f['Campaign / Source Detail'] || ''))}" data-month="${escapeHtml(linkedMonthId)}">${escapeHtml(label + channel + quoteHistory)}</option>`;
     }).join('');
   } catch (error) {
     console.warn('Unable to load Inquiries for Create Quote:', error);
@@ -7031,7 +7072,6 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
     if (
       campaignSourceDetailWasManual
       && campaignSourceDetail
-      && !String(canonicalInquiryFields['Campaign / Source Detail'] || '').trim()
     ) {
       try {
         await rememberManualCampaignOption(campaignSourceDetail, quoteSourceChannel, quoteNumber);

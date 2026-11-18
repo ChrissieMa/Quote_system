@@ -222,6 +222,33 @@ test('new Quote persistence links a purchase-cycle Inquiry on the first write', 
   assert.ok(!route.includes("tableQuotes.update([{\n          id: createdQuoteRecordId,\n          fields: { 'Inquiry'"), 'linkage must not depend on a second Quote write');
 });
 
+test('Create Quote makes an Inquiry multi-Quote history visible before selection', () => {
+  const start = source.indexOf("app.get('/quote/create', requireAdmin,");
+  const end = source.indexOf("app.post('/quote/create'", start);
+  assert.ok(start >= 0 && end > start, 'Create Quote route must exist');
+  const route = source.slice(start, end);
+  assert.ok(route.includes("f['Related Quote Numbers']"));
+  assert.ok(route.includes("已有 Quote: ${relatedQuoteNumbers.join('、')}"));
+  assert.ok(route.includes('label + channel + quoteHistory'));
+});
+
+test('custom Campaign source details become reusable from Quick Inquiry and Create Quote', () => {
+  assert.ok(source.includes('list="quickInquiryCampaignOptions"'));
+  assert.ok(source.includes('getActiveCampaignOptions().catch(() => [])'));
+  const quickInquiryStart = source.indexOf("app.post('/inquiry/create', requireAdmin, requireSameOrigin,");
+  const quoteCreateStart = source.indexOf("app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin,");
+  assert.ok(quickInquiryStart >= 0 && quoteCreateStart > quickInquiryStart);
+  const quickInquiryRoute = source.slice(quickInquiryStart, quoteCreateStart);
+  assert.ok(quickInquiryRoute.includes('await rememberManualCampaignOption('));
+  assert.ok(quickInquiryRoute.includes('values.campaignSourceDetail'));
+
+  const quoteCreateEnd = source.indexOf('const publicLink =', quoteCreateStart);
+  const quoteCreateRoute = source.slice(quoteCreateStart, quoteCreateEnd);
+  assert.ok(quoteCreateRoute.includes('campaignSourceDetailWasManual'));
+  assert.ok(quoteCreateRoute.includes('await rememberManualCampaignOption(campaignSourceDetail, quoteSourceChannel, quoteNumber)'));
+  assert.ok(!quoteCreateRoute.includes("&& !String(canonicalInquiryFields['Campaign / Source Detail'] || '').trim()"));
+});
+
 test('server-wide privacy headers, HTML noindex, crawlable robots, and dead sitemaps are present', () => {
   for (const value of [
     "X-Robots-Tag', 'noindex, nofollow, noarchive, nosnippet",
