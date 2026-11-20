@@ -184,6 +184,25 @@ test('short customer paths are native aliases and long paths remain backward com
   assert.ok(source.includes('`${PUBLIC_BASE_URL}${publicCustomerInfoPath(publicToken)}`'));
 });
 
+test('customer information form requires one validated acquisition source with clear labels', () => {
+  const getStart = source.indexOf("app.get(['/quote/:token/customer-info', '/q/:token/info']");
+  const postStart = source.indexOf("app.post(['/quote/:token/customer-info', '/q/:token/info']");
+  assert.ok(getStart >= 0 && postStart > getStart, 'customer information routes must exist');
+  const formRoute = source.slice(getStart, postStart);
+  assert.ok(formRoute.includes('name="howDidYouKnowUs" required'));
+  assert.ok(formRoute.includes('CUSTOMER_SOURCE_VALUES.map'));
+  assert.ok(formRoute.includes("'如何認識我們？*'"));
+  assert.ok(!formRoute.includes('如何認識我們？（選填）'));
+
+  const postEnd = source.indexOf('// ═══════════════════════════════════════════════════════════════════════════', postStart + 20);
+  const submitRoute = source.slice(postStart, postEnd);
+  const validation = submitRoute.indexOf('normalizeCustomerSource(howDidYouKnowUs)');
+  const quoteWrite = submitRoute.indexOf('await tableQuotes.update');
+  assert.ok(validation >= 0 && quoteWrite > validation, 'source validation must happen before the Quote write');
+  assert.ok(submitRoute.includes("'How Did You Know Us': normalizedHowDidYouKnowUs"));
+  assert.ok(submitRoute.includes("'How did you know us?': howKnowUsValue"));
+});
+
 test('Quote creation maps bilingual item labels to the locked Inquiry select options', () => {
   assert.ok(source.includes("'Product Interest': mapQuoteItemTypeToInquiryProductInterest(firstItem.itemType)"));
   assert.ok(!source.includes("'Product Interest': firstItem.itemType"));

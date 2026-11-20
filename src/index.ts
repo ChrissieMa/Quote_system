@@ -55,6 +55,11 @@ import {
 } from './production-mutation';
 import { installAirtableReadRetry, withAirtableReadRetry } from './airtable-retry';
 import {
+  CUSTOMER_SOURCE_VALUES,
+  customerSourceLabel,
+  normalizeCustomerSource,
+} from './customer-source';
+import {
   ADMIN_SESSION_COOKIE,
   LoginRateLimiter,
   adminSessionCookie,
@@ -7425,7 +7430,7 @@ app.get(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request, 
       yourInfo: isEnglish ? 'Your Information' : '您的資料',
       fullName: isEnglish ? 'Full Name *' : '姓名 *',
       chineseAddress: isEnglish ? 'Delivery Address *' : '中文送貨地址 *',
-      howKnowOptional: isEnglish ? 'How did you know us? (Optional)' : '如何認識我們？（選填）',
+      howKnowRequired: isEnglish ? 'How did you hear about us? *' : '如何認識我們？*',
       select: isEnglish ? '-- Select --' : '-- 請選擇 --',
       privacy: isEnglish ? 'The personal information you provide will only be used for order follow-up, delivery arrangement and customer contact. All information will be kept confidential and will not be disclosed to third parties or used for other unauthorized purposes.' : '閣下所提供的個人資料僅作訂單跟進、送貨安排及客戶聯絡之用途，所有資料將予以保密，並不會向第三方公開或作其他未經授權之用途。',
       submit: isEnglish ? 'Submit & Confirm Order' : '提交並確認訂單',
@@ -7447,7 +7452,8 @@ app.get(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request, 
       const custEmail = escapeHtml((quote['Customer Email'] as string) || 'N/A');
       const custAddr = escapeHtml((quote['Chinese Delivery Address'] as string) || 'N/A');
       const payMethod = escapeHtml((quote['Payment Method'] as string) || 'N/A');
-      const howKnow = escapeHtml((quote['How Did You Know Us'] as string) || 'N/A');
+      const storedHowKnow = String(quote['How Did You Know Us'] || '');
+      const howKnow = escapeHtml(customerSourceLabel(storedHowKnow, isEnglish) || storedHowKnow || 'N/A');
 
       const content = `
         <div class="doc-card">
@@ -7476,6 +7482,9 @@ app.get(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request, 
     const prefillPhone = escapeHtml((quote['Customer Phone'] as string) || (quote['Phone'] as string) || '');
     const prefillEmail = escapeHtml((quote['Customer Email'] as string) || '');
     const prefillAddr = escapeHtml((quote['Chinese Delivery Address'] as string) || '');
+    const howKnowOptions = CUSTOMER_SOURCE_VALUES.map(value =>
+      `<option value="${escapeHtml(value)}">${escapeHtml(customerSourceLabel(value, isEnglish))}</option>`
+    ).join('');
 
     const content = `
       <div class="doc-card">
@@ -7516,13 +7525,10 @@ app.get(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request, 
                 <textarea name="chineseDeliveryAddress" rows="3" required>${prefillAddr}</textarea>
               </div>
               <div class="form-group">
-                <label>${C.howKnowOptional}</label>
-                <select name="howDidYouKnowUs">
+                <label>${C.howKnowRequired}</label>
+                <select name="howDidYouKnowUs" required>
                   <option value="">${C.select}</option>
-                  <option value="朋友介紹">朋友介紹</option>
-                  <option value="Facebook">Facebook</option>
-                  <option value="IG">IG</option>
-                  <option value="網站搜尋 Google">網站搜尋 Google</option>
+                  ${howKnowOptions}
                 </select>
               </div>
             </div>
@@ -7562,6 +7568,14 @@ app.post(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request,
       return res.status(400).send(renderPage('Error', '<div class="alert alert-danger">This quote has already been converted.</div>'));
     }
 
+    const normalizedHowDidYouKnowUs = normalizeCustomerSource(howDidYouKnowUs);
+    if (!normalizedHowDidYouKnowUs) {
+      const message = isEnglish
+        ? 'Please select how you heard about us.'
+        : '請選擇「如何認識我們？」。';
+      return res.status(400).send(renderPage('Error', `<div class="alert alert-danger">${message}</div>`));
+    }
+
     // Save customer info back to Quote
     await tableQuotes.update([{
       id: record.id,
@@ -7570,20 +7584,14 @@ app.post(['/quote/:token/customer-info', '/q/:token/info'], async (req: Request,
         'Customer Phone': customerPhone,
         'Customer Email': customerEmail,
         'Chinese Delivery Address': chineseDeliveryAddress,
-        'How Did You Know Us': howDidYouKnowUs || '',
+        'How Did You Know Us': normalizedHowDidYouKnowUs,
         'Customer Submitted At': new Date().toISOString(),
         'Status': 'Ready to Convert',
       } as FieldSet
     }]);
 
     // Map howDidYouKnowUs to valid singleSelect options for Customers table
-    const howKnowUsMapping: Record<string, string> = {
-      '朋友介紹': '朋友介紹',
-      'Facebook': 'Facebook',
-      'IG': 'IG',
-      '網站搜尋 Google': '網站搜尋 Google',
-    };
-    const howKnowUsValue = howKnowUsMapping[howDidYouKnowUs] || undefined;
+    const howKnowUsValue = normalizedHowDidYouKnowUs;
 
     // Upsert customer master. If the Quote is already linked to a Customer,
     // update that exact Customer first. Otherwise use normalized phone matching.
