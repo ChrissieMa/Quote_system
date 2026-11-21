@@ -25,7 +25,16 @@ Status: `release_candidate` development core only
 - Defined an adapter boundary that must provide durable compare-and-set and atomic or verified forward-completion behavior.
 - Documented the Supplier outbox/mapping changes and all remaining production approvals.
 
-No HTTP route, Airtable adapter, credential, schema, Railway setting, Supplier code, Production record or deployment was added.
+The original development-core statement above is superseded by the 2026-11-22 implementation update below.
+
+## 2026-11-22 implementation update
+
+- Added disabled-by-default signed HTTP routes for exact Order Item mapping and batch receipt.
+- Added a Production-shaped Airtable adapter with durable receipt phases, verified forward completion and lost-create recovery.
+- Added current/next signing-key support without storing a credential in source.
+- Added the non-PII Production Airtable receipt table and four China Shipment source-evidence fields after explicit Owner approval; no business record was created or changed.
+- Full Quote validation: 257 tests passed, TypeScript build passed.
+- Public Quote deployment and runtime credential/feature enablement are still pending; GitHub code is not Production evidence.
 
 ## Validation
 

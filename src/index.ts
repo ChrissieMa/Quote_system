@@ -55,6 +55,9 @@ import {
 } from './production-mutation';
 import { installAirtableReadRetry, withAirtableReadRetry } from './airtable-retry';
 import { buildChinaShipmentWritePlan, type ChinaShipmentInputItem } from './china-shipment-input';
+import { verifySupplierShippingRequest } from './supplier-shipping-auth';
+import { AirtableSupplierShippingAdapter } from './supplier-shipping-airtable';
+import { SupplierShippingContractError, SupplierShippingReceiver } from './supplier-shipping-receiver';
 import {
   CUSTOMER_SOURCE_VALUES,
   customerSourceLabel,
@@ -428,6 +431,7 @@ const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE ||
 const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS || 'Order_2026');
 const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS || 'Order Items');
 const tableChinaShipments = base(process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS || 'China Shipments');
+const tableSupplierSyncReceipts = base(process.env.AIRTABLE_TABLE_SUPPLIER_SYNC_RECEIPTS || 'Supplier Sync Receipts');
 const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES || 'Quotes');
 const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
 const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
@@ -599,6 +603,29 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
   const supplied = auth.startsWith('Bearer ') ? auth.slice(7).trim() : '';
   if (!supplied || !safeEqual(supplied, apiKey)) return res.status(401).json({ error: 'Unauthorized.' });
   return next();
+};
+
+const supplierShippingEnabled = (): boolean => process.env.SUPPLIER_SHIPPING_ENABLED === '1';
+
+const verifySupplierShippingApiRequest = (req: Request): { ok: boolean; code: string } => {
+  const keyId = String(req.headers['x-lks-key-id'] || '').trim();
+  const timestamp = String(req.headers['x-lks-timestamp'] || '').trim();
+  const signature = String(req.headers['x-lks-signature'] || '').trim();
+  const currentKeyId = String(process.env.SUPPLIER_SHIPPING_KEY_ID || '').trim();
+  const nextKeyId = String(process.env.SUPPLIER_SHIPPING_NEXT_KEY_ID || '').trim();
+  const secret = keyId && keyId === currentKeyId
+    ? String(process.env.SUPPLIER_SHIPPING_SIGNING_SECRET || '').trim()
+    : keyId && keyId === nextKeyId
+      ? String(process.env.SUPPLIER_SHIPPING_NEXT_SIGNING_SECRET || '').trim()
+      : '';
+  if (!keyId || !secret) return { ok: false, code: 'not_configured_or_unknown_key' };
+  return verifySupplierShippingRequest(secret, {
+    method: req.method,
+    path: req.path,
+    timestamp,
+    body: req.body,
+    signature,
+  });
 };
 
 const buildAuthoritativeQuoteBody = (rawBody: any, preserveTrustedItemIds = false): any => {
@@ -9615,6 +9642,102 @@ app.get('/admin/costs', requireAdmin, async (req: Request, res: Response) => {
   } catch (error: any) {
     console.error('Unable to render supplier cost page:', error);
     res.status(500).send(renderPage('Error', `<div class="alert alert-danger">${escapeHtml(error.message)}</div>`));
+  }
+});
+
+const syncSupplierShippingFinance = async (orderItemIds: string[]): Promise<void> => {
+  const orderIds = new Set<string>();
+  for (const itemId of orderItemIds) {
+    const item = await tableOrderItems.find(itemId);
+    for (const orderId of Array.isArray(item.fields['Order']) ? item.fields['Order'] as string[] : []) {
+      orderIds.add(orderId);
+    }
+  }
+  const months = new Set<string>();
+  for (const orderId of orderIds) {
+    const order = await tableOrders.find(orderId);
+    const month = getOrderFinanceMonth(order.fields['Internal 1 Order No'] || order.fields['Internal Order No']);
+    if (month) months.add(month);
+  }
+  for (const month of months) await syncMonthlyFinance(month);
+};
+
+const supplierShippingAdapter = new AirtableSupplierShippingAdapter({
+  orderItems: tableOrderItems as any,
+  chinaShipments: tableChinaShipments as any,
+  receipts: tableSupplierSyncReceipts as any,
+}, syncSupplierShippingFinance);
+const supplierShippingReceiver = new SupplierShippingReceiver(supplierShippingAdapter);
+
+const requireSupplierShippingSignature = (req: Request, res: Response): boolean => {
+  if (!supplierShippingEnabled()) {
+    res.status(503).json({ status: 'disabled', code: 'supplier_shipping_not_enabled' });
+    return false;
+  }
+  const verification = verifySupplierShippingApiRequest(req);
+  if (!verification.ok) {
+    const status = verification.code === 'not_configured_or_unknown_key' || verification.code === 'not_configured'
+      ? 503
+      : 401;
+    res.status(status).json({ status: 'rejected', code: verification.code });
+    return false;
+  }
+  return true;
+};
+
+app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (req: Request, res: Response) => {
+  if (!requireSupplierShippingSignature(req, res)) return;
+  try {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)
+      || Object.keys(req.body).some(key => key !== 'items')
+      || !Array.isArray(req.body.items) || req.body.items.length < 1 || req.body.items.length > 20) {
+      return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
+    }
+    const seenSourceIds = new Set<string>();
+    const mappings = [];
+    for (const raw of req.body.items) {
+      if (!raw || typeof raw !== 'object' || Array.isArray(raw)
+        || Object.keys(raw).some(key => !['sourceItemId', 'itemNo'].includes(key))) {
+        return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
+      }
+      const sourceItemId = String(raw.sourceItemId || '').trim();
+      const itemNo = String(raw.itemNo || '').trim();
+      if (!/^[A-Za-z0-9_-]{8,80}$/.test(sourceItemId) || !itemNo || itemNo.length > 80 || /\p{Cc}/u.test(itemNo)
+        || seenSourceIds.has(sourceItemId)) {
+        return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
+      }
+      seenSourceIds.add(sourceItemId);
+      const records = await tableOrderItems.select({
+        filterByFormula: `EXACT({Item No}, '${safeFormulaLiteral(itemNo)}')`,
+        maxRecords: 2,
+      }).firstPage();
+      mappings.push(records.length === 1
+        ? { sourceItemId, status: 'matched', orderItemRecordId: records[0].id }
+        : { sourceItemId, status: records.length === 0 ? 'missing' : 'ambiguous' });
+    }
+    res.json({ status: mappings.every(mapping => mapping.status === 'matched') ? 'matched' : 'review_required', mappings });
+  } catch {
+    res.status(503).json({ status: 'retryable_failure', code: 'mapping_lookup_failed' });
+  }
+});
+
+app.post('/api/integrations/supplier-shipping/v1/batches', async (req: Request, res: Response) => {
+  if (!requireSupplierShippingSignature(req, res)) return;
+  try {
+    const result = await supplierShippingReceiver.receive(req.body);
+    const status = result.status === 'committed'
+      ? 201
+      : result.status === 'already_committed'
+        ? 200
+        : result.status === 'retryable_failure'
+          ? 503
+          : 409;
+    res.status(status).json(result);
+  } catch (error) {
+    if (error instanceof SupplierShippingContractError) {
+      return res.status(400).json({ status: 'rejected', code: error.code });
+    }
+    res.status(503).json({ status: 'retryable_failure', code: 'supplier_shipping_unavailable' });
   }
 });
 

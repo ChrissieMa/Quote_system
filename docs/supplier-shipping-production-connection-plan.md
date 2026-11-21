@@ -42,6 +42,8 @@ Add these non-PII fields to `China Shipments`:
 
 `Source Batch ID` must be unique in application validation. The connector also checks Shipment No. uniqueness. Airtable itself has no enforceable unique constraint, so the application re-reads and verifies before acknowledging success.
 
+Implementation note (2026-11-22): the receipt stores `Attempts JSON`, `Recovery State`, `Last Failure Code`, `Updated At` and `Committed At`; attempt count is derived from the attempt array. The approved non-PII Production schema now exists. Receiver deployment and credential activation remain separate runtime steps.
+
 ## Exact write sequence
 
 1. Authenticate the Supplier request and reject stale or replayed signatures outside the approved window.

@@ -65,6 +65,7 @@ export type SupplierShippingTarget = {
   orderItemRecordId: string;
   status: 'matched' | 'missing' | 'ambiguous';
   linkedChinaShipmentIds: string[];
+  linkedChinaShipmentSourceBatchIds?: Array<string | null>;
 };
 
 export type SupplierShippingAttempt = {
@@ -131,10 +132,13 @@ export const supplierBatchToChinaShipmentInput = (
       if (!target || target.status !== 'matched') {
         throw new SupplierShippingContractError('unmapped_order_item', 'Order Item mapping is incomplete.');
       }
+      const sameBatchRecovery = target.linkedChinaShipmentIds.length > 0
+        && target.linkedChinaShipmentSourceBatchIds?.length === target.linkedChinaShipmentIds.length
+        && target.linkedChinaShipmentSourceBatchIds.every(sourceBatchId => sourceBatchId === input.batch.sourceBatchId);
       return {
         orderItemRecordId: item.orderItemRecordId,
         itemLabel: item.orderItemRecordId,
-        linkedChinaShipmentIds: [...target.linkedChinaShipmentIds],
+        linkedChinaShipmentIds: sameBatchRecovery ? [] : [...target.linkedChinaShipmentIds],
         pieceWeightsKg: [...item.pieceWeightsKg],
       };
     }),
@@ -155,19 +159,19 @@ export class SupplierShippingRetryableError extends Error {
   }
 }
 
-const stableStringify = (value: unknown): string => {
-  if (Array.isArray(value)) return `[${value.map(stableStringify).join(',')}]`;
+export const stableSupplierShippingJson = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(stableSupplierShippingJson).join(',')}]`;
   if (value && typeof value === 'object') {
     return `{${Object.entries(value as JsonObject)
       .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, item]) => `${JSON.stringify(key)}:${stableStringify(item)}`)
+      .map(([key, item]) => `${JSON.stringify(key)}:${stableSupplierShippingJson(item)}`)
       .join(',')}}`;
   }
   return JSON.stringify(value);
 };
 
-const sha256 = (value: unknown): string =>
-  crypto.createHash('sha256').update(stableStringify(value)).digest('hex');
+export const supplierShippingJsonSha256 = (value: unknown): string =>
+  crypto.createHash('sha256').update(stableSupplierShippingJson(value)).digest('hex');
 
 const fail = (code: string, message: string): never => {
   throw new SupplierShippingContractError(code, message);
@@ -396,7 +400,7 @@ export const validateSupplierShippingBatch = (raw: unknown): ValidatedSupplierSh
   };
   return {
     batch,
-    payloadSha256: sha256(batch),
+    payloadSha256: supplierShippingJsonSha256(batch),
     totalPieceCount,
     totalItemWeightKg: fixedUnits(totalWeightUnits, 3),
     allocationItems,
@@ -470,7 +474,9 @@ export class SupplierShippingReceiver {
 
       if (input.batch.shipment.shipmentNo) {
         const existingShipment = await this.adapter.findShipmentByNumber(input.batch.shipment.shipmentNo);
-        if (existingShipment) return outcome('rejected', 'shipment_no_already_exists', input, false);
+        if (existingShipment && existingShipment.sourceBatchId !== input.batch.sourceBatchId) {
+          return outcome('rejected', 'shipment_no_already_exists', input, false);
+        }
       }
 
       const targets = await this.adapter.resolveTargets(input.batch.items);
@@ -497,7 +503,10 @@ export class SupplierShippingReceiver {
       if (targets.some(target => target.status === 'ambiguous')) {
         return outcome('rejected', 'ambiguous_order_item', input, false);
       }
-      if (targets.some(target => target.linkedChinaShipmentIds.length > 0)) {
+      if (targets.some(target => target.linkedChinaShipmentIds.length > 0 && !(
+        target.linkedChinaShipmentSourceBatchIds?.length === target.linkedChinaShipmentIds.length
+        && target.linkedChinaShipmentSourceBatchIds.every(sourceBatchId => sourceBatchId === input.batch.sourceBatchId)
+      ))) {
         return outcome('rejected', 'order_item_already_shipped', input, false);
       }
 

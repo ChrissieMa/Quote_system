@@ -73,6 +73,22 @@ test('service APIs remain bearer-protected and confirmed', () => {
   }
 });
 
+test('Supplier shipping routes require the dedicated signed request and disabled-by-default gate', () => {
+  const start = source.indexOf("app.post('/api/integrations/supplier-shipping/v1/order-item-mappings'");
+  const end = source.indexOf("app.post('/admin/china-shipments'", start);
+  assert.ok(start >= 0 && end > start, 'Supplier shipping routes must exist before the owner route');
+  const routes = source.slice(start, end);
+  assert.equal((routes.match(/requireSupplierShippingSignature\(req, res\)/g) || []).length, 2);
+  assert.ok(source.includes("process.env.SUPPLIER_SHIPPING_ENABLED === '1'"));
+  assert.ok(source.includes('verifySupplierShippingRequest(secret'));
+  for (const header of ["'x-lks-key-id'", "'x-lks-timestamp'", "'x-lks-signature'"]) {
+    assert.ok(source.includes(header), `missing signed Supplier header ${header}`);
+  }
+  for (const forbidden of ['customerName', 'phone', 'email', 'address', 'Quote Token']) {
+    assert.ok(!routes.includes(forbidden), `Supplier routes must not accept ${forbidden}`);
+  }
+});
+
 test('driver settlement route cannot write P&L or Business Expenses', () => {
   const start = source.indexOf("app.post('/admin/china-shipments/:shipmentId/driver-payments'");
   const end = source.indexOf("app.get('/admin/costs'", start);
