@@ -54,6 +54,7 @@ import {
   type ProductionMutationRecord,
 } from './production-mutation';
 import { installAirtableReadRetry, withAirtableReadRetry } from './airtable-retry';
+import { buildChinaShipmentWritePlan, type ChinaShipmentInputItem } from './china-shipment-input';
 import {
   CUSTOMER_SOURCE_VALUES,
   customerSourceLabel,
@@ -9627,18 +9628,6 @@ app.post('/admin/china-shipments', requireAdmin, requireSameOrigin, async (req: 
     const shipmentDate = String(req.body.shipment_date || '').trim();
     if (!/^\d{4}-\d{2}-\d{2}$/.test(shipmentDate)) throw new Error('請輸入正確 Shipment Date。');
 
-    const sfFreightRmb = Number(req.body.sf_freight_rmb);
-    if (!Number.isFinite(sfFreightRmb) || sfFreightRmb <= 0) throw new Error('整批 SF Freight RMB 必須大過 0。');
-    const optionalNonNegativeNumber = (raw: unknown, label: string): number | null => {
-      const text = String(raw ?? '').trim();
-      if (!text) return null;
-      const value = Number(text);
-      if (!Number.isFinite(value) || value < 0) throw new Error(`${label} 必須係 0 或以上。`);
-      return value;
-    };
-    const sfActualWeight = optionalNonNegativeNumber(req.body.sf_actual_weight_kg, 'SF Actual Weight KG');
-    const sfChargeableWeight = optionalNonNegativeNumber(req.body.sf_chargeable_weight_kg, 'SF Chargeable Weight KG');
-
     const selectedItemIds = Object.keys(req.body || {})
       .filter(key => key.startsWith('shipment_item_') && String(req.body[key] || '') === '1')
       .map(key => key.slice('shipment_item_'.length))
@@ -9652,10 +9641,8 @@ app.post('/admin/china-shipments', requireAdmin, requireSameOrigin, async (req: 
     ]);
     const orderItemsById = new Map(allOrderItems.map(record => [record.id, record]));
     const ordersById = new Map(allOrders.map(record => [record.id, record]));
-    const itemUpdates: Array<{ id: string; fields: FieldSet }> = [];
+    const shipmentItems: ChinaShipmentInputItem[] = [];
     const affectedMonths = new Set<string>();
-    let totalItemWeight = 0;
-    let totalPieceCount = 0;
 
     for (const itemId of selectedItemIds) {
       const itemRecord = orderItemsById.get(itemId);
@@ -9671,24 +9658,15 @@ app.post('/admin/china-shipments', requireAdmin, requireSameOrigin, async (req: 
       if (!Number.isInteger(pieceCount) || pieceCount <= 0 || pieceCount > 100) {
         throw new Error(`請輸入 ${itemLabel} 正確嘅貨物件數（1–100）。`);
       }
-      const pieceWeights: number[] = [];
+      const pieceWeights: string[] = [];
       for (let pieceIndex = 1; pieceIndex <= pieceCount; pieceIndex += 1) {
-        const pieceWeight = Number(req.body[`shipment_piece_weight_${itemId}_${pieceIndex}`]);
-        if (!Number.isFinite(pieceWeight) || pieceWeight <= 0) {
-          throw new Error(`請輸入 ${itemLabel} 第 ${pieceIndex} 件貨嘅實際重量。`);
-        }
-        pieceWeights.push(pieceWeight);
+        pieceWeights.push(String(req.body[`shipment_piece_weight_${itemId}_${pieceIndex}`] ?? ''));
       }
-      const weight = pieceWeights.reduce((sum, pieceWeight) => sum + pieceWeight, 0);
-      totalItemWeight += weight;
-      totalPieceCount += pieceCount;
-      itemUpdates.push({
-        id: itemId,
-        fields: {
-          'China Freight Piece Count': pieceCount,
-          'China Freight Piece Weights KG': pieceWeights.join('\n'),
-          'China Freight Weight Input KG': Number(weight.toFixed(3)),
-        },
+      shipmentItems.push({
+        orderItemRecordId: itemId,
+        itemLabel,
+        linkedChinaShipmentIds: linkedShipments,
+        pieceWeightsKg: pieceWeights,
       });
 
       const linkedOrders = Array.isArray(itemRecord.fields['Order']) ? itemRecord.fields['Order'] as string[] : [];
@@ -9700,10 +9678,15 @@ app.post('/admin/china-shipments', requireAdmin, requireSameOrigin, async (req: 
       }
     }
 
-    let shipmentNo = String(req.body.shipment_no || '').trim();
-    if (!shipmentNo) {
-      shipmentNo = `SF-${shipmentDate.replace(/-/g, '')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`;
-    }
+    const plan = buildChinaShipmentWritePlan({
+      shipmentNo: String(req.body.shipment_no || '').trim() || null,
+      shipmentDate,
+      sfFreightRmb: req.body.sf_freight_rmb,
+      sfActualWeightKg: String(req.body.sf_actual_weight_kg ?? '').trim() || null,
+      sfChargeableWeightKg: String(req.body.sf_chargeable_weight_kg ?? '').trim() || null,
+      items: shipmentItems,
+    }, date => `SF-${date.replace(/-/g, '')}-${crypto.randomBytes(2).toString('hex').toUpperCase()}`);
+    const shipmentNo = plan.shipmentNo;
     const escapedShipmentNo = shipmentNo.replace(/'/g, "\\'");
     const duplicate = await tableChinaShipments.select({
       filterByFormula: `{Shipment No.} = '${escapedShipmentNo}'`,
@@ -9711,29 +9694,25 @@ app.post('/admin/china-shipments', requireAdmin, requireSameOrigin, async (req: 
     }).firstPage();
     if (duplicate.length > 0) throw new Error(`Shipment No. ${shipmentNo} 已存在，請輸入另一個單號。`);
 
+    const itemUpdates = plan.itemUpdates.map(update => ({
+      id: update.id,
+      fields: update.fields as unknown as FieldSet,
+    }));
     for (let index = 0; index < itemUpdates.length; index += 10) {
       await tableOrderItems.update(itemUpdates.slice(index, index + 10));
     }
 
-    const shipmentFields: FieldSet = {
-      'Shipment No.': shipmentNo,
-      'Shipment Date': shipmentDate,
-      'Order Items': selectedItemIds,
-      'SF Freight RMB': sfFreightRmb,
-    };
-    if (sfActualWeight !== null) shipmentFields['SF Actual Weight KG'] = sfActualWeight;
-    if (sfChargeableWeight !== null) shipmentFields['SF Chargeable Weight KG'] = sfChargeableWeight;
-    await tableChinaShipments.create([{ fields: shipmentFields }]);
+    await tableChinaShipments.create([{ fields: plan.shipmentFields as unknown as FieldSet }]);
 
     for (const month of affectedMonths) await syncMonthlyFinance(month);
     const params = new URLSearchParams({
       month: selectedMonth,
       chinaSaved: '1',
       shipmentNo,
-      itemCount: String(selectedItemIds.length),
-      pieceCount: String(totalPieceCount),
-      totalWeight: totalItemWeight.toFixed(2),
-      freight: sfFreightRmb.toFixed(2),
+      itemCount: String(plan.itemCount),
+      pieceCount: String(plan.pieceCount),
+      totalWeight: plan.totalWeightKg.toFixed(2),
+      freight: Number(plan.shipmentFields['SF Freight RMB']).toFixed(2),
     });
     res.redirect(`/admin/costs?${params.toString()}`);
   } catch (error: any) {

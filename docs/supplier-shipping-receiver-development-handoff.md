@@ -11,6 +11,10 @@ Status: `release_candidate` development core only
 - Rebased development scope on Quote `origin/master` `52a0783dd8fec773b8f845ade124def74440905e`.
 - Read Supplier Portal `.30` shipping handoff and verified that its deployed functional source is `ebc8459784fb2d5d08ddeb082161eb2263cb4e8e`; the newer Supplier `main` commits only add rollout evidence.
 - Added the HTTP-independent `lks.supplier-shipping.v1` receiver core.
+- Extracted the existing owner cost-page China Shipment input into one shared write-plan function.
+- Changed the owner cost page to use that shared function without changing its Airtable fields or allocation authority.
+- Converted validated Supplier payloads into the same shared input shape instead of defining a second freight workflow.
+- Added a direct equivalence test: the same synthetic batch entered through the owner page shape and Supplier shape produces an identical Airtable write plan.
 - Added strict allowlist validation with no customer PII, selling prices, Quote Tokens or images.
 - Required an exact Airtable Order Item record ID per Supplier item; order-number guessing is impossible in the contract.
 - Added exact payload hashing, revision chains, duplicate SF-number checks, exact replay handling and committed-batch correction stop.
@@ -23,9 +27,9 @@ No HTTP route, Airtable adapter, credential, schema, Railway setting, Supplier c
 
 ## Validation
 
-- Receiver-specific tests: 12 passed.
-- Full Quote suite: 246 passed, 0 failed.
-- TypeScript build: passed.
+- Receiver-specific tests: 13 passed.
+- Full Quote suite: 247 passed, 0 failed.
+- TypeScript build: passed after the shared-flow correction.
 - Diff whitespace check: passed.
 
 The tests use synthetic Airtable record IDs and an in-memory transactional adapter. They cover:
@@ -41,10 +45,11 @@ The tests use synthetic Airtable record IDs and an in-memory transactional adapt
 - exact decimal precision and immutable correction history;
 - SF actual/chargeable values not affecting allocation inputs;
 - no Delivery light Package double-counting.
+- Supplier and existing owner-page inputs generating identical Order Item and China Shipment writes.
 
 ## Production blocker
 
-The current Airtable sequence is multi-record and is not transactional. A Production adapter cannot honestly promise atomicity without a durable receipt/staging design and a committed-only formula boundary. This requires a separate Airtable schema/formula proposal and Owner approval before implementation.
+The existing Airtable sequence remains multi-record and is not transactional. The shared function guarantees that Supplier and owner-page input use the same fields and calculations, but a Production adapter still cannot honestly promise crash-safe exactly-once completion without durable receipt/recovery evidence. The Production design and any schema/formula change require separate Owner approval.
 
 ## Next approval package
 

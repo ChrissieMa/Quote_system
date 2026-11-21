@@ -1,4 +1,5 @@
 import crypto from 'crypto';
+import type { ChinaShipmentInput } from './china-shipment-input';
 
 export const SUPPLIER_SHIPPING_CONTRACT = 'lks.supplier-shipping.v1' as const;
 
@@ -104,8 +105,41 @@ export interface SupplierShippingAdapter {
     code: string,
     recordedAt: string,
   ): Promise<SupplierShippingReceipt>;
-  commitAtomically(input: ValidatedSupplierShippingBatch, recordedAt: string): Promise<SupplierShippingReceipt>;
+  commitAtomically(
+    input: ValidatedSupplierShippingBatch,
+    targets: SupplierShippingTarget[],
+    recordedAt: string,
+  ): Promise<SupplierShippingReceipt>;
 }
+
+export const supplierBatchToChinaShipmentInput = (
+  input: ValidatedSupplierShippingBatch,
+  targets: SupplierShippingTarget[],
+): ChinaShipmentInput => {
+  const targetsByKey = new Map(targets.map(target => [
+    `${target.sourceItemId}:${target.orderItemRecordId}`,
+    target,
+  ]));
+  return {
+    shipmentNo: input.batch.shipment.shipmentNo,
+    shipmentDate: input.batch.shipment.shipmentDate,
+    sfFreightRmb: input.batch.shipment.sfFreightRmb,
+    sfActualWeightKg: input.batch.shipment.sfActualWeightKg,
+    sfChargeableWeightKg: input.batch.shipment.sfChargeableWeightKg,
+    items: input.allocationItems.map(item => {
+      const target = targetsByKey.get(`${item.sourceItemId}:${item.orderItemRecordId}`);
+      if (!target || target.status !== 'matched') {
+        throw new SupplierShippingContractError('unmapped_order_item', 'Order Item mapping is incomplete.');
+      }
+      return {
+        orderItemRecordId: item.orderItemRecordId,
+        itemLabel: item.orderItemRecordId,
+        linkedChinaShipmentIds: [...target.linkedChinaShipmentIds],
+        pieceWeightsKg: [...item.pieceWeightsKg],
+      };
+    }),
+  };
+};
 
 export class SupplierShippingContractError extends Error {
   constructor(public readonly code: string, message: string) {
@@ -468,7 +502,7 @@ export class SupplierShippingReceiver {
       }
 
       try {
-        const receipt = await this.adapter.commitAtomically(input, this.clock());
+        const receipt = await this.adapter.commitAtomically(input, targets, this.clock());
         return outcome('committed', 'committed', input, false, receipt.shipmentRecordId);
       } catch (error) {
         if (error instanceof SupplierShippingContractError) {

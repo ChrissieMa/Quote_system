@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import crypto from 'crypto';
 import test from 'node:test';
+import { buildChinaShipmentWritePlan, type ChinaShipmentWritePlan } from './china-shipment-input';
 import {
   SupplierShippingContractError,
   SupplierShippingReceiver,
@@ -12,6 +13,7 @@ import {
   type SupplierShippingReceipt,
   type SupplierShippingTarget,
   type ValidatedSupplierShippingBatch,
+  supplierBatchToChinaShipmentInput,
   validateSupplierShippingBatch,
 } from './supplier-shipping-receiver';
 
@@ -68,6 +70,7 @@ class MemoryAdapter implements SupplierShippingAdapter {
   readonly receipts = new Map<string, SupplierShippingReceipt>();
   readonly shipmentRecords = new Map<string, ValidatedSupplierShippingBatch>();
   readonly itemWrites = new Map<string, { pieceCount: number; weights: string[]; total: string }>();
+  lastWritePlan: ChinaShipmentWritePlan | null = null;
   commitCount = 0;
   failNextCommit = false;
   private queue: Promise<void> = Promise.resolve();
@@ -127,7 +130,11 @@ class MemoryAdapter implements SupplierShippingAdapter {
     return structuredClone(receipt);
   }
 
-  async commitAtomically(input: ValidatedSupplierShippingBatch, recordedAt: string) {
+  async commitAtomically(
+    input: ValidatedSupplierShippingBatch,
+    targets: SupplierShippingTarget[],
+    recordedAt: string,
+  ) {
     return this.serial(async () => {
       const previous = this.receipts.get(input.batch.sourceBatchId);
       if (previous?.state === 'committed') {
@@ -142,11 +149,15 @@ class MemoryAdapter implements SupplierShippingAdapter {
         if (input.batch.shipment.shipmentNo && await this.findShipmentByNumber(input.batch.shipment.shipmentNo)) {
           throw new SupplierShippingContractError('shipment_no_already_exists', 'Synthetic duplicate shipment number.');
         }
-        for (const item of input.allocationItems) {
-          this.itemWrites.set(item.orderItemRecordId, {
-            pieceCount: item.pieceCount,
-            weights: [...item.pieceWeightsKg],
-            total: item.totalWeightKg,
+        const plan = buildChinaShipmentWritePlan(
+          supplierBatchToChinaShipmentInput(input, targets),
+          date => `SF-${date.replace(/-/g, '')}-SYNTHETIC`,
+        );
+        for (const update of plan.itemUpdates) {
+          this.itemWrites.set(update.id, {
+            pieceCount: update.fields['China Freight Piece Count'],
+            weights: update.fields['China Freight Piece Weights KG'].split('\n'),
+            total: String(update.fields['China Freight Weight Input KG']),
           });
         }
         if (this.failNextCommit) {
@@ -155,6 +166,7 @@ class MemoryAdapter implements SupplierShippingAdapter {
         }
         const shipmentRecordId = `recShipment${String(this.commitCount + 1).padStart(8, '0')}`;
         this.shipmentRecords.set(shipmentRecordId, structuredClone(input));
+        this.lastWritePlan = structuredClone(plan);
         this.commitCount += 1;
         const receipt: SupplierShippingReceipt = {
           sourceBatchId: input.batch.sourceBatchId,
@@ -227,6 +239,61 @@ test('validates exact record IDs, preserves original precision and derives alloc
   assert.equal(result.batch.shipment.sfActualWeightKg, '99.500');
   assert.equal(result.batch.shipment.sfChargeableWeightKg, '100.000');
   assert.equal(result.batch.items[1].parcelChanges[0].beforeWeightKg, '2.100');
+});
+
+test('Supplier input and the existing owner cost-page input produce the identical Airtable write plan', () => {
+  const validated = validateSupplierShippingBatch(fixture());
+  const targets: SupplierShippingTarget[] = validated.batch.items.map(item => ({
+    sourceItemId: item.sourceItemId,
+    orderItemRecordId: item.orderItemRecordId,
+    status: 'matched',
+    linkedChinaShipmentIds: [],
+  }));
+  const fromSupplier = buildChinaShipmentWritePlan(
+    supplierBatchToChinaShipmentInput(validated, targets),
+    () => 'UNUSED',
+  );
+  const fromExistingPage = buildChinaShipmentWritePlan({
+    shipmentNo: 'SYN-SF-RECEIVER-001',
+    shipmentDate: '2026-11-21',
+    sfFreightRmb: '200.00',
+    sfActualWeightKg: '99.500',
+    sfChargeableWeightKg: '100.000',
+    items: [
+      {
+        orderItemRecordId: ITEM_A,
+        itemLabel: 'SYN-A',
+        linkedChinaShipmentIds: [],
+        pieceWeightsKg: ['1.500'],
+      },
+      {
+        orderItemRecordId: ITEM_B,
+        itemLabel: 'SYN-B',
+        linkedChinaShipmentIds: [],
+        pieceWeightsKg: ['2.125', '3.250'],
+      },
+    ],
+  }, () => 'UNUSED');
+
+  assert.deepEqual(fromSupplier, fromExistingPage);
+  assert.deepEqual(fromSupplier.itemUpdates, [
+    {
+      id: ITEM_A,
+      fields: {
+        'China Freight Piece Count': 1,
+        'China Freight Piece Weights KG': '1.5',
+        'China Freight Weight Input KG': 1.5,
+      },
+    },
+    {
+      id: ITEM_B,
+      fields: {
+        'China Freight Piece Count': 2,
+        'China Freight Piece Weights KG': '2.125\n3.25',
+        'China Freight Weight Input KG': 5.375,
+      },
+    },
+  ]);
 });
 
 test('rejects unknown or PII-shaped fields and never accepts an order number in place of a record ID', () => {

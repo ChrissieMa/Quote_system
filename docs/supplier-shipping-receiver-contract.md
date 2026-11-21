@@ -10,7 +10,17 @@ This development branch contains the validated, HTTP-independent Systems receive
 
 ## Boundary
 
-Supplier Portal is the single LKS-operated place for capturing parcel weights and the SF batch header. Systems remains responsible for:
+Supplier Portal replaces the existing Quote owner cost page as the place where LKS enters China-shipment data. It does not introduce a second China-freight workflow or a new allocation rule.
+
+Both entry paths now build the same canonical Airtable write plan:
+
+- each Order Item receives the same `China Freight Piece Count`;
+- each Order Item receives the same newline-separated `China Freight Piece Weights KG`;
+- each Order Item receives the same summed `China Freight Weight Input KG`;
+- the China Shipment receives the same Shipment No., Shipment Date, linked Order Items, SF Freight RMB and optional SF actual/chargeable weights;
+- the existing Airtable formula remains responsible for the same weight-proportional freight allocation.
+
+Systems remains responsible for:
 
 - resolving one exact Airtable Order Item record ID per Supplier item;
 - applying the existing China-freight allocation inputs;
@@ -71,13 +81,13 @@ Synthetic example:
 | `sfFreightRmb` | Positive decimal string with at most 2 places. It remains the existing China freight input; no Alipay goods-payment rate is applied by this receiver. |
 | `sfActualWeightKg`, `sfChargeableWeightKg` | Optional non-negative record-only values, at most 3 places. They never replace per-parcel weights for allocation. |
 
-The receiver derives for each Order Item:
+The receiver converts the Supplier payload into the same shared write-plan function used by the existing owner cost page. The shared function derives for each Order Item:
 
 - `China Freight Piece Count` = number of active China parcels;
 - `China Freight Piece Weights KG` = the exact active parcel weight strings;
 - `China Freight Weight Input KG` = the exact active parcel sum, represented to at most 3 decimal places.
 
-It passes exact item totals and batch freight to the future Airtable adapter. It does not calculate or round the final per-item RMB/HKD allocation in application code; existing Airtable allocation remains the authority until a separately approved rule changes it.
+It passes the same item totals and batch freight to the future Airtable adapter. It does not calculate or round the final per-item RMB/HKD allocation in application code; the existing Airtable allocation remains the authority until a separately approved rule changes it.
 
 SF actual and chargeable totals are stored only as header evidence. Delivery later reads `China Freight Weight Input KG` and `China Freight Piece Count`. Delivery's separate “light accessory +1 Package” rule remains downstream and must not be included in the Supplier China parcel count.
 
@@ -107,7 +117,7 @@ The adapter interface requires an atomic commit or an equivalent verified forwar
 
 ### Production Airtable limitation
 
-Airtable does not provide one transaction across multiple Order Item updates plus a China Shipment create. The current manual Quote route updates Items before creating the Shipment, so directly reusing it would not meet this contract's recovery guarantee.
+Airtable does not provide one transaction across multiple Order Item updates plus a China Shipment create. Development now shares the exact validation and Airtable write-plan logic with the current owner page, but the eventual Production adapter still needs a durable receipt/recovery layer around those existing writes. Sharing the business logic does not by itself make the multi-record Production write atomic.
 
 Before Production, Systems needs one approved durable integration receipt/staging design. A safe forward-completion design would require, at minimum:
 
