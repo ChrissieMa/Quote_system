@@ -3,6 +3,17 @@ import type { ChinaShipmentInput } from './china-shipment-input';
 
 export const SUPPLIER_SHIPPING_CONTRACT = 'lks.supplier-shipping.v1' as const;
 
+export const supplierShippingItemNoLookupKeys = (value: unknown): string[] => {
+  const compact = String(value || '').normalize('NFKC').trim().toUpperCase().replace(/\s+/gu, '');
+  if (!compact) return [];
+  const keys = [compact];
+  if (/^[A-Z]{3}\d{4}$/.test(compact)) keys.push(`${compact}-A`);
+  if (/^[A-Z]{3}\d{4}[A-Z]$/.test(compact)) {
+    keys.push(`${compact.slice(0, -1)}-${compact.slice(-1)}`);
+  }
+  return [...new Set(keys)];
+};
+
 type JsonObject = Record<string, unknown>;
 
 export type SupplierParcelChange = {

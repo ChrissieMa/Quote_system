@@ -14,11 +14,19 @@ import {
   type SupplierShippingTarget,
   type ValidatedSupplierShippingBatch,
   supplierBatchToChinaShipmentInput,
+  supplierShippingItemNoLookupKeys,
   validateSupplierShippingBatch,
 } from './supplier-shipping-receiver';
 
 const ITEM_A = 'recAAAAAAAAAAAAAA';
 const ITEM_B = 'recBBBBBBBBBBBBBB';
+
+test('supplier item lookup keeps exact keys and safely adds the single-item A fallback', () => {
+  assert.deepEqual(supplierShippingItemNoLookupKeys(' OCT 2601 '), ['OCT2601', 'OCT2601-A']);
+  assert.deepEqual(supplierShippingItemNoLookupKeys('oct2601a'), ['OCT2601A', 'OCT2601-A']);
+  assert.deepEqual(supplierShippingItemNoLookupKeys('OCT2601-B'), ['OCT2601-B']);
+  assert.deepEqual(supplierShippingItemNoLookupKeys(''), []);
+});
 
 const fixture = (): SupplierShippingBatch => ({
   contract: 'lks.supplier-shipping.v1',

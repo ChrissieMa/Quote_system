@@ -57,7 +57,11 @@ import { installAirtableReadRetry, withAirtableReadRetry } from './airtable-retr
 import { buildChinaShipmentWritePlan, type ChinaShipmentInputItem } from './china-shipment-input';
 import { verifySupplierShippingRequest } from './supplier-shipping-auth';
 import { AirtableSupplierShippingAdapter } from './supplier-shipping-airtable';
-import { SupplierShippingContractError, SupplierShippingReceiver } from './supplier-shipping-receiver';
+import {
+  SupplierShippingContractError,
+  SupplierShippingReceiver,
+  supplierShippingItemNoLookupKeys,
+} from './supplier-shipping-receiver';
 import {
   CUSTOMER_SOURCE_VALUES,
   customerSourceLabel,
@@ -9707,10 +9711,23 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
         return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
       }
       seenSourceIds.add(sourceItemId);
-      const records = await tableOrderItems.select({
+      let records = await tableOrderItems.select({
         filterByFormula: `EXACT({Item No}, '${safeFormulaLiteral(itemNo)}')`,
         maxRecords: 2,
       }).firstPage();
+      if (records.length === 0) {
+        const lookupKeys = supplierShippingItemNoLookupKeys(itemNo);
+        const normalizedComparisons = lookupKeys.map(key =>
+          `EXACT(UPPER(SUBSTITUTE(TRIM({Item No}), ' ', '')), '${safeFormulaLiteral(key)}')`);
+        if (normalizedComparisons.length > 0) {
+          records = await tableOrderItems.select({
+            filterByFormula: normalizedComparisons.length === 1
+              ? normalizedComparisons[0]
+              : `OR(${normalizedComparisons.join(',')})`,
+            maxRecords: 2,
+          }).firstPage();
+        }
+      }
       mappings.push(records.length === 1
         ? { sourceItemId, status: 'matched', orderItemRecordId: records[0].id }
         : { sourceItemId, status: records.length === 0 ? 'missing' : 'ambiguous' });
