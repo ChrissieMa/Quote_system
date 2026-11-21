@@ -9716,14 +9716,16 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
         maxRecords: 2,
       }).firstPage();
       if (records.length === 0) {
-        const lookupKeys = supplierShippingItemNoLookupKeys(itemNo);
-        const normalizedComparisons = lookupKeys.map(key =>
-          `EXACT(UPPER(SUBSTITUTE(TRIM({Item No}), ' ', '')), '${safeFormulaLiteral(key)}')`);
-        if (normalizedComparisons.length > 0) {
+        const exactKey = itemNo.normalize('NFKC').trim().toUpperCase();
+        const fallbackKeys = supplierShippingItemNoLookupKeys(itemNo)
+          .filter(key => key !== exactKey);
+        if (fallbackKeys.length > 0) {
+          const exactFallbacks = fallbackKeys.map(key =>
+            `EXACT({Item No}, '${safeFormulaLiteral(key)}')`);
           records = await tableOrderItems.select({
-            filterByFormula: normalizedComparisons.length === 1
-              ? normalizedComparisons[0]
-              : `OR(${normalizedComparisons.join(',')})`,
+            filterByFormula: exactFallbacks.length === 1
+              ? exactFallbacks[0]
+              : `OR(${exactFallbacks.join(',')})`,
             maxRecords: 2,
           }).firstPage();
         }

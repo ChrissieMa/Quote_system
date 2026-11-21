@@ -81,6 +81,9 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   assert.equal((routes.match(/requireSupplierShippingSignature\(req, res\)/g) || []).length, 2);
   assert.ok(source.includes("process.env.SUPPLIER_SHIPPING_ENABLED === '1'"));
   assert.ok(source.includes('verifySupplierShippingRequest(secret'));
+  assert.ok(routes.includes('supplierShippingItemNoLookupKeys(itemNo)'));
+  assert.ok(routes.includes("`EXACT({Item No}, '${safeFormulaLiteral(key)}')`"));
+  assert.ok(!routes.includes('SUBSTITUTE(TRIM({Item No})'));
   for (const header of ["'x-lks-key-id'", "'x-lks-timestamp'", "'x-lks-signature'"]) {
     assert.ok(source.includes(header), `missing signed Supplier header ${header}`);
   }
