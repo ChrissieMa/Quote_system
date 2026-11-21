@@ -16,6 +16,12 @@ export type CustomerResolutionCandidate<T> = {
   record: T;
 };
 
+export type CustomerSearchSourceLoad<T> = {
+  officialRecords: readonly T[];
+  legacyRecords: readonly T[];
+  failedSources: Array<'customers' | 'legacy'>;
+};
+
 export const selectCustomerResolutionCandidate = <T>(
   legacyRecord: T | null,
   linkedRecord: T | null,
@@ -31,6 +37,46 @@ export const normalizePhone = (value: unknown): string => {
   let digits = String(value ?? '').replace(/\D/g, '');
   if (digits.length === 11 && digits.startsWith('852')) digits = digits.slice(3);
   return digits;
+};
+
+export const customerSearchValuesMatch = (
+  query: unknown,
+  textValues: unknown[],
+  phoneValues: unknown[] = [],
+): boolean => {
+  const q = String(query ?? '').trim().toLowerCase();
+  const normalizedQ = normalizePhone(q);
+  const textMatch = Boolean(q) && textValues
+    .map(value => String(value ?? '').trim().toLowerCase())
+    .some(value => value.includes(q));
+  const phoneMatch = normalizedQ.length >= 4 && phoneValues
+    .map(normalizePhone)
+    .some(value => value.includes(normalizedQ));
+  return textMatch || phoneMatch;
+};
+
+export const loadCustomerSearchSources = async <T>(
+  loadOfficial: () => Promise<readonly T[]>,
+  loadLegacy: () => Promise<readonly T[]>,
+): Promise<CustomerSearchSourceLoad<T>> => {
+  const [official, legacy] = await Promise.allSettled([
+    loadOfficial(),
+    loadLegacy(),
+  ]);
+
+  if (official.status === 'rejected' && legacy.status === 'rejected') {
+    throw new Error('Customer search sources are unavailable.');
+  }
+
+  const failedSources: Array<'customers' | 'legacy'> = [];
+  if (official.status === 'rejected') failedSources.push('customers');
+  if (legacy.status === 'rejected') failedSources.push('legacy');
+
+  return {
+    officialRecords: official.status === 'fulfilled' ? official.value : [],
+    legacyRecords: legacy.status === 'fulfilled' ? legacy.value : [],
+    failedSources,
+  };
 };
 
 export const extractCustomerId = (value: unknown): string => {

@@ -2,7 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildLegacyCustomerMergeFields,
+  customerSearchValuesMatch,
   extractCustomerId,
+  loadCustomerSearchSources,
   nonBlankCustomerUpdates,
   normalizePhone,
   reconcileCustomerSearchResults,
@@ -17,6 +19,48 @@ test('normalizes phones and extracts an existing legacy customer number from dis
   assert.equal(selectCanonicalCustomerId('L0795', 'L0999', 'L1000'), 'L0795');
   assert.equal(selectCanonicalCustomerId('', 'L0999', 'L1000'), 'L0999');
   assert.equal(selectCanonicalCustomerId('', '', 'L1000'), 'L1000');
+});
+
+test('customer search matches a customer number and formatted phone safely', () => {
+  const textValues = ['L1234', 'Fictional Customer'];
+  const phoneValues = ['+852 6123 4567'];
+
+  assert.equal(customerSearchValuesMatch('l1234', textValues, phoneValues), true);
+  assert.equal(customerSearchValuesMatch('6123 4567', textValues, phoneValues), true);
+  assert.equal(customerSearchValuesMatch('61234567', textValues, phoneValues), true);
+  assert.equal(customerSearchValuesMatch('L9999', textValues, phoneValues), false);
+});
+
+test('customer search keeps official results when the legacy source is unavailable', async () => {
+  const result = await loadCustomerSearchSources(
+    async () => [{ id: 'rec-official' }],
+    async () => { throw new Error('temporary legacy read failure'); },
+  );
+
+  assert.deepEqual(result.officialRecords, [{ id: 'rec-official' }]);
+  assert.deepEqual(result.legacyRecords, []);
+  assert.deepEqual(result.failedSources, ['legacy']);
+});
+
+test('customer search keeps legacy results when the official source is unavailable', async () => {
+  const result = await loadCustomerSearchSources(
+    async () => { throw new Error('temporary official read failure'); },
+    async () => [{ id: 'rec-legacy' }],
+  );
+
+  assert.deepEqual(result.officialRecords, []);
+  assert.deepEqual(result.legacyRecords, [{ id: 'rec-legacy' }]);
+  assert.deepEqual(result.failedSources, ['customers']);
+});
+
+test('customer search fails clearly only when both sources are unavailable', async () => {
+  await assert.rejects(
+    () => loadCustomerSearchSources(
+      async () => { throw new Error('official unavailable'); },
+      async () => { throw new Error('legacy unavailable'); },
+    ),
+    /Customer search sources are unavailable/,
+  );
 });
 
 test('legacy activation restores the old customer number and fills only missing profile fields', () => {
