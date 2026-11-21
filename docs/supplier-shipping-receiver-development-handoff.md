@@ -15,6 +15,8 @@ Status: `release_candidate` development core only
 - Changed the owner cost page to use that shared function without changing its Airtable fields or allocation authority.
 - Converted validated Supplier payloads into the same shared input shape instead of defining a second freight workflow.
 - Added a direct equivalence test: the same synthetic batch entered through the owner page shape and Supplier shape produces an identical Airtable write plan.
+- Added a forward-completion state machine for real Airtable failure boundaries; retries continue from verified evidence without deleting records.
+- Added a concrete Production connection plan covering the minimum receipt/schema fields, request signing, staged rollout and rollback.
 - Added strict allowlist validation with no customer PII, selling prices, Quote Tokens or images.
 - Required an exact Airtable Order Item record ID per Supplier item; order-number guessing is impossible in the contract.
 - Added exact payload hashing, revision chains, duplicate SF-number checks, exact replay handling and committed-batch correction stop.
@@ -27,8 +29,9 @@ No HTTP route, Airtable adapter, credential, schema, Railway setting, Supplier c
 
 ## Validation
 
-- Receiver-specific tests: 13 passed.
-- Full Quote suite: 247 passed, 0 failed.
+- Receiver/recovery-specific tests: 18 passed.
+- Full Quote suite: 252 passed, 0 failed.
+- TypeScript build: passed after the recovery-state addition.
 - TypeScript build: passed after the shared-flow correction.
 - Diff whitespace check: passed.
 
