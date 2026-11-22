@@ -9706,7 +9706,7 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
       }
       const sourceItemId = String(raw.sourceItemId || '').trim();
       const itemNo = String(raw.itemNo || '').trim();
-      if (!/^[A-Za-z0-9_-]{8,80}$/.test(sourceItemId) || !itemNo || itemNo.length > 80 || /\p{Cc}/u.test(itemNo)
+      if (!/^[A-Za-z0-9_-]{1,80}$/.test(sourceItemId) || !itemNo || itemNo.length > 80 || /\p{Cc}/u.test(itemNo)
         || seenSourceIds.has(sourceItemId)) {
         return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
       }

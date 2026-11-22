@@ -323,7 +323,7 @@ export const validateSupplierShippingBatch = (raw: unknown): ValidatedSupplierSh
     const item = objectWithKeys(itemRaw, [
       'sourceItemId', 'orderItemRecordId', 'activeParcels', 'parcelChanges',
     ], `items[${itemIndex}]`);
-    const sourceItemId = requiredText(item.sourceItemId, 'sourceItemId', 80, /^[A-Za-z0-9_-]{8,80}$/);
+    const sourceItemId = requiredText(item.sourceItemId, 'sourceItemId', 80, /^[A-Za-z0-9_-]{1,80}$/);
     const orderItemRecordId = requiredText(item.orderItemRecordId, 'orderItemRecordId', 35, /^rec[A-Za-z0-9]{14,32}$/);
     if (sourceItemIds.has(sourceItemId) || recordIds.has(orderItemRecordId)) {
       return fail('duplicate_item', 'Each source item and Order Item record ID must be unique in the batch.');

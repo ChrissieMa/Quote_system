@@ -28,6 +28,14 @@ test('supplier item lookup keeps exact keys and safely adds the single-item A fa
   assert.deepEqual(supplierShippingItemNoLookupKeys(''), []);
 });
 
+test('legacy short opaque Supplier item IDs remain valid but unsafe characters stay rejected', () => {
+  const shortId = fixture();
+  shortId.items[0].sourceItemId = 'legacy1';
+  assert.doesNotThrow(() => validateSupplierShippingBatch(shortId));
+  shortId.items[0].sourceItemId = 'bad id';
+  assert.throws(() => validateSupplierShippingBatch(shortId), /sourceItemId/);
+});
+
 const fixture = (): SupplierShippingBatch => ({
   contract: 'lks.supplier-shipping.v1',
   sourceSystem: 'LKS_Supplier_Portal',
