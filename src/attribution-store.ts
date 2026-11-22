@@ -24,6 +24,16 @@ export type AttributionSnapshot = {
   expiresAt: string;
 };
 
+export type ProjectionWork = {
+  kind: 'inquiry' | 'quote' | 'order';
+  entityId: string;
+  version: number;
+  first: AttributionSnapshot | null;
+  snapshot: AttributionSnapshot | null;
+};
+
+export type PinnedAttribution = { snapshot: AttributionSnapshot | null; reason: string | null };
+
 type Receipt = { outcome: 'created' | 'replayed'; shortCode: string; expiresAt: string; revocationProof: string };
 type Result = Receipt | { outcome: 'conflict' | 'revoked' };
 const ttl = 7 * 24 * 60 * 60 * 1000;
@@ -84,6 +94,31 @@ export class LocalAttributionStore {
         expires_at INTEGER NOT NULL,
         revoked INTEGER NOT NULL DEFAULT 0,
         bound INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS attribution_inquiries (
+        entity_id TEXT PRIMARY KEY, first_snapshot TEXT NOT NULL,
+        latest_snapshot TEXT NOT NULL, version INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS attribution_quotes (
+        entity_id TEXT PRIMARY KEY, inquiry_id TEXT NOT NULL,
+        snapshot TEXT, reason TEXT
+      );
+      CREATE TABLE IF NOT EXISTS attribution_orders (
+        entity_id TEXT PRIMARY KEY, quote_id TEXT NOT NULL,
+        snapshot TEXT, reason TEXT
+      );
+      CREATE TABLE IF NOT EXISTS attribution_outbox (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+        entity_id TEXT NOT NULL, version INTEGER NOT NULL, pending INTEGER NOT NULL,
+        UNIQUE(kind, entity_id)
+      );
+      CREATE TABLE IF NOT EXISTS attribution_projection_writer (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        state TEXT NOT NULL, owner TEXT, inflight INTEGER NOT NULL
+      );
+      INSERT OR IGNORE INTO attribution_projection_writer VALUES (1, 'idle', NULL, 0);
+      CREATE TABLE IF NOT EXISTS attribution_projection_records (
+        code TEXT PRIMARY KEY, record_id TEXT NOT NULL UNIQUE
       );
     `);
   }
@@ -157,16 +192,176 @@ export class LocalAttributionStore {
   }
 
   bind(code: string, now: number): AttributionSnapshot | null {
-    return this.bindWith(code, now, () => {});
-  }
-
-  bindWith(code: string, now: number, apply: (snapshot: AttributionSnapshot) => void): AttributionSnapshot | null {
     return this.transaction(() => {
       const snapshot = this.resolve(code, now);
       if (!snapshot) return null;
-      apply(snapshot);
-      this.db.prepare('UPDATE attribution_handoffs SET bound = 1 WHERE code = ?').run(code);
+      this.markBound(snapshot);
       return snapshot;
+    });
+  }
+
+  private enqueue(kind: ProjectionWork['kind'], entityId: string, version: number): void {
+    this.db.prepare(`INSERT INTO attribution_outbox (kind, entity_id, version, pending) VALUES (?, ?, ?, 1)
+      ON CONFLICT(kind, entity_id) DO UPDATE SET version = excluded.version, pending = 1`)
+      .run(kind, entityId, version);
+  }
+
+  private attachInquiry(inquiryId: string, snapshot: AttributionSnapshot): void {
+    const row = this.db.prepare('SELECT * FROM attribution_inquiries WHERE entity_id = ?').get(inquiryId);
+    const serialized = JSON.stringify(snapshot);
+    if (!row) {
+      this.db.prepare('INSERT INTO attribution_inquiries VALUES (?, ?, ?, 1)').run(inquiryId, serialized, serialized);
+      this.enqueue('inquiry', inquiryId, 1);
+    } else if (row.latest_snapshot !== serialized) {
+      const version = Number(row.version) + 1;
+      this.db.prepare('UPDATE attribution_inquiries SET latest_snapshot = ?, version = ? WHERE entity_id = ?')
+        .run(serialized, version, inquiryId);
+      this.enqueue('inquiry', inquiryId, version);
+    }
+  }
+
+  private markBound(snapshot: AttributionSnapshot): void {
+    this.db.prepare('UPDATE attribution_handoffs SET bound = 1 WHERE code = ?').run(snapshot.shortCode);
+  }
+
+  bindInquiry(code: string, inquiryId: string, now: number): AttributionSnapshot | null {
+    return this.transaction(() => {
+      const snapshot = this.resolve(code, now);
+      if (!snapshot) return null;
+      this.attachInquiry(inquiryId, snapshot);
+      this.markBound(snapshot);
+      return snapshot;
+    });
+  }
+
+  pinQuote(code: string | null, inquiryId: string, quoteId: string, now: number, missingReason: string): PinnedAttribution {
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT snapshot, reason FROM attribution_quotes WHERE entity_id = ?').get(quoteId);
+      if (existing) return {
+        snapshot: existing.snapshot ? JSON.parse(String(existing.snapshot)) as AttributionSnapshot : null,
+        reason: existing.reason === null ? null : String(existing.reason),
+      };
+      const snapshot = code ? this.resolve(code, now) : null;
+      const reason = snapshot ? null : code ? 'not_found' : missingReason;
+      this.db.prepare('INSERT INTO attribution_quotes VALUES (?, ?, ?, ?)')
+        .run(quoteId, inquiryId, snapshot ? JSON.stringify(snapshot) : null, reason);
+      if (snapshot) {
+        if (inquiryId) this.attachInquiry(inquiryId, snapshot);
+        this.markBound(snapshot);
+      }
+      this.enqueue('quote', quoteId, 1);
+      return { snapshot, reason };
+    });
+  }
+
+  pinOrder(quoteId: string, orderId: string): PinnedAttribution {
+    return this.transaction(() => {
+      const existing = this.db.prepare('SELECT snapshot, reason FROM attribution_orders WHERE entity_id = ?').get(orderId);
+      if (existing) return {
+        snapshot: existing.snapshot ? JSON.parse(String(existing.snapshot)) as AttributionSnapshot : null,
+        reason: existing.reason === null ? null : String(existing.reason),
+      };
+      const quote = this.db.prepare('SELECT snapshot, reason FROM attribution_quotes WHERE entity_id = ?').get(quoteId);
+      const raw = quote?.snapshot ? String(quote.snapshot) : null;
+      const reason = raw ? null : String(quote?.reason || 'missing');
+      this.db.prepare('INSERT INTO attribution_orders VALUES (?, ?, ?, ?)').run(orderId, quoteId, raw, reason);
+      this.enqueue('order', orderId, 1);
+      return { snapshot: raw ? JSON.parse(raw) as AttributionSnapshot : null, reason };
+    });
+  }
+
+  nextProjection(): ProjectionWork | null {
+    return this.transaction(() => {
+      const row = this.db.prepare('SELECT kind, entity_id, version FROM attribution_outbox WHERE pending = 1 ORDER BY id LIMIT 1').get();
+      if (!row) return null;
+      const kind = String(row.kind) as ProjectionWork['kind'];
+      const entityId = String(row.entity_id);
+      const version = Number(row.version);
+      if (kind === 'inquiry') {
+        const inquiry = this.db.prepare('SELECT first_snapshot, latest_snapshot FROM attribution_inquiries WHERE entity_id = ?').get(entityId);
+        if (!inquiry) throw new Error('Missing local inquiry binding.');
+        return { kind, entityId, version, first: JSON.parse(String(inquiry.first_snapshot)) as AttributionSnapshot, snapshot: JSON.parse(String(inquiry.latest_snapshot)) as AttributionSnapshot };
+      }
+      if (kind !== 'quote' && kind !== 'order') throw new Error('Invalid projection type.');
+      const statement = kind === 'quote' ? 'SELECT snapshot FROM attribution_quotes WHERE entity_id = ?' : 'SELECT snapshot FROM attribution_orders WHERE entity_id = ?';
+      const record = this.db.prepare(statement).get(entityId);
+      if (!record) throw new Error('Missing local business binding.');
+      return { kind, entityId, version, first: null, snapshot: record.snapshot ? JSON.parse(String(record.snapshot)) as AttributionSnapshot : null };
+    });
+  }
+
+  completeProjection(work: ProjectionWork): boolean {
+    return Number(this.db.prepare('UPDATE attribution_outbox SET pending = 0 WHERE kind = ? AND entity_id = ? AND version = ? AND pending = 1')
+      .run(work.kind, work.entityId, work.version).changes) === 1;
+  }
+
+  acquireProjectionWriter(): string {
+    return this.transaction(() => {
+      const owner = randomBytes(16).toString('hex');
+      const result = this.db.prepare(`UPDATE attribution_projection_writer SET state = 'active', owner = ?, inflight = 0
+        WHERE singleton = 1 AND state = 'idle'`).run(owner);
+      if (Number(result.changes) !== 1) throw new Error('Projection writer requires recovery or is already active.');
+      return owner;
+    });
+  }
+
+  projectionWriterStatus(): { state: string; owner: string | null; inflight: boolean } {
+    const row = this.db.prepare('SELECT state, owner, inflight FROM attribution_projection_writer WHERE singleton = 1').get();
+    if (!row) throw new Error('Projection writer state is missing.');
+    return { state: String(row.state), owner: row.owner === null ? null : String(row.owner), inflight: Boolean(row.inflight) };
+  }
+
+  beginProjectionWrite(owner: string): void {
+    const result = this.db.prepare(`UPDATE attribution_projection_writer SET inflight = 1
+      WHERE singleton = 1 AND state = 'active' AND owner = ? AND inflight = 0`).run(owner);
+    if (Number(result.changes) !== 1) throw new Error('Projection writer is not available.');
+  }
+
+  finishProjectionWrite(owner: string): void {
+    const result = this.db.prepare(`UPDATE attribution_projection_writer SET inflight = 0
+      WHERE singleton = 1 AND state = 'active' AND owner = ? AND inflight = 1`).run(owner);
+    if (Number(result.changes) !== 1) throw new Error('Projection writer state changed.');
+  }
+
+  markProjectionUncertain(owner: string): void {
+    const result = this.db.prepare(`UPDATE attribution_projection_writer SET state = 'uncertain'
+      WHERE singleton = 1 AND owner = ? AND state = 'active'`).run(owner);
+    if (Number(result.changes) !== 1) throw new Error('Projection writer state changed.');
+  }
+
+  releaseProjectionWriter(owner: string): void {
+    const status = this.projectionWriterStatus();
+    if (status.owner !== owner) throw new Error('Projection writer ownership changed.');
+    if (status.state === 'uncertain') return;
+    if (status.state !== 'active' || status.inflight) throw new Error('Projection writer has an unresolved write.');
+    const result = this.db.prepare("UPDATE attribution_projection_writer SET state = 'idle', owner = NULL WHERE singleton = 1 AND owner = ? AND state = 'active' AND inflight = 0").run(owner);
+    if (Number(result.changes) !== 1) throw new Error('Projection writer state changed.');
+  }
+
+  projectionRecord(code: string): string | null {
+    const row = this.db.prepare('SELECT record_id FROM attribution_projection_records WHERE code = ?').get(code);
+    return row ? String(row.record_id) : null;
+  }
+
+  rememberProjectionRecord(code: string, recordId: string): void {
+    this.db.prepare('INSERT OR IGNORE INTO attribution_projection_records (code, record_id) VALUES (?, ?)').run(code, recordId);
+    if (this.projectionRecord(code) !== recordId) throw new Error('Attribution projection record conflicts.');
+  }
+
+  recoverProjectionWriter(
+    owner: string,
+    confirmation: 'external-writes-settled-and-reconciled',
+    records: Array<{ code: string; recordId: string }>,
+  ): void {
+    if (confirmation !== 'external-writes-settled-and-reconciled') throw new Error('Explicit recovery confirmation is required.');
+    this.transaction(() => {
+      const status = this.projectionWriterStatus();
+      if (status.owner !== owner || status.state === 'idle') throw new Error('Projection recovery ownership does not match.');
+      for (const record of records) {
+        if (!/^LKS-[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/.test(record.code) || !record.recordId) throw new Error('Invalid recovery record.');
+        this.rememberProjectionRecord(record.code, record.recordId);
+      }
+      this.db.prepare("UPDATE attribution_projection_writer SET state = 'idle', owner = NULL, inflight = 0 WHERE singleton = 1 AND owner = ?").run(owner);
     });
   }
 

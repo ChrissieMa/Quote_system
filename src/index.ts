@@ -4,7 +4,9 @@ import dotenv from 'dotenv';
 import crypto from 'crypto';
 import multer from 'multer';
 import { createAttributionRouter, AttributionRouterOptions } from './attribution-router';
-import { AttributionBusinessAdapter, AttributionBusinessHooks, createAttributionBusinessHooks, selectedAttributionCode } from './attribution-business';
+import { AttributionBusinessHooks, createAttributionBusinessHooks, selectedAttributionCode } from './attribution-business';
+import { AttributionProjectionMapping, AttributionProjector } from './attribution-projection';
+import { SerializedAirtableProjectionTransport } from './attribution-airtable';
 import { attributionOwnerTransferScript } from './attribution-owner-transfer';
 import {
   accessoryOrderItemName,
@@ -796,11 +798,12 @@ export const configureAttribution = (configuration: {
   validation: AttributionRouterOptions['validation'];
   now: AttributionRouterOptions['now'];
   allowRequest: AttributionRouterOptions['allowRequest'];
-  business: AttributionBusinessAdapter;
-}): void => {
+  transport: SerializedAirtableProjectionTransport;
+  mapping: AttributionProjectionMapping;
+}): AttributionProjector | null => {
   if (!configuration.enabled) {
     attributionRuntime = null;
-    return;
+    return null;
   }
   const reportError = (message: string): void => { console.error(message); };
   const requireOwnerOriginAndCsrf: express.RequestHandler = (req, res, next) => {
@@ -812,14 +815,16 @@ export const configureAttribution = (configuration: {
       next();
     });
   };
+  const projector = new AttributionProjector(configuration.store, configuration.transport, configuration.mapping, reportError);
   attributionRuntime = {
     router: createAttributionRouter({
       enabled: true, store: configuration.store, validation: configuration.validation,
       now: configuration.now, allowRequest: configuration.allowRequest,
       requireOwner: requireAdmin, requireOwnerOriginAndCsrf, reportError,
     }),
-    hooks: createAttributionBusinessHooks(configuration.store, configuration.business, configuration.now, reportError),
+    hooks: createAttributionBusinessHooks(configuration.store, configuration.now, reportError),
   };
+  return projector;
 };
 
 const quotationImageReadyHandshakeRunKey = (req: Request): string | null => {

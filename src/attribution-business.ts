@@ -1,10 +1,4 @@
-import { AttributionSnapshot, LocalAttributionStore } from './attribution-store';
-
-export type AttributionBusinessAdapter = {
-  attachInquiry(inquiryId: string, snapshot: AttributionSnapshot): true;
-  pinQuote(quoteId: string, inquiryId: string, snapshot: AttributionSnapshot | null, reason: string | null): true;
-  copyQuoteToOrder(quoteId: string, orderId: string): true;
-};
+import { LocalAttributionStore } from './attribution-store';
 
 export const selectedAttributionCode = (input: unknown): string | null => {
   if (typeof input !== 'string' || input.length > 200) return null;
@@ -28,7 +22,6 @@ const unknownReason = (code: unknown): string => {
 
 export const createAttributionBusinessHooks = (
   store: LocalAttributionStore,
-  adapter: AttributionBusinessAdapter,
   now: () => number,
   reportError: (message: string) => void,
 ): AttributionBusinessHooks => {
@@ -37,9 +30,7 @@ export const createAttributionBusinessHooks = (
       try {
         const selected = selectedAttributionCode(code);
         if (!selected) return { outcome: 'unknown', reason: unknownReason(code) };
-        const snapshot = store.bindWith(selected, now(), value => {
-          if (adapter.attachInquiry(inquiryId, value) !== true) throw new Error('Invalid synchronous projection.');
-        });
+        const snapshot = store.bindInquiry(selected, inquiryId, now());
         return snapshot ? { outcome: 'matched', reason: null } : { outcome: 'unknown', reason: 'not_found' };
       } catch {
         reportError('Attribution inquiry binding unavailable.');
@@ -49,23 +40,15 @@ export const createAttributionBusinessHooks = (
     quote(code, inquiryId, quoteId) {
       try {
         const selected = selectedAttributionCode(code);
-        const snapshot = selected
-          ? store.bindWith(selected, now(), value => {
-            if (adapter.pinQuote(quoteId, inquiryId, value, null) !== true) throw new Error('Invalid synchronous projection.');
-          })
-          : null;
-        const reason = snapshot ? null : selected ? 'not_found' : unknownReason(code);
-        if (!snapshot && adapter.pinQuote(quoteId, inquiryId, null, reason) !== true) throw new Error('Invalid synchronous projection.');
-        return snapshot ? { outcome: 'matched', reason: null } : { outcome: 'unknown', reason };
+        const result = store.pinQuote(selected, inquiryId, quoteId, now(), unknownReason(code));
+        return result.snapshot ? { outcome: 'matched', reason: null } : { outcome: 'unknown', reason: result.reason };
       } catch {
         reportError('Attribution quote binding unavailable.');
         return { outcome: 'unknown', reason: 'service_unavailable' };
       }
     },
     order(quoteId, orderId) {
-      try {
-        if (adapter.copyQuoteToOrder(quoteId, orderId) !== true) throw new Error('Invalid synchronous projection.');
-      }
+      try { store.pinOrder(quoteId, orderId); }
       catch { reportError('Attribution order binding unavailable.'); }
     },
   };
