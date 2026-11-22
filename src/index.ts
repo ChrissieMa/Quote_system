@@ -9673,6 +9673,15 @@ const supplierShippingAdapter = new AirtableSupplierShippingAdapter({
 }, syncSupplierShippingFinance);
 const supplierShippingReceiver = new SupplierShippingReceiver(supplierShippingAdapter);
 
+const logSupplierShippingStatus = (
+  event: 'signature_rejected' | 'mapping_result' | 'mapping_lookup_failed',
+  detail: Record<string, string | number>,
+): void => {
+  // Deliberately log only bounded technical status. Never include request
+  // headers, bodies, item numbers, record IDs, signatures, or credentials.
+  console.warn('[supplier-shipping]', JSON.stringify({ event, ...detail }));
+};
+
 const requireSupplierShippingSignature = (req: Request, res: Response): boolean => {
   if (!supplierShippingEnabled()) {
     res.status(503).json({ status: 'disabled', code: 'supplier_shipping_not_enabled' });
@@ -9683,6 +9692,7 @@ const requireSupplierShippingSignature = (req: Request, res: Response): boolean 
     const status = verification.code === 'not_configured_or_unknown_key' || verification.code === 'not_configured'
       ? 503
       : 401;
+    logSupplierShippingStatus('signature_rejected', { code: verification.code, status });
     res.status(status).json({ status: 'rejected', code: verification.code });
     return false;
   }
@@ -9734,8 +9744,14 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
         ? { sourceItemId, status: 'matched', orderItemRecordId: records[0].id }
         : { sourceItemId, status: records.length === 0 ? 'missing' : 'ambiguous' });
     }
+    logSupplierShippingStatus('mapping_result', {
+      matched: mappings.filter(mapping => mapping.status === 'matched').length,
+      missing: mappings.filter(mapping => mapping.status === 'missing').length,
+      ambiguous: mappings.filter(mapping => mapping.status === 'ambiguous').length,
+    });
     res.json({ status: mappings.every(mapping => mapping.status === 'matched') ? 'matched' : 'review_required', mappings });
   } catch {
+    logSupplierShippingStatus('mapping_lookup_failed', { status: 503 });
     res.status(503).json({ status: 'retryable_failure', code: 'mapping_lookup_failed' });
   }
 });
