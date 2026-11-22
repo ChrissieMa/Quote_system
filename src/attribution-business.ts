@@ -24,13 +24,19 @@ export const createAttributionBusinessHooks = (
   store: LocalAttributionStore,
   now: () => number,
   reportError: (message: string) => void,
+  requestProjection?: () => void,
 ): AttributionBusinessHooks => {
+  const project = (): void => {
+    try { requestProjection?.(); }
+    catch { reportError('Attribution projection unavailable; retry is required.'); }
+  };
   return {
     inquiry(code, inquiryId) {
       try {
         const selected = selectedAttributionCode(code);
         if (!selected) return { outcome: 'unknown', reason: unknownReason(code) };
         const snapshot = store.bindInquiry(selected, inquiryId, now());
+        if (snapshot) project();
         return snapshot ? { outcome: 'matched', reason: null } : { outcome: 'unknown', reason: 'not_found' };
       } catch {
         reportError('Attribution inquiry binding unavailable.');
@@ -41,6 +47,7 @@ export const createAttributionBusinessHooks = (
       try {
         const selected = selectedAttributionCode(code);
         const result = store.pinQuote(selected, inquiryId, quoteId, now(), unknownReason(code));
+        project();
         return result.snapshot ? { outcome: 'matched', reason: null } : { outcome: 'unknown', reason: result.reason };
       } catch {
         reportError('Attribution quote binding unavailable.');
@@ -48,7 +55,7 @@ export const createAttributionBusinessHooks = (
       }
     },
     order(quoteId, orderId) {
-      try { store.pinOrder(quoteId, orderId); }
+      try { store.pinOrder(quoteId, orderId); project(); }
       catch { reportError('Attribution order binding unavailable.'); }
     },
   };

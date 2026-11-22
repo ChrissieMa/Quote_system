@@ -39,6 +39,7 @@ const oneLink = (value: unknown): string | null => {
 
 export class AttributionProjector {
   private running = false;
+  private requested = false;
 
   constructor(
     private readonly store: LocalAttributionStore,
@@ -132,6 +133,22 @@ export class AttributionProjector {
       if (wanted && await this.transport.updateIfUnchanged(table, work.entityId, record.version, { [field]: [wanted] })) return;
     }
     throw new Error('Pinned attribution projection contention.');
+  }
+
+  requestFlush(): void {
+    if (this.running || this.requested) return;
+    this.requested = true;
+    void Promise.resolve().then(async () => {
+      try {
+        if (this.running) return;
+        const result = await this.flush();
+        if (result.pending && !result.failed) this.reportError('Attribution projection pending; retry is required.');
+      } catch {
+        this.reportError('Attribution projection unavailable; retry is required.');
+      } finally {
+        this.requested = false;
+      }
+    });
   }
 
   async flush(maxItems = 100): Promise<{ attempted: number; completed: number; pending: boolean; failed: boolean }> {

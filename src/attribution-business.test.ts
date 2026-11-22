@@ -25,6 +25,127 @@ const input = (requestId: string): AttributionRequest => ({
   consent: { ad_storage: 'granted', analytics_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted' },
 });
 
+const waitFor = async (condition: () => boolean): Promise<void> => {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) return;
+    await new Promise<void>(resolve => setImmediate(resolve));
+  }
+  throw new Error('Synthetic projection did not settle.');
+};
+
+test('successful business hooks request one coalesced nonblocking projection', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'attribution-business-'));
+  try {
+    const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 3));
+    const client = new SyntheticAirtableClient();
+    client.seed('Inquiries', 'inquiry');
+    client.seed('Quotes', 'quote');
+    client.seed('Quotes', 'unknown');
+    client.seed('Orders', 'order');
+    let release: (() => void) | undefined;
+    let entered: (() => void) | undefined;
+    const blocked = new Promise<void>(resolve => { entered = resolve; });
+    const gate = new Promise<void>(resolve => { release = resolve; });
+    client.beforeUpdate = async table => {
+      if (table === 'Inquiries') { entered?.(); await gate; }
+    };
+    const errors: string[] = [];
+    const projector = new AttributionProjector(store, new SerializedAirtableProjectionTransport(store, client.table, true), syntheticProjectionMapping(), message => errors.push(message));
+    const hooks = createAttributionBusinessHooks(store, () => now, message => errors.push(message), () => projector.requestFlush());
+    const receipt = store.create(input('b'), now);
+    if (receipt.outcome !== 'created') throw new Error('Expected receipt.');
+    assert.equal(hooks.inquiry(receipt.shortCode, 'inquiry').outcome, 'matched');
+    assert.deepEqual(client.writes, { create: 0, update: 0 });
+    await blocked;
+    assert.equal(hooks.quote(receipt.shortCode, 'inquiry', 'quote').outcome, 'matched');
+    hooks.order('quote', 'order');
+    assert.equal(hooks.quote('', 'inquiry', 'unknown').outcome, 'unknown');
+    release?.();
+    await waitFor(() => store.nextProjection() === null);
+    const quote = await client.read('Quotes', 'quote');
+    assert.deepEqual((await client.read('Orders', 'order')).fields['Attribution Snapshot'], quote.fields['Attribution Snapshot']);
+    assert.equal((await client.read('Quotes', 'unknown')).fields['Attribution Snapshot'], undefined);
+    assert.equal(client.count('Attributions'), 1);
+    assert.deepEqual(errors, []);
+    store.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('only successful local bindings request projection and callback failure stays fail-open', () => {
+  const dir = mkdtempSync(join(tmpdir(), 'attribution-business-'));
+  try {
+    const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 3));
+    const errors: string[] = [];
+    let requests = 0;
+    const hooks = createAttributionBusinessHooks(store, () => now, message => errors.push(message), () => { requests += 1; throw new Error('Synthetic callback failure'); });
+    assert.equal(hooks.inquiry('', 'inquiry').outcome, 'unknown');
+    assert.equal(hooks.inquiry(`LKS-${'0'.repeat(16)}`, 'inquiry').reason, 'not_found');
+    assert.equal(requests, 0);
+    const receipt = store.create(input('b'), now);
+    if (receipt.outcome !== 'created') throw new Error('Expected receipt.');
+    assert.equal(hooks.inquiry(receipt.shortCode, 'inquiry').outcome, 'matched');
+    assert.equal(hooks.quote('', 'inquiry', 'quote').outcome, 'unknown');
+    hooks.order('quote', 'order');
+    assert.equal(requests, 3);
+    store.close();
+    assert.equal(hooks.inquiry(receipt.shortCode, 'inquiry').reason, 'service_unavailable');
+    assert.equal(hooks.quote(receipt.shortCode, 'inquiry', 'other').reason, 'service_unavailable');
+    hooks.order('quote', 'other');
+    assert.equal(requests, 3);
+    assert.equal(errors.filter(message => message === 'Attribution projection unavailable; retry is required.').length, 3);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('automatic projection leaves uncertain writes pending without recovery or duplicate creation', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'attribution-business-'));
+  try {
+    const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 3));
+    const client = new SyntheticAirtableClient();
+    client.seed('Inquiries', 'inquiry');
+    client.seed('Quotes', 'quote');
+    const errors: string[] = [];
+    const projector = new AttributionProjector(store, new SerializedAirtableProjectionTransport(store, client.table, true), syntheticProjectionMapping(), message => errors.push(message));
+    const hooks = createAttributionBusinessHooks(store, () => now, message => errors.push(message), () => projector.requestFlush());
+    const receipt = store.create(input('b'), now);
+    if (receipt.outcome !== 'created') throw new Error('Expected receipt.');
+    client.failure = { operation: 'create', after: true };
+    assert.equal(hooks.quote(receipt.shortCode, 'inquiry', 'quote').outcome, 'matched');
+    await waitFor(() => store.projectionWriterStatus().state === 'uncertain');
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(client.count('Attributions'), 1);
+    assert.ok(store.nextProjection());
+    hooks.order('quote', 'order');
+    await waitFor(() => errors.length >= 2);
+    assert.equal(store.projectionWriterStatus().state, 'uncertain');
+    assert.equal(client.count('Attributions'), 1);
+    assert.ok(store.nextProjection());
+    assert.ok(errors.every(message => message === 'Attribution projection unavailable; retry is required.'));
+    store.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('automatic projection reports pending after one bounded batch', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'attribution-business-'));
+  try {
+    const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 3));
+    const client = new SyntheticAirtableClient();
+    const errors: string[] = [];
+    const projector = new AttributionProjector(store, new SerializedAirtableProjectionTransport(store, client.table, true), syntheticProjectionMapping(), message => errors.push(message));
+    const hooks = createAttributionBusinessHooks(store, () => now, message => errors.push(message), () => projector.requestFlush());
+    for (let index = 0; index < 101; index += 1) {
+      const id = `quote-${index}`;
+      client.seed('Quotes', id);
+      hooks.quote('', '', id);
+    }
+    await waitFor(() => errors.length > 0);
+    assert.deepEqual(errors, ['Attribution projection pending; retry is required.']);
+    assert.equal(store.nextProjection()?.entityId, 'quote-100');
+    hooks.quote('', '', 'quote-100');
+    await waitFor(() => store.nextProjection() === null);
+    store.close();
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('durable bindings preserve first, latest, quote and order snapshots without borrowing', async () => {
   const dir = mkdtempSync(join(tmpdir(), 'attribution-business-'));
   try {

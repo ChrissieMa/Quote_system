@@ -42,6 +42,7 @@ test('optional attribution uses owner security and hooks only when injected', ()
   assert.ok(configuration.includes('requireOwner: requireAdmin'));
   assert.ok(configuration.includes('requireSameOrigin(req, res'));
   assert.ok(configuration.includes("safeEqual(String(req.get('x-csrf-token') || ''), getOwnerFormToken())"));
+  assert.ok(configuration.includes('createAttributionBusinessHooks(configuration.store, configuration.now, reportError, () => projector.requestFlush())'));
   assert.ok(source.includes('attributionRuntime?.hooks.inquiry(values.attributionCode, inquiryId)'));
   assert.ok(source.includes('attributionRuntime?.hooks.quote(selectedCode'));
   assert.ok(source.includes('transferredInquiryId !== canonicalInquiryRecordId'));

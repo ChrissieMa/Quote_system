@@ -32,8 +32,11 @@ the Inquiry's earlier attribution. Local failures and pending projection do not
 block the existing sales operations.
 
 The asynchronous projector uses an injected Airtable SDK table client and an
-explicit mapping. No network operation runs inside a SQLite transaction. Its
-bounded `flush()` is called explicitly; no scheduler or service is installed.
+explicit mapping. No network operation runs inside a SQLite transaction. A
+successful local binding requests one bounded, fire-and-forget projection
+attempt; overlapping requests for the same projector are skipped. Pending work
+after a full batch or a failed attempt is reported and can be retried on a later
+successful binding or flushed explicitly; no scheduler or service is installed.
 The local pins are authoritative, and remote updates cannot be atomic with
 them. The Inquiry revision prevents a stale queued update from replacing a
 newer projected Latest. Existing conflicting First or Quote/Order links stop

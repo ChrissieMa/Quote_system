@@ -822,7 +822,7 @@ export const configureAttribution = (configuration: {
       now: configuration.now, allowRequest: configuration.allowRequest,
       requireOwner: requireAdmin, requireOwnerOriginAndCsrf, reportError,
     }),
-    hooks: createAttributionBusinessHooks(configuration.store, configuration.now, reportError),
+    hooks: createAttributionBusinessHooks(configuration.store, configuration.now, reportError, () => projector.requestFlush()),
   };
   return projector;
 };
