@@ -25,6 +25,36 @@ const request = (): AttributionRequest => ({
   consent: { ad_storage: 'granted', analytics_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted' },
 });
 
+const compileWorker = (dir: string): string => {
+  const compiled = join(dir, 'worker');
+  mkdirSync(join(compiled, 'test-only'), { recursive: true });
+  for (const relative of ['attribution-store.ts', 'test-only/attribution-store-worker.ts']) {
+    const source = readFileSync(join(__dirname, relative), 'utf8');
+    const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
+    writeFileSync(join(compiled, relative.replace(/\.ts$/, '.js')), output);
+  }
+  return join(compiled, 'test-only/attribution-store-worker.js');
+};
+
+const barrierWorker = (workerPath: string, databasePath: string) => {
+  const child = spawn(process.execPath, [workerPath, databasePath, 'open-barrier'], { stdio: ['ignore', 'pipe', 'pipe', 'ipc'] });
+  let output = '';
+  let errors = '';
+  if (!child.stdout || !child.stderr) throw new Error('Worker output pipes are unavailable.');
+  child.stdout.on('data', chunk => { output += chunk; });
+  child.stderr.on('data', chunk => { errors += chunk; });
+  const ready = new Promise<void>((resolve, reject) => {
+    child.once('message', () => resolve());
+    child.once('error', reject);
+    child.once('exit', code => reject(new Error(`Worker exited before ready: ${code}`)));
+  });
+  const result = new Promise<{ outcome: string; shortCode?: string }>((resolve, reject) => {
+    child.once('error', reject);
+    child.once('close', code => code === 0 ? resolve(JSON.parse(output)) : reject(new Error(errors)));
+  });
+  return { ready, result, start: () => child.send('start') };
+};
+
 test('validation rejects extra data, unapproved values, bad chronology and missing consent', () => {
   assert.equal(validateAttributionRequest(request(), config, now).kind, 'valid');
   assert.equal(validateAttributionRequest({ ...request(), gclid: 'synthetic' }, config, now).kind, 'invalid');
@@ -99,14 +129,7 @@ test('independent processes atomically replay one durable receipt', async () => 
   const dir = mkdtempSync(join(tmpdir(), 'attribution-test-'));
   try {
     const path = join(dir, 'store.sqlite');
-    const compiled = join(dir, 'worker');
-    mkdirSync(join(compiled, 'test-only'), { recursive: true });
-    for (const relative of ['attribution-store.ts', 'test-only/attribution-store-worker.ts']) {
-      const source = readFileSync(join(__dirname, relative), 'utf8');
-      const output = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, esModuleInterop: true } }).outputText;
-      writeFileSync(join(compiled, relative.replace(/\.ts$/, '.js')), output);
-    }
-    const workerPath = join(compiled, 'test-only/attribution-store-worker.js');
+    const workerPath = compileWorker(dir);
     const worker = (databasePath: string, mode = 'original'): Promise<{ outcome: string; shortCode?: string }> => new Promise((resolve, reject) => {
       const child = spawn(process.execPath, [workerPath, databasePath, mode]);
       let output = '';
@@ -116,6 +139,7 @@ test('independent processes atomically replay one durable receipt', async () => 
       child.on('error', reject);
       child.on('close', code => code === 0 ? resolve(JSON.parse(output)) : reject(new Error(errors)));
     });
+
     const results = await Promise.all(Array.from({ length: 5 }, () => worker(path)));
     assert.equal(results.filter(result => result.outcome === 'created').length, 1);
     assert.equal(results.filter(result => result.outcome === 'replayed').length, 4);
@@ -139,5 +163,50 @@ test('independent processes atomically replay one durable receipt', async () => 
     const collisions = await Promise.all([worker(collisionPath, 'collision-a'), worker(collisionPath, 'collision-b')]);
     assert.equal(collisions.filter(result => result.outcome === 'created').length, 2);
     assert.equal(new Set(collisions.map(result => result.shortCode)).size, 2);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('simultaneous fresh opens initialize WAL and preserve a single receipt', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'attribution-test-'));
+  try {
+    const workerPath = compileWorker(dir);
+    for (let round = 0; round < 3; round += 1) {
+      const workers = Array.from({ length: 6 }, () => barrierWorker(workerPath, join(dir, `fresh-${round}.sqlite`)));
+      await Promise.all(workers.map(worker => worker.ready));
+      workers.forEach(worker => worker.start());
+      const results = await Promise.all(workers.map(worker => worker.result));
+      assert.equal(results.filter(result => result.outcome === 'created').length, 1);
+      assert.equal(results.filter(result => result.outcome === 'replayed').length, 5);
+      assert.equal(new Set(results.map(result => result.shortCode)).size, 1);
+    }
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('WAL initialization retries a temporary lock and rejects unrelated database errors', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'attribution-test-'));
+  try {
+    const path = join(dir, 'locked.sqlite');
+    const { DatabaseSync } = require('node:sqlite') as {
+      DatabaseSync: new (filename: string) => { exec(sql: string): void; prepare(sql: string): { all(): unknown[] }; close(): void };
+    };
+    const holder = new DatabaseSync(path);
+    holder.exec('PRAGMA journal_mode = DELETE; BEGIN;');
+    holder.prepare('SELECT * FROM sqlite_schema').all();
+    try {
+      const worker = barrierWorker(compileWorker(dir), path);
+      await worker.ready;
+      worker.start();
+      const state = await Promise.race([
+        worker.result.then(() => 'finished'),
+        new Promise<string>(resolve => setTimeout(() => resolve('waiting'), 400)),
+      ]);
+      assert.equal(state, 'waiting');
+      holder.exec('COMMIT;');
+      assert.equal((await worker.result).outcome, 'created');
+    } finally { holder.close(); }
+    const invalid = join(dir, 'invalid.sqlite');
+    writeFileSync(invalid, 'not a sqlite database');
+    assert.throws(() => new LocalAttributionStore(invalid, Buffer.alloc(32, 7)), (error: unknown) =>
+      error instanceof Error && 'errcode' in error && error.errcode === 26);
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });

@@ -14,6 +14,8 @@ backups, retention, recovery and multi-host deployment need separate review.
 Expired codes remain reserved in a local registry so old messages cannot
 resolve to a different snapshot. Registry growth and retention are unresolved.
 This local adapter is not a production storage recommendation.
+Concurrent initial WAL setup retries SQLite busy errors for up to ten seconds;
+other initialization failures are surfaced without retry.
 
 The application mounts the router before its global body parser only when
 explicitly configured. Configuration must supply a bounded rate limiter, a

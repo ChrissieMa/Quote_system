@@ -24,7 +24,15 @@ const mint = collision ? () => {
   return minted === 1 ? 'LKS-0000000000000000'
     : process.argv[3] === 'collision-a' ? 'LKS-1111111111111111' : 'LKS-2222222222222222';
 } : undefined;
-const store = new LocalAttributionStore(process.argv[2], Buffer.alloc(32, 7), mint);
-const result = store.create(request, Date.parse('2026-01-01T00:00:00Z'));
-process.stdout.write(JSON.stringify(result));
-store.close();
+const run = (): void => {
+  const store = new LocalAttributionStore(process.argv[2], Buffer.alloc(32, 7), mint);
+  const result = store.create(request, Date.parse('2026-01-01T00:00:00Z'));
+  process.stdout.write(JSON.stringify(result));
+  store.close();
+};
+
+if (process.argv[3] === 'open-barrier') {
+  if (!process.send) throw new Error('Barrier requires IPC.');
+  process.send('ready');
+  process.once('message', () => { run(); process.disconnect?.(); });
+} else run();

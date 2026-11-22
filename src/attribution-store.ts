@@ -1,4 +1,5 @@
 import { createHash, createHmac, randomBytes, timingSafeEqual } from 'crypto';
+import { performance } from 'node:perf_hooks';
 import type { AttributionRequest, AttributionTouch } from './attribution-validation';
 
 type SqlValue = string | number | null;
@@ -62,6 +63,27 @@ const secureDigestEqual = (left: string, right: string): boolean => {
   return a.length === 32 && b.length === 32 && timingSafeEqual(a, b);
 };
 
+const initializeWal = (db: Database): void => {
+  const deadline = performance.now() + 10000;
+  const sleep = new Int32Array(new SharedArrayBuffer(4));
+  let delay = 10;
+  db.exec('PRAGMA busy_timeout = 100;');
+  for (;;) {
+    try {
+      db.exec('PRAGMA journal_mode = WAL;');
+      break;
+    } catch (error) {
+      if (!(error instanceof Error) || !('code' in error) || error.code !== 'ERR_SQLITE_ERROR'
+          || !('errcode' in error) || typeof error.errcode !== 'number' || (error.errcode & 255) !== 5) throw error;
+      const remaining = deadline - performance.now();
+      if (remaining <= 0) throw error;
+      Atomics.wait(sleep, 0, 0, Math.min(delay, remaining));
+      delay = Math.min(delay * 2, 100);
+    }
+  }
+  db.exec('PRAGMA busy_timeout = 10000; PRAGMA synchronous = FULL;');
+};
+
 /**
  * Development adapter. Its file path and stable proof key must be explicitly
  * injected; neither is sourced from process configuration by this module.
@@ -78,8 +100,9 @@ export class LocalAttributionStore {
     this.db = new sqlite.DatabaseSync(path);
     this.proofKey = Buffer.from(proofKey);
     this.mintCode = mintCode;
-    this.db.exec('PRAGMA busy_timeout = 10000; PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;');
-    this.db.exec(`
+    try {
+      initializeWal(this.db);
+      this.db.exec(`
       CREATE TABLE IF NOT EXISTS attribution_codes (
         code TEXT PRIMARY KEY
       );
@@ -120,7 +143,11 @@ export class LocalAttributionStore {
       CREATE TABLE IF NOT EXISTS attribution_projection_records (
         code TEXT PRIMARY KEY, record_id TEXT NOT NULL UNIQUE
       );
-    `);
+      `);
+    } catch (error) {
+      this.db.close();
+      throw error;
+    }
   }
 
   close(): void { this.db.close(); }
