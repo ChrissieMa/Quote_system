@@ -32,6 +32,22 @@ test('all owner pages and owner data APIs require the admin session', () => {
   assert.ok(!/ADMIN_PASSWORD\s*\|\|\s*['"][^'"]+/.test(source), 'admin password must never have a default');
 });
 
+test('optional attribution uses owner security and hooks only when injected', () => {
+  assert.ok(source.includes('let attributionRuntime: { router: express.Router; hooks: AttributionBusinessHooks } | null = null;'));
+  assert.ok(source.indexOf('attributionRuntime ? attributionRuntime.router') < source.indexOf("app.use(express.json({ limit: '1mb' }))"));
+  const start = source.indexOf('export const configureAttribution');
+  const end = source.indexOf('const quotationImageReadyHandshakeRunKey', start);
+  const configuration = source.slice(start, end);
+  assert.ok(configuration.includes('if (!configuration.enabled)'));
+  assert.ok(configuration.includes('requireOwner: requireAdmin'));
+  assert.ok(configuration.includes('requireSameOrigin(req, res'));
+  assert.ok(configuration.includes("safeEqual(String(req.get('x-csrf-token') || ''), getOwnerFormToken())"));
+  assert.ok(source.includes('attributionRuntime?.hooks.inquiry(values.attributionCode, inquiryId)'));
+  assert.ok(source.includes('attributionRuntime?.hooks.quote(selectedCode'));
+  assert.ok(source.includes('transferredInquiryId !== canonicalInquiryRecordId'));
+  assert.ok(source.includes('attributionRuntime?.hooks.order(quote.id, orderRecordId)'));
+});
+
 test('owner-only quotation-image TEST route is isolated from Production data and worker behavior', () => {
   const start = source.indexOf('app.get(QUOTATION_IMAGE_READY_HANDSHAKE_PATH, requireAdmin,');
   const end = source.indexOf('if (BROWSER_QUOTATION_IMAGE_BRIDGE && QUOTATION_IMAGE_RENDERER_URL)', start);

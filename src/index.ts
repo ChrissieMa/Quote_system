@@ -3,6 +3,9 @@ import Airtable, { FieldSet } from 'airtable';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import multer from 'multer';
+import { createAttributionRouter, AttributionRouterOptions } from './attribution-router';
+import { AttributionBusinessAdapter, AttributionBusinessHooks, createAttributionBusinessHooks, selectedAttributionCode } from './attribution-business';
+import { attributionOwnerTransferScript } from './attribution-owner-transfer';
 import {
   accessoryOrderItemName,
   accessoryStorageName,
@@ -195,6 +198,7 @@ import {
 dotenv.config();
 
 const app = express();
+let attributionRuntime: { router: express.Router; hooks: AttributionBusinessHooks } | null = null;
 app.set('trust proxy', 1);
 app.disable('x-powered-by');
 app.use((_req: Request, res: Response, next: () => void) => {
@@ -205,6 +209,7 @@ app.use((_req: Request, res: Response, next: () => void) => {
   res.setHeader('X-Content-Type-Options', 'nosniff');
   next();
 });
+app.use((req, res, next) => attributionRuntime ? attributionRuntime.router(req, res, next) : next());
 app.use(express.json({ limit: '1mb' }));
 app.use(express.urlencoded({ extended: true, limit: '1mb' }));
 
@@ -783,6 +788,38 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
     return res.status(403).type('text/plain').send('Invalid request origin.');
   }
   return next();
+};
+
+export const configureAttribution = (configuration: {
+  enabled: boolean;
+  store: AttributionRouterOptions['store'];
+  validation: AttributionRouterOptions['validation'];
+  now: AttributionRouterOptions['now'];
+  allowRequest: AttributionRouterOptions['allowRequest'];
+  business: AttributionBusinessAdapter;
+}): void => {
+  if (!configuration.enabled) {
+    attributionRuntime = null;
+    return;
+  }
+  const reportError = (message: string): void => { console.error(message); };
+  const requireOwnerOriginAndCsrf: express.RequestHandler = (req, res, next) => {
+    requireSameOrigin(req, res, () => {
+      if (!safeEqual(String(req.get('x-csrf-token') || ''), getOwnerFormToken())) {
+        res.sendStatus(403);
+        return;
+      }
+      next();
+    });
+  };
+  attributionRuntime = {
+    router: createAttributionRouter({
+      enabled: true, store: configuration.store, validation: configuration.validation,
+      now: configuration.now, allowRequest: configuration.allowRequest,
+      requireOwner: requireAdmin, requireOwnerOriginAndCsrf, reportError,
+    }),
+    hooks: createAttributionBusinessHooks(configuration.store, configuration.business, configuration.now, reportError),
+  };
 };
 
 const quotationImageReadyHandshakeRunKey = (req: Request): string | null => {
@@ -3979,6 +4016,7 @@ const renderQuickInquiryForm = (
             <div class="form-group"><label>Campaign / Source Detail（選填）</label><input name="campaignSourceDetail" list="quickInquiryCampaignOptions" value="${escapeHtml(values.campaignSourceDetail || '')}" placeholder="可直接揀舊來源，或輸入新名稱"><datalist id="quickInquiryCampaignOptions">${campaignOptionTags}</datalist></div>
           </div>
           <div class="form-group"><label>簡短備註（選填）</label><textarea name="notes" rows="3" placeholder="例如：問 Hot Toys 展示盒，未提供尺寸">${escapeHtml(values.notes || '')}</textarea></div>
+          ${attributionRuntime ? `<div class="form-group"><label>Attribution code（內部選填）</label><input name="attributionCode" maxlength="200" value="${escapeHtml(values.attributionCode || '')}"></div>` : ''}
           ${hasBlockingMatch ? `<label style="display:flex;align-items:flex-start;gap:8px;margin:4px 0 16px;"><input type="checkbox" name="forceNew" value="1" style="margin-top:4px;"><span>今次係另一件新產品，確認仍然建立一筆新查詢</span></label>` : ''}
           <div style="display:flex;gap:10px;flex-wrap:wrap;"><button class="btn btn-primary" type="submit">儲存查詢</button><a class="btn btn-outline" href="/quotes">返回 Quote System</a></div>
         </form>
@@ -4489,6 +4527,7 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
     productInterest: String(req.body.productInterest || '').trim(),
     campaignSourceDetail: String(req.body.campaignSourceDetail || '').trim(),
     notes: String(req.body.notes || '').trim(),
+    ...(attributionRuntime ? { attributionCode: String(req.body.attributionCode || '').trim() } : {}),
   };
   const [channels, products, campaigns] = await Promise.all([
     getTableSelectOptions('Inquiries', 'Channel', ['Website', 'WhatsApp Direct', 'Meta Ads', 'Facebook Organic', 'Instagram Organic', 'Carousell', 'KOL / ToyTV', 'Google Search', 'Google Organic', 'Referral', 'Returning Customer', 'Other']),
@@ -4538,6 +4577,7 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
     };
     const created = await tableInquiries.create([{ fields }]);
     const inquiryId = created[0].id;
+    const attributionResult = attributionRuntime?.hooks.inquiry(values.attributionCode, inquiryId);
     let inquiryNo = '';
     try {
       const refreshed = await tableInquiries.find(inquiryId);
@@ -4564,9 +4604,11 @@ app.post('/inquiry/create', requireAdmin, requireSameOrigin, async (req: Request
     return res.send(renderPage('Inquiry Saved', `
       <div class="doc-card">${docHeader('查詢已儲存', 'Inquiry Saved')}<div class="doc-body">
         <div class="alert alert-success">${escapeHtml(inquiryNo || '新查詢')} 已成功儲存，狀態為 New／未報價。</div>
+        ${attributionResult ? `<div class="alert alert-info">Automated attribution: ${escapeHtml(attributionResult.outcome)}${attributionResult.reason ? ` (${escapeHtml(attributionResult.reason)})` : ''}</div>` : ''}
         ${customerMessage}
         <div class="info-grid info-grid-2"><div class="info-block"><div class="lbl">Phone</div><div class="val">${escapeHtml(normalizedPhone)}</div></div><div class="info-block"><div class="lbl">Source</div><div class="val">${escapeHtml(values.channel)}</div></div></div>
-        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:20px;"><a class="btn btn-primary" href="/quote/create?inquiry=${encodeURIComponent(inquiryId)}">用此查詢建立 Quote</a><a class="btn btn-outline" href="/inquiry/create">再新增查詢</a><a class="btn btn-secondary" href="/quotes">返回 Dashboard</a></div>
+        ${attributionResult?.outcome === 'matched' ? attributionOwnerTransferScript : ''}
+        <div style="display:flex;gap:10px;flex-wrap:wrap;margin-top:20px;"><a class="btn btn-primary" href="/quote/create?inquiry=${encodeURIComponent(inquiryId)}"${attributionResult?.outcome === 'matched' ? ` data-inquiry="${escapeHtml(inquiryId)}" data-attribution-code="${escapeHtml(selectedAttributionCode(values.attributionCode) || '')}" onclick="window.lksAttributionOwnerSelection.remember(this.dataset.inquiry, this.dataset.attributionCode)"` : ''}>用此查詢建立 Quote</a><a class="btn btn-outline" href="/inquiry/create">再新增查詢</a><a class="btn btn-secondary" href="/quotes">返回 Dashboard</a></div>
       </div></div>`));
   } catch (error: any) {
     console.error('Quick Inquiry create failed:', error);
@@ -5070,6 +5112,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
               </div>
             </div>
             <div style="font-size:12px;color:#6b7280;margin-top:6px;">用於每月檢討：來源會跟 Quote 一齊保存，Convert to Invoice 時會帶去 Order_2026。</div>
+            ${attributionRuntime ? `${attributionOwnerTransferScript}<div class="form-group"><label>Attribution code（內部選填）</label><input id="attributionCode" maxlength="200"><input type="hidden" id="attributionTransferredInquiryId"></div>` : ''}
           </div>
 
           <div class="section">
@@ -6780,6 +6823,7 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
           campaignSourceDetail: getCampaignDetailValue(),
           campaignSourceDetailWasManual: getElValue('campaignSourceDetail') === '__manual__',
           inquiryRecordId: getElValue('inquiryRecordId'),
+          ${attributionRuntime ? "attributionCode: getElValue('attributionCode'), attributionTransferredInquiryId: getElValue('attributionTransferredInquiryId')," : ''}
           performanceMonthRecordId: getElValue('performanceMonthRecordId'),
           promotionType: getElValue('promotionType'),
           discountType: getElValue('discountType'),
@@ -6812,6 +6856,14 @@ app.get('/quote/create', requireAdmin, async (req: Request, res: Response) => {
       toggleDiscountInputs();
       toggleDeliveryInputs();
       handleInquiryChange();
+      ${attributionRuntime ? `
+      var selectedAttribution = window.lksAttributionOwnerSelection.take(getElValue('inquiryRecordId'));
+      if (selectedAttribution) {
+        setElValue('attributionCode', selectedAttribution);
+        setElValue('attributionTransferredInquiryId', getElValue('inquiryRecordId'));
+        document.getElementById('inquiryRecordId').addEventListener('change', function () { setElValue('attributionCode', ''); setElValue('attributionTransferredInquiryId', ''); });
+        document.getElementById('attributionCode').addEventListener('input', function () { setElValue('attributionTransferredInquiryId', ''); });
+      }` : ''}
       recalcSubtotal();
     });
   </script>`;
@@ -7098,6 +7150,10 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
 
     const createdQuoteRecords = await tableQuotes.create([{ fields: quoteFields }]);
     const createdQuoteRecordId = createdQuoteRecords[0].id;
+    const transferredInquiryId = String(b.attributionTransferredInquiryId || '');
+    const selectedCode = isPilotInternal || (transferredInquiryId && transferredInquiryId !== canonicalInquiryRecordId)
+      ? '' : b.attributionCode;
+    const attributionResult = attributionRuntime?.hooks.quote(selectedCode, canonicalInquiryRecordId, createdQuoteRecordId);
     // Enqueue only after the authoritative Quote exists. This call never
     // awaits rendering/storage and cannot delay or fail the create response.
     scheduleQuotationImageJobsAfterWrite(
@@ -7167,6 +7223,7 @@ app.post('/quote/create', requireAdminOrPilotInternal, requireSameOrigin, async 
         ${docHeader('報價單已建立', 'Quote Created')}
         <div class="doc-body">
           <div class="alert alert-success">Quote created successfully!</div>
+          ${attributionResult ? `<div class="alert alert-info">Automated attribution: ${escapeHtml(attributionResult.outcome)}${attributionResult.reason ? ` (${escapeHtml(attributionResult.reason)})` : ''}</div>` : ''}
           <div class="info-grid info-grid-2" style="margin-bottom:20px;">
             <div class="info-block"><div class="lbl">Quote Number</div><div class="val">${escapeHtml(quoteNumber)}</div></div>
             <div class="info-block"><div class="lbl">Quote Date</div><div class="val">${quoteDate}</div></div>
@@ -7815,6 +7872,7 @@ app.post('/admin/quote/:token/convert', requireAdmin, requireSameOrigin, async (
       const newOrder = await tableOrders.create([{ fields: orderFields }]);
       orderRecordId = newOrder[0].id;
     }
+    attributionRuntime?.hooks.order(quote.id, orderRecordId);
 
     // V13: When a Quote converts to Invoice, mark the linked Inquiry as Converted and link the Order.
     try {
