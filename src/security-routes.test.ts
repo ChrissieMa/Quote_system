@@ -82,7 +82,7 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   assert.ok(source.includes("process.env.SUPPLIER_SHIPPING_ENABLED === '1'"));
   assert.ok(source.includes('verifySupplierShippingRequest(secret'));
   assert.ok(routes.includes('supplierShippingItemNoLookupKeys(itemNo)'));
-  assert.ok(routes.includes("`EXACT({Item No}, '${safeFormulaLiteral(key)}')`"));
+  assert.ok(routes.includes("`{Item No} = '${safeFormulaLiteral(key)}'`"));
   assert.equal((routes.match(/tableOrderItems\.select/g) || []).length, 1,
     'Supplier mapping must use one bounded Airtable lookup for the whole batch');
   assert.ok(!routes.includes('SUBSTITUTE(TRIM({Item No})'));

@@ -9734,7 +9734,7 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
       for (const key of fallbackKeys) candidateItemNos.add(key);
     }
     const exactCandidateFormulas = [...candidateItemNos].map(key =>
-      `EXACT({Item No}, '${safeFormulaLiteral(key)}')`);
+      `{Item No} = '${safeFormulaLiteral(key)}'`);
     const records = await tableOrderItems.select({
       filterByFormula: exactCandidateFormulas.length === 1
         ? exactCandidateFormulas[0]
