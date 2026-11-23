@@ -1,21 +1,65 @@
 import assert from 'node:assert/strict';
-import { spawn, spawnSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import { createServer } from 'node:https';
+import { spawn, spawnSync, ChildProcess } from 'node:child_process';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { Readable, Writable } from 'node:stream';
 import express from 'express';
 import { AddressInfo } from 'node:net';
 import ts from 'typescript';
 import { createAttributionRouter } from '../attribution-router';
 import { LocalAttributionStore } from '../attribution-store';
 
-type Observation = { method: string; path: string; origin: string | null; cookie: string | null };
+type Observation = {
+  method: string;
+  path: string;
+  origin: string | null;
+  requestedMethod: string | null;
+  requestedHeaders: string | null;
+  contentType: string | null;
+  idempotencyKey: string | null;
+  cookie: string | null;
+  statusCode: number;
+};
+
+type CdpMessage = {
+  id?: number;
+  method?: string;
+  params?: Record<string, unknown>;
+  sessionId?: string;
+  result?: Record<string, unknown>;
+  error?: { message?: string };
+};
+
+type PendingCommand = {
+  resolve: (value: Record<string, unknown>) => void;
+  reject: (error: Error) => void;
+  timer: NodeJS.Timeout;
+};
 
 const websiteOrigin = 'https://lksdisplaybox.online';
 const apiOrigin = 'https://quote.lksdisplaybox.online';
+const disallowedOrigin = 'https://evil.example.test';
 const handoffPath = '/api/attribution/v1/handoffs';
+const revokePath = '/api/attribution/v1/revoke';
 const requestId = `ar_v1_${'a'.repeat(32)}`;
+const browserFlags = (profile: string): string[] => [
+  '--headless=new',
+  '--disable-gpu',
+  '--disable-background-networking',
+  '--disable-component-update',
+  '--disable-sync',
+  '--disable-extensions',
+  '--no-first-run',
+  '--no-default-browser-check',
+  '--no-proxy-server',
+  '--host-resolver-rules=MAP lksdisplaybox.online 127.0.0.1,MAP quote.lksdisplaybox.online 127.0.0.1,MAP evil.example.test 127.0.0.1,MAP * ~NOTFOUND',
+  `--user-data-dir=${profile}`,
+  '--remote-debugging-pipe',
+  'about:blank',
+];
+
 const request = {
   contractVersion: '1.0.0',
   requestId,
@@ -32,91 +76,186 @@ const request = {
   consent: { ad_storage: 'granted', analytics_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted' },
 };
 
-const runBrowser = (binary: string, page: string, profile: string): Promise<string> => new Promise((resolve, reject) => {
-  const child = spawn(binary, [
-    '--headless=new', '--no-sandbox', '--disable-gpu', '--ignore-certificate-errors',
-    '--disable-background-networking', '--disable-component-update', '--disable-sync',
-    '--disable-extensions', '--no-first-run', '--no-default-browser-check', '--no-proxy-server',
-    '--host-resolver-rules=MAP lksdisplaybox.online 127.0.0.1,MAP quote.lksdisplaybox.online 127.0.0.1,MAP evil.example.test 127.0.0.1,MAP * ~NOTFOUND',
-    `--user-data-dir=${profile}`, '--virtual-time-budget=5000', '--dump-dom', page,
-  ], { stdio: ['ignore', 'pipe', 'pipe'] });
-  let output = '';
-  let errors = '';
-  child.stdout.on('data', chunk => { output += chunk; });
-  child.stderr.on('data', chunk => { errors += chunk; });
-  const timeout = setTimeout(() => child.kill('SIGKILL'), 20_000);
-  child.once('error', error => { clearTimeout(timeout); reject(error); });
-  child.once('close', code => {
-    clearTimeout(timeout);
-    if (code === 0) resolve(output);
-    else reject(new Error(`Synthetic browser exited with ${code}: ${errors.slice(-1000)}`));
-  });
-});
+const pageSource = (): string => `<html><body data-result="pending" data-opaque="pending" data-done="false">
+  <script type="module">
+    import {createAttributionBrowserAdapter} from '/adapter.js';
+    const request=${JSON.stringify(request)};
+    const api=createAttributionBrowserAdapter(window,window.fetch.bind(window));
+    try {
+      const result=await api.create('${handoffPath}',request,{'Idempotency-Key':request.requestId});
+      document.body.dataset.result=result.shortCode?'accepted':'invalid-response';
+    } catch { document.body.dataset.result='failed'; }
+    const frame=document.createElement('iframe');
+    frame.sandbox='allow-scripts';
+    frame.srcdoc=\`<script>
+      const request=\${JSON.stringify(request)};
+      fetch('${apiOrigin}${handoffPath}',{method:'POST',mode:'cors',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json','Idempotency-Key':request.requestId},body:JSON.stringify(request)})
+        .then(()=>parent.postMessage('opaque-accepted','*'))
+        .catch(()=>parent.postMessage('opaque-blocked','*'));
+    <\\/script>\`;
+    const opaqueResult=await new Promise(resolve=>{
+      const timer=setTimeout(()=>resolve('timeout'),3000);
+      window.addEventListener('message',event=>{
+        if(event.source!==frame.contentWindow||event.origin!=='null') return;
+        if(event.data==='opaque-blocked'||event.data==='opaque-accepted'){
+          clearTimeout(timer);
+          resolve(event.data);
+        }
+      });
+      document.body.appendChild(frame);
+    });
+    document.body.dataset.opaque=opaqueResult;
+    document.body.dataset.done='true';
+  </script>
+</body></html>`;
+
+const disallowedPage = (): string => `<html><body data-result="pending" data-done="false"><script>
+  const request=${JSON.stringify(request)};
+  fetch('${apiOrigin}${handoffPath}',{method:'POST',mode:'cors',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json','Idempotency-Key':request.requestId},body:JSON.stringify(request)})
+    .then(()=>document.body.dataset.result='unexpectedly-allowed')
+    .catch(()=>document.body.dataset.result='blocked')
+    .finally(()=>document.body.dataset.done='true');
+</script></body></html>`;
+
+class CdpPipe {
+  private nextId = 0;
+  private buffer = '';
+  private readonly pending = new Map<number, PendingCommand>();
+  onEvent: (message: CdpMessage) => void = () => undefined;
+
+  constructor(private readonly input: Writable, output: Readable) {
+    output.setEncoding('utf8');
+    output.on('data', (chunk: string) => this.receive(chunk));
+    output.on('error', error => this.failAll(error));
+    input.on('error', error => this.failAll(error));
+  }
+
+  send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
+    const id = ++this.nextId;
+    const message = sessionId ? { id, method, params, sessionId } : { id, method, params };
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`Chrome DevTools command timed out: ${method}`));
+      }, 5000);
+      this.pending.set(id, { resolve, reject, timer });
+      this.input.write(`${JSON.stringify(message)}\0`);
+    });
+  }
+
+  private receive(chunk: string): void {
+    this.buffer += chunk;
+    let separator = this.buffer.indexOf('\0');
+    while (separator !== -1) {
+      const text = this.buffer.slice(0, separator);
+      this.buffer = this.buffer.slice(separator + 1);
+      separator = this.buffer.indexOf('\0');
+      if (!text) continue;
+      const message = JSON.parse(text) as CdpMessage;
+      if (message.id !== undefined) {
+        const pending = this.pending.get(message.id);
+        if (!pending) continue;
+        clearTimeout(pending.timer);
+        this.pending.delete(message.id);
+        if (message.error) pending.reject(new Error(message.error.message || 'Chrome DevTools command failed.'));
+        else pending.resolve(message.result || {});
+      } else {
+        this.onEvent(message);
+      }
+    }
+  }
+
+  private failAll(error: Error): void {
+    for (const [id, pending] of this.pending) {
+      clearTimeout(pending.timer);
+      pending.reject(error);
+      this.pending.delete(id);
+    }
+  }
+}
+
+const getHeader = (headers: Record<string, unknown>, name: string): string | null => {
+  const entry = Object.entries(headers).find(([key]) => key.toLowerCase() === name.toLowerCase());
+  return entry && typeof entry[1] === 'string' ? entry[1] : null;
+};
+
+const fulfill = async (
+  cdp: CdpPipe,
+  requestId: string,
+  status: number,
+  headers: Array<{ name: string; value: string }>,
+  body = '',
+  sessionId?: string,
+): Promise<void> => {
+  await cdp.send('Fetch.fulfillRequest', {
+    requestId,
+    responseCode: status,
+    responseHeaders: headers,
+    ...(body ? { body: Buffer.from(body).toString('base64') } : {}),
+  }, sessionId);
+};
+
+const fail = async (cdp: CdpPipe, requestId: string, sessionId?: string): Promise<void> => {
+  await cdp.send('Fetch.failRequest', { requestId, errorReason: 'BlockedByClient' }, sessionId);
+};
+
+const pageDone = async (cdp: CdpPipe, sessionId: string): Promise<string> => {
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    const result = await cdp.send('Runtime.evaluate', {
+      expression: 'document.body && document.body.dataset.done === "true"',
+      returnByValue: true,
+    }, sessionId);
+    const value = (result.result as { value?: unknown } | undefined)?.value;
+    if (value === true) {
+      const html = await cdp.send('Runtime.evaluate', {
+        expression: 'document.body.outerHTML',
+        returnByValue: true,
+      }, sessionId);
+      return String((html.result as { value?: unknown } | undefined)?.value || '');
+    }
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error('Synthetic browser page did not complete its bounded request promises.');
+};
 
 const main = async (): Promise<void> => {
   const [browserPath] = process.argv.slice(2);
   if (!browserPath || browserPath.startsWith('-')) throw new Error('Provide the local browser executable as a CLI argument.');
   const dir = mkdtempSync(join(tmpdir(), 'attribution-browser-'));
-  const keyPath = join(dir, 'fixture-key.pem');
-  const certificatePath = join(dir, 'fixture-cert.pem');
-  const certificate = spawnSync('openssl', [
-    'req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-days', '1',
-    '-subj', '/CN=lksdisplaybox.online',
-    '-addext', 'subjectAltName=DNS:lksdisplaybox.online,DNS:quote.lksdisplaybox.online,DNS:evil.example.test',
-    '-keyout', keyPath, '-out', certificatePath,
-  ], { stdio: 'ignore' });
-  if (certificate.status !== 0) throw new Error('Unable to create the temporary synthetic TLS certificate.');
+  chmodSync(dir, 0o711);
+  const profile = join(dir, 'chrome-profile');
+  mkdirSync(profile, { mode: 0o700 });
+  const uidResult = spawnSync('id', ['-u', 'nobody'], { encoding: 'utf8' });
+  const gidResult = spawnSync('id', ['-g', 'nobody'], { encoding: 'utf8' });
+  if (uidResult.status !== 0 || gidResult.status !== 0) throw new Error('An existing unprivileged browser account is required.');
+  const uid = Number(uidResult.stdout.trim());
+  const gid = Number(gidResult.stdout.trim());
+  if (!Number.isInteger(uid) || !Number.isInteger(gid)) throw new Error('Invalid unprivileged browser account.');
+  chownSync(profile, uid, gid);
 
-  const clientSource = readFileSync(join(__dirname, '../attribution-browser-adapter.ts'), 'utf8');
-  const clientModule = ts.transpileModule(clientSource, {
-    compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
-  }).outputText;
-  const observations: Observation[] = [];
   const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 9));
+  const observations: Observation[] = [];
+  const intercepted: Array<{ method: string; url: string; origin: string | null; headerNames: string[] }> = [];
+  const routingErrors: string[] = [];
   const app = express();
-  app.use((req, _res, next) => {
+  app.use((req, res, next) => {
     if (req.path.startsWith('/api/attribution/')) {
-      observations.push({
+      const observation: Observation = {
         method: req.method,
         path: req.originalUrl,
         origin: req.get('origin') || null,
+        requestedMethod: req.get('access-control-request-method') || null,
+        requestedHeaders: req.get('access-control-request-headers') || null,
+        contentType: req.get('content-type') || null,
+        idempotencyKey: req.get('Idempotency-Key') || null,
         cookie: req.get('cookie') || null,
-      });
+        statusCode: 0,
+      };
+      observations.push(observation);
+      res.once('finish', () => { observation.statusCode = res.statusCode; });
     }
     next();
-  });
-  app.get('/adapter.js', (_req, res) => res.type('text/javascript').send(clientModule));
-  app.get('/', (req, res) => {
-    if (req.hostname === 'evil.example.test') {
-      res.type('html').send(`<body data-result="pending"><script>
-        const request=${JSON.stringify(request)};
-        const url='${apiOrigin}${handoffPath}';
-        fetch(url,{method:'POST',mode:'cors',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json','Idempotency-Key':request.requestId},body:JSON.stringify(request)})
-          .then(()=>document.body.dataset.result='unexpectedly-allowed')
-          .catch(()=>document.body.dataset.result='blocked');
-      </script></body>`);
-      return;
-    }
-    res.type('html').send(`<body data-result="pending" data-opaque="pending"><script type="module">
-      import {createAttributionBrowserAdapter} from '/adapter.js';
-      const request=${JSON.stringify(request)};
-      document.cookie='attribution-probe=present; Domain=lksdisplaybox.online; Secure; SameSite=None; Path=/';
-      try {
-        const api=createAttributionBrowserAdapter(window,window.fetch.bind(window));
-        const result=await api.create('${handoffPath}',request,{'Idempotency-Key':request.requestId});
-        document.body.dataset.result=result.shortCode?'accepted':'invalid-response';
-      } catch { document.body.dataset.result='failed'; }
-      const frame=document.createElement('iframe');
-      frame.sandbox='allow-scripts';
-      frame.srcdoc=\`<script>
-        const request=\${JSON.stringify(request)};
-        fetch('${apiOrigin}${handoffPath}',{method:'POST',mode:'cors',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json','Idempotency-Key':request.requestId},body:JSON.stringify(request)})
-          .then(()=>parent.postMessage('opaque-accepted','*'))
-          .catch(()=>parent.postMessage('opaque-blocked','*'));
-      <\\/script>\`;
-      window.addEventListener('message',event=>{if(event.data==='opaque-blocked'||event.data==='opaque-accepted')document.body.dataset.opaque=event.data;});
-      document.body.appendChild(frame);
-    </script></body>`);
   });
   app.use(createAttributionRouter({
     enabled: true,
@@ -128,31 +267,156 @@ const main = async (): Promise<void> => {
     requireOwnerOriginAndCsrf: (_req, _res, next) => next(),
     reportError: () => { throw new Error('Synthetic backend route failed.'); },
   }));
-  const server = createServer({
-    key: readFileSync(keyPath),
-    cert: readFileSync(certificatePath),
-  }, app);
+  const server = createServer(app);
+  let browser: ChildProcess | null = null;
+  let cdp: CdpPipe | null = null;
 
   try {
     await new Promise<void>((resolve, reject) => {
       server.once('error', reject);
-      server.listen(443, '127.0.0.1', () => resolve());
+      server.listen(0, '127.0.0.1', () => resolve());
     });
-    const website = await runBrowser(browserPath, websiteOrigin, join(dir, 'chrome-website'));
+    const port = (server.address() as AddressInfo).port;
+    const adapterSource = readFileSync(join(__dirname, '../attribution-browser-adapter.ts'), 'utf8');
+    const adapterModule = ts.transpileModule(adapterSource, {
+      compilerOptions: { module: ts.ModuleKind.ES2022, target: ts.ScriptTarget.ES2022 },
+    }).outputText;
+    const websiteHtml = pageSource();
+    const allowedOrigins = new Set([websiteOrigin, disallowedOrigin]);
+
+    browser = spawn('/usr/bin/setpriv', [
+      `--reuid=${uid}`, `--regid=${gid}`, '--init-groups', '--',
+      browserPath, ...browserFlags(profile),
+    ], {
+      env: { HOME: profile, PATH: '/usr/bin:/bin' },
+      stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
+    });
+    const input = browser.stdio[3];
+    const output = browser.stdio[4];
+    if (!(input instanceof Writable) || !(output instanceof Readable)) {
+      throw new Error('Chrome DevTools pipe was not created.');
+    }
+    cdp = new CdpPipe(input, output);
+    cdp.onEvent = message => {
+      if (message.method === 'Target.attachedToTarget' && message.params) {
+        const childSessionId = String(message.params.sessionId || '');
+        if (!childSessionId) return;
+        void (async () => {
+          await cdp!.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, childSessionId);
+          await cdp!.send('Runtime.runIfWaitingForDebugger', {}, childSessionId);
+        })().catch(error => {
+          routingErrors.push(error instanceof Error ? error.message : 'Unable to enable child-target interception.');
+        });
+        return;
+      }
+      if (message.method !== 'Fetch.requestPaused' || !message.params) return;
+      const params = message.params as {
+        requestId: string;
+        request: { url: string; method: string; headers: Record<string, unknown>; postData?: string };
+      };
+      const sessionId = message.sessionId;
+      void (async () => {
+        const url = new URL(params.request.url);
+        const method = params.request.method;
+        intercepted.push({
+          method,
+          url: `${url.origin}${url.pathname}`,
+          origin: getHeader(params.request.headers, 'origin'),
+          headerNames: Object.keys(params.request.headers).map(name => name.toLowerCase()).sort(),
+        });
+        if (method === 'GET' && allowedOrigins.has(url.origin) && url.pathname === '/' && !url.search && !url.hash) {
+          await fulfill(cdp!, params.requestId, 200, [{ name: 'Content-Type', value: 'text/html; charset=utf-8' }],
+            url.origin === websiteOrigin ? websiteHtml : disallowedPage(), sessionId);
+          return;
+        }
+        if (method === 'GET' && url.origin === websiteOrigin && url.pathname === '/adapter.js' && !url.search && !url.hash) {
+          await fulfill(cdp!, params.requestId, 200, [{ name: 'Content-Type', value: 'text/javascript; charset=utf-8' }],
+            adapterModule, sessionId);
+          return;
+        }
+        const apiPaths = new Set([handoffPath, revokePath]);
+        const isApiRequest = url.origin === apiOrigin && apiPaths.has(url.pathname)
+          && !url.search && !url.hash && (method === 'OPTIONS' || method === 'POST');
+        if (!isApiRequest) {
+          await fail(cdp!, params.requestId, sessionId);
+          return;
+        }
+        const headers: Record<string, string> = {};
+        const permittedHeaders = method === 'OPTIONS'
+          ? ['origin', 'access-control-request-method', 'access-control-request-headers']
+          : ['origin', 'content-type', 'idempotency-key'];
+        for (const name of permittedHeaders) {
+          const value = getHeader(params.request.headers, name);
+          if (value !== null) headers[name] = value;
+        }
+        let body = params.request.postData;
+        if (method === 'POST' && body === undefined) {
+          const postData = await cdp!.send('Fetch.getRequestPostData', { requestId: params.requestId }, sessionId);
+          body = typeof postData.postData === 'string' ? postData.postData : '';
+        }
+        const response = await fetch(`http://127.0.0.1:${port}${url.pathname}`, {
+          method,
+          headers,
+          ...(method === 'POST' ? { body: body || '' } : {}),
+        });
+        const responseHeaders = [...response.headers.entries()]
+          .filter(([name]) => !['connection', 'content-length', 'transfer-encoding'].includes(name.toLowerCase()))
+          .map(([name, value]) => ({ name, value }));
+        const responseBody = method === 'OPTIONS' || response.status === 204 ? '' : await response.text();
+        await fulfill(cdp!, params.requestId, response.status, responseHeaders, responseBody, sessionId);
+      })().catch(error => {
+        routingErrors.push(error instanceof Error ? error.message : 'Unknown synthetic request routing failure.');
+        void fail(cdp!, params.requestId, sessionId);
+      });
+    };
+
+    const targets = await cdp.send('Target.getTargets');
+    const targetInfos = targets.targetInfos as Array<{ targetId: string; type: string; url: string }> | undefined;
+    const target = targetInfos?.find(item => item.type === 'page' && item.url === 'about:blank');
+    if (!target) throw new Error('Chrome did not create its initial synthetic page target.');
+    const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+    const sessionId = String(attached.sessionId || '');
+    if (!sessionId) throw new Error('Unable to attach to the synthetic Chrome page.');
+    await cdp.send('Page.enable', {}, sessionId);
+    await cdp.send('Runtime.enable', {}, sessionId);
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId);
+    await cdp.send('Target.setAutoAttach', {
+      autoAttach: true,
+      waitForDebuggerOnStart: true,
+      flatten: true,
+    }, sessionId);
+
+    await cdp.send('Page.navigate', { url: websiteOrigin }, sessionId);
+    const website = await pageDone(cdp, sessionId);
     assert.match(website, /data-result="accepted"/);
     assert.match(website, /data-opaque="opaque-blocked"/);
-    const disallowed = await runBrowser(browserPath, 'https://evil.example.test/', join(dir, 'chrome-disallowed'));
+
+    await cdp.send('Page.navigate', { url: disallowedOrigin }, sessionId);
+    const disallowed = await pageDone(cdp, sessionId);
     assert.match(disallowed, /data-result="blocked"/);
-    assert.ok(observations.some(item => item.method === 'OPTIONS' && item.origin === websiteOrigin));
-    assert.ok(observations.some(item => item.method === 'OPTIONS' && item.origin === 'null'));
-    assert.ok(observations.some(item => item.method === 'OPTIONS' && item.origin === 'https://evil.example.test'));
+
+    assert.ok(observations.some(item => item.method === 'OPTIONS'
+      && item.origin === websiteOrigin && item.statusCode === 204
+      && item.requestedMethod === 'POST'
+      && item.requestedHeaders === 'content-type,idempotency-key'));
+    assert.ok(observations.some(item => item.method === 'OPTIONS'
+      && item.origin === 'null' && item.statusCode === 403),
+    JSON.stringify({ observations: observations.map(({ method, path, origin, statusCode }) => ({ method, path, origin, statusCode })), intercepted, routingErrors }));
+    assert.ok(observations.some(item => item.method === 'OPTIONS'
+      && item.origin === disallowedOrigin && item.statusCode === 403));
     const posts = observations.filter(item => item.method === 'POST');
     assert.equal(posts.length, 1);
     assert.equal(posts[0].origin, websiteOrigin);
     assert.equal(posts[0].path, handoffPath);
+    assert.equal(posts[0].contentType, 'application/json');
+    assert.equal(posts[0].idempotencyKey, requestId);
     assert.equal(posts[0].cookie, null);
-    process.stdout.write('Synthetic Chrome CORS/preflight passed: Website allowed; opaque and disallowed origins blocked; one credential-free fixed-path POST.\n');
+    process.stdout.write('Synthetic Chrome origin/CORS fixture passed through local CDP interception; this is not real TLS validation.\n');
   } finally {
+    if (cdp) await cdp.send('Browser.close').catch(() => ({}));
+    if (browser && browser.exitCode === null) {
+      await new Promise<void>(resolve => browser!.once('close', () => resolve()));
+    }
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     store.close();
     rmSync(dir, { recursive: true, force: true });

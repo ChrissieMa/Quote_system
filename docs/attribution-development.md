@@ -151,10 +151,14 @@ factory and synthetic files, never the legacy environment-reading wrapper.
 On Node 22.23.4, the focused attribution suites passed 22/22 and the TypeScript
 build passed. The pinned synthetic frontend-to-router-to-business fixture
 passed five paths and 12 canonical scenarios. Direct browser-adapter tests
-passed; the latest local Chrome CORS fixture run accepted the direct request
-but did not receive the opaque-frame result before its assertion, so opaque
-origin browser behavior remains unaccepted. An earlier local browser run had
-passed, but it does not replace the latest incomplete result.
+passed. Earlier local Chrome trial results are excluded from acceptance
+because those runs disabled the browser sandbox and certificate verification.
+The latest normal-sandbox Chrome run used local CDP interception and passed the
+Website-origin preflight/create and disallowed-origin denial. The opaque iframe
+observed a failed fetch, but no `OPTIONS` request with `Origin: null` reached
+the local router, so the failure is not proof of the router's opaque-origin
+rejection. Browser-origin CORS acceptance remains pending. CDP fulfillment
+tests browser-origin behavior only; it is not real TLS validation.
 
 `npm audit` reports five inherited dependency findings (two moderate, two
 high, one critical) in the locked body-parser, Express, Multer, proxy-addr and
