@@ -57,6 +57,14 @@ test('isolated HTTP routes enforce origin, authentication, CSRF, body limits and
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>(resolve => server.once('listening', resolve));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const preflight = (path: string, originValue: string, method: string, headers: string) => fetch(base + path, {
+    method: 'OPTIONS',
+    headers: {
+      origin: originValue,
+      'access-control-request-method': method,
+      'access-control-request-headers': headers,
+    },
+  });
   const post = (path: string, value: unknown, headers: Record<string, string> = {}) => fetch(base + path, {
     method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(value),
   });
@@ -65,7 +73,23 @@ test('isolated HTTP routes enforce origin, authentication, CSRF, body limits and
     origin: ownerOrigin, 'x-test-session': issueAdminSession('owner', sessionSecret, now), 'x-csrf-token': csrf,
   };
   try {
+    const acceptedPreflight = await preflight('/api/attribution/v1/handoffs', origin, 'POST', 'content-type, idempotency-key');
+    assert.equal(acceptedPreflight.status, 204);
+    assert.equal(acceptedPreflight.headers.get('access-control-allow-origin'), origin);
+    assert.equal(acceptedPreflight.headers.get('access-control-allow-methods'), 'POST');
+    assert.equal(acceptedPreflight.headers.get('access-control-allow-headers'), 'Content-Type, Idempotency-Key');
+    assert.equal(acceptedPreflight.headers.get('access-control-allow-credentials'), null);
+    assert.notEqual(acceptedPreflight.headers.get('access-control-allow-origin'), '*');
+    for (const [invalidOrigin, method, headers] of [
+      ['null', 'POST', 'content-type'],
+      ['https://evil.example.test', 'POST', 'content-type'],
+      [origin, 'GET', 'content-type'],
+      [origin, 'POST', 'authorization'],
+    ]) {
+      assert.equal((await preflight('/api/attribution/v1/handoffs', invalidOrigin, method, headers)).status, 403);
+    }
     assert.equal((await post('/api/attribution/v1/handoffs', body, { ...publicHeaders, origin: 'https://other.example.test' })).status, 403);
+    assert.equal((await post('/api/attribution/v1/handoffs?gclid=synthetic', body, publicHeaders)).status, 422);
     allowed = false;
     assert.equal((await post('/api/attribution/v1/handoffs', body, publicHeaders)).status, 429);
     allowed = true;

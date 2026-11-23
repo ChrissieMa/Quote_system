@@ -31,10 +31,20 @@ export const createAttributionRouter = (options: AttributionRouterOptions): Rout
     if (req.get('origin') !== origin) { res.sendStatus(403); return; }
     res.setHeader('Access-Control-Allow-Origin', origin);
     res.setHeader('Vary', 'Origin');
+    if (req.originalUrl.includes('?')) { res.sendStatus(422); return; }
     if (!rateLimit.allow(req.ip || '', options.now()) || !options.allowRequest(req.ip || '')) { res.sendStatus(429); return; }
     next();
   };
   router.options(['/api/attribution/v1/handoffs', '/api/attribution/v1/revoke'], firstParty, (_req, res) => {
+    const requestedMethod = _req.get('access-control-request-method');
+    const requestedHeaders = (_req.get('access-control-request-headers') || '')
+      .split(',')
+      .map(header => header.trim().toLowerCase())
+      .filter(Boolean);
+    if (requestedMethod !== 'POST'
+        || requestedHeaders.some(header => header !== 'content-type' && header !== 'idempotency-key')) {
+      res.sendStatus(403); return;
+    }
     res.setHeader('Access-Control-Allow-Methods', 'POST');
     res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Idempotency-Key');
     res.sendStatus(204);

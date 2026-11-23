@@ -7,6 +7,7 @@ import { AddressInfo } from 'node:net';
 import vm from 'node:vm';
 import express from 'express';
 import { createAttributionRouter } from '../attribution-router';
+import { createAttributionBrowserAdapter } from '../attribution-browser-adapter';
 import { LocalAttributionStore } from '../attribution-store';
 import { createAttributionBusinessHooks } from '../attribution-business';
 import { AttributionProjector } from '../attribution-projection';
@@ -66,22 +67,27 @@ const main = async (): Promise<void> => {
   const server = app.listen(0, '127.0.0.1');
   await new Promise<void>(done => server.once('listening', done));
   const base = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+  const browserApi = createAttributionBrowserAdapter(
+    { location: { origin } } as Pick<Window, 'location'>,
+    async (input, init) => {
+      const endpoint = new URL(String(input));
+      assert.equal(endpoint.origin, 'https://quote.lksdisplaybox.online');
+      return fetch(base + endpoint.pathname, {
+        method: init?.method,
+        headers: { ...Object.fromEntries(new Headers(init?.headers).entries()), origin },
+        body: init?.body,
+      });
+    },
+  );
   const create = async (path: string, body: unknown, headers: Record<string, string>) => {
     wire.push({ definition: 'createRequest', value: body });
-    const response = await fetch(base + path, {
-      method: 'POST', headers: { 'content-type': 'application/json', origin, ...headers }, body: JSON.stringify(body),
-    });
-    assert.equal(response.status, 201);
-    const result = await response.json() as { shortCode: string };
+    const result = await browserApi.create(path, body, headers) as { shortCode: string };
     wire.push({ definition: 'createResponse', value: result });
     return result;
   };
-  const revoke = async (body: unknown) => {
+  const revoke = async (path: string, body: unknown) => {
     wire.push({ definition: 'revokeRequest', value: body });
-    const response = await fetch(base + '/api/attribution/v1/revoke', {
-      method: 'POST', headers: { 'content-type': 'application/json', origin }, body: JSON.stringify(body),
-    });
-    assert.equal(response.status, 204);
+    await browserApi.revoke(path, body);
   };
   const resolveOwner = async (code: string) => {
     const value = { contractVersion: '1.0.0', shortCode: code };
@@ -194,7 +200,7 @@ const main = async (): Promise<void> => {
           create: (path: string, body: unknown, headers: Record<string, string>) => {
             registration = create(path, body, headers); return registration;
           },
-          revoke: (_path: string, body: unknown) => revoke(body),
+          revoke: (path: string, body: unknown) => revoke(path, body),
         },
       });
       bridge.setConsent(grant);
@@ -273,7 +279,7 @@ const main = async (): Promise<void> => {
               if (request.body.attributionId === before.attributionId) registration.then(result => resolveInherited?.(result));
               return registration;
             },
-            revoke: (request: { body: unknown }) => revoke(request.body),
+            revoke: (request: { path: string; body: unknown }) => revoke(request.path, request.body),
           },
         });
         child.applyConsent({ marketing: true, statistics: true });
@@ -332,7 +338,7 @@ const main = async (): Promise<void> => {
               registration = create(path, value, headers);
               return new Promise<{ shortCode: string }>(done => { release = done; });
             },
-            revoke: async (_path: string, value: unknown) => { await revoke(value); invalidated?.(); },
+            revoke: async (path: string, value: unknown) => { await revoke(path, value); invalidated?.(); },
           },
         });
         bridge.setConsent({});
@@ -347,7 +353,7 @@ const main = async (): Promise<void> => {
               registration = create(path, value, headers);
               return new Promise<{ shortCode: string }>(done => { release = done; });
             },
-            revoke: async (_path: string, value: unknown) => { await revoke(value); invalidated?.(); },
+            revoke: async (path: string, value: unknown) => { await revoke(path, value); invalidated?.(); },
           },
         });
         lateBridge.setConsent(grant);

@@ -1,105 +1,162 @@
-# Attribution bridge development
+# Attribution bridge readiness
 
-**Status: development only, disabled by default.** The router, validator,
-local transactional store and optional owner workflow hooks require explicit
-in-process configuration and injected adapters. No production provider,
-configuration, schema change or deployment is included.
+**Status: synthetic Development acceptance only; disabled by default. No
+Production readiness or approval is implied.** No provider, database volume,
+schema, live business data, frontend configuration, tracking configuration or
+service has been created or changed.
 
-The local adapter uses `node:sqlite`; this requires a Node release with that API
-available without a runtime flag (Node 22.13 or later). It has been exercised
-locally on Node 26, not against the production runtime. The caller supplies the
-database path and a stable, secret proof key. Loss or rotation of that key
-invalidates replay of existing receipts; storage protection, key management,
-backups, retention, recovery and multi-host deployment need separate review.
-Expired codes remain reserved in a local registry so old messages cannot
-resolve to a different snapshot. Registry growth and retention are unresolved.
-This local adapter is not a production storage recommendation.
-Concurrent initial WAL setup retries SQLite busy errors for up to ten seconds;
-other initialization failures are surfaced without retry.
+## Runtime composition and storage gate
 
-The application mounts the router before its global body parser only when
-explicitly configured. Configuration must supply a bounded rate limiter, a
-store, allowlists, an Airtable transport and explicit field mappings; the
-application supplies its owner authentication, origin and CSRF checks.
-Automated attribution remains separate from the existing manual source stream.
+The host starts with no attribution router mounted. `configureAttribution` is
+an explicit in-process composition point; it returns without activation unless
+its caller explicitly passes `enabled: true`. It receives a
+`LocalAttributionStore`, validation allowlists, an injected request limiter,
+the asynchronous Airtable projection transport and a complete explicit field
+mapping. `createAirtableProjectionTransport` must receive that same store, an
+explicit Airtable base client and an explicit exclusive-writer confirmation.
+There is no environment-variable configuration, default base, credential,
+campaign key, background worker, timer or automatic recovery in this feature.
+The host bootstrap does not call this composition point.
 
-The local binding transaction is the selection linearization point. It
-serializes with revocation, fixes Inquiry First once, updates Latest only on a
-verified selection, pins each Quote (including Unknown), copies its pin to the
-Order and enqueues projection work. Revocation first prevents binding; binding
-first protects that handoff from revocation. A missing selection never borrows
-the Inquiry's earlier attribution. Local failures and pending projection do not
-block the existing sales operations.
+The expected backend is the Quote service, and the Website/3D browser origin is
+`https://lksdisplaybox.online`. `createAttributionBrowserAdapter` rejects any
+other browser origin and contains only the fixed Quote API origin
+`https://quote.lksdisplaybox.online` and the fixed handoff/revocation paths.
+Requests use `mode: cors`, `credentials: omit`, `redirect: error`, JSON bodies,
+and no referrer. The adapter does not accept an endpoint, runtime switch,
+arbitrary path or query string. The API router grants CORS only to the exact
+Website origin, answers only the expected POST preflight, does not allow
+credentials or wildcard origins, and rejects `null` and other origins.
+Synthetic Chrome coverage exercises the real browser preflight and cross-origin
+request locally; it makes no live endpoint request.
 
-The asynchronous projector uses an injected Airtable SDK table client and an
-explicit mapping. No network operation runs inside a SQLite transaction. A
-successful local binding requests one bounded, fire-and-forget projection
-attempt; overlapping requests for the same projector are skipped. Pending work
-after a full batch or a failed attempt is reported and can be retried on a later
-successful binding or flushed explicitly; no scheduler or service is installed.
-The local pins are authoritative, and remote updates cannot be atomic with
-them. The Inquiry revision prevents a stale queued update from replacing a
-newer projected Latest. Existing conflicting First or Quote/Order links stop
-projection rather than being overwritten.
+Production campaign validation and projection mappings must start empty. Add
+only explicitly approved campaign keys linked to existing Campaign metadata
+with a verified matching source. Synthetic campaign keys and records used by
+tests are not Production configuration; never create Campaign records from
+incoming values. The global GA4 outbound-click gate remains **NO-GO**. No
+identifier, message, raw URL, Quote token or business reference is to be sent
+to GA4 or written to logs.
 
-Airtable does not provide native uniqueness or compare-and-set here. Before
-constructing the transport, an operator must verify that **all** writes to the
-mapped attribution records and links are exclusively serialized through one
-shared local store and this transport, including across hosts and external
-integrations. Multiple independent local stores or uncoordinated writers are
-not safe. The local durable writer lock has no automatic lease or takeover.
-Before each remote mutation it records an in-flight marker. A crash or
-uncertain remote response leaves projection blocked, including after restart.
-`projectionWriterStatus()` and `recoverProjectionWriter()` support explicit
-recovery only after all prior writers are stopped, every in-flight remote
-request is settled, and any uncertain create is reconciled to its actual
-record ID. Wrong or duplicate mappings and ambiguous remote records require
-manual investigation; never guess or automatically retry an uncertain create.
-The confirmation argument is not proof of those operator checks. Provider,
-shared-storage, recovery, permission and operational preflights remain gates.
+The local store requires Node `node:sqlite` support (Node 22.13 or later); the
+current hosted runtime reports Node 22.23.4. Concurrent WAL initialization
+retries SQLite busy errors for at most ten seconds and surfaces other database
+errors. That does not establish durable Production storage. Railway's attached
+persistent-volume behavior for this SQLite file and its WAL sidecars is
+unproven; this is a hard preflight gate. Do not select an ephemeral filesystem
+or assume that one replica makes it durable. Before any separate approval,
+verify a persistent mount, same-volume WAL operation, file permissions,
+restart/reopen behavior, backup/restore and the one-writer topology using only
+synthetic records. No provider or volume has been created here.
 
-## Proposed additive migration
+Startup preflight must also verify runtime compatibility, the explicit base and
+table mapping, exact existing schema, campaign allowlist, rate limiter, owner
+authentication/origin/CSRF wiring, and that no other process or integration can
+write the mapped projection. It must not read customer records. A failed
+preflight means do not call `configureAttribution` with `enabled: true`.
 
-After separate approval, preflight the current schema and exact field types
-without reading customer records. Propose a separate attribution table for a
-bound verified handoff, first/last normalized touch, consent, capture time and
-expiry, with optional links to existing approved Campaign records.
-Add first/latest attribution links to Inquiry and an immutable attribution link
-to each Quote and Order. Do not repurpose existing fields, add arbitrary Campaign
-options, backfill, or apply schema changes as part of this development work.
-Missing or mismatched fields must fail preflight without writes.
+## Binding, projection and recovery
 
-| Target | Proposed mapping |
+The local SQLite transaction is the business-selection linearization point. It
+serializes binding with revocation, fixes Inquiry First once, updates Latest
+only for a verified touch, pins each Quote (including Unknown), copies its
+immutable pin to an Order, and enqueues projection work. Existing manual
+customer-source fields remain a separate stream. Existing Quote and Order
+creation is fail-open: a storage/projection failure does not block sales.
+
+After each successful local binding, the runtime requests one bounded,
+coalesced, fire-and-forget projection attempt. It never waits for the network
+on the sales response. A concurrent request for the same projector is skipped;
+the durable outbox remains pending and a static internal error is reported if
+the batch is incomplete or fails. Later successful bindings or an explicit
+local `flush()` can retry. There is no scheduler or timer. No network request
+runs inside a SQLite transaction.
+
+Airtable is not treated as providing uniqueness or compare-and-set. Query and
+create are serialized only by the durable local exclusive-writer state. The
+Inquiry projection revision protects a newer Latest value from an older queued
+write; existing conflicting First or Quote/Order links are never overwritten.
+Local pins are authoritative, but local and remote stores are not atomic.
+Multiple independent local databases or uncoordinated remote writers are
+unsafe.
+
+The durable writer has no lease or automatic takeover. It records an
+in-flight marker before each remote mutation. A crash or uncertain provider
+response blocks further projection, including after restart. Before
+`recoverProjectionWriter`, stop all previous writers, verify every request is
+settled, reconcile uncertain remote creates/updates to actual record IDs, and
+review all duplicate or conflicting links. Never guess a record ID or retry an
+uncertain create automatically. The recovery confirmation argument is not
+proof that these checks were performed.
+
+Handoff codes and receipts expire at exactly seven days; browser journey
+retention remains 30 days. Expired code reservations are intentionally retained
+to prevent reuse, and local Quote/Order pins are retained for immutable
+business history. There is no automatic garbage collection. An owner-approved
+retention, backup and secure-disposal policy is still required before
+Production; do not purge or compact records as part of this proposal.
+
+## Additive schema proposal only
+
+The current schema review found no `Attributions` table. The following is a
+proposal, not an applied migration. Preflight exact table/field IDs and types
+without reading customer records; fail closed on mismatches. Do not rename
+existing fields, alter select choices, repurpose duplicate legacy links, or
+create Campaign records.
+
+| Target | New physical fields |
 | --- | --- |
-| `Attributions` | `Handoff Code`, `Attribution ID`, `Contract Version`, `Entry Surface`, `Created At`, `Expires At`, `Consent At Capture` |
-| `Attributions` touches | First/last touch time, channel, source, medium, landing path, evidence and confidence as separate fields |
-| `Attributions` campaigns | `First Campaign` and `Last Campaign` link only approved keys to existing Campaign metadata with matching source |
-| `Inquiries` | `First Attribution`, `Latest Attribution`, and numeric `Attribution Projection Revision`, within the active cycle |
-| `Quotes` | `Attribution Snapshot` links the explicitly selected verified snapshot; otherwise Unknown |
-| `Order_2026` | `Attribution Snapshot` copies its Quote's pinned link; otherwise Unknown |
+| `Attributions` (24 direct fields) | `Handoff Code`, `Attribution ID`, `Contract Version`, `Entry Surface`, `First Touch At`, `First Channel`, `First Source`, `First Medium`, `First Campaign`, `First Landing Path`, `Last Touch At`, `Last Channel`, `Last Source`, `Last Medium`, `Last Campaign`, `Last Landing Path`, `First Evidence`, `Last Evidence`, `First Confidence`, `Last Confidence`, `Consent At Capture`, `Created At`, `Expires At`, `Revoked At` |
+| `Inquiries` (2 links + 1 number) | `First Attribution`, `Latest Attribution`, `Attribution Projection Revision` |
+| `Quotes` (1 link) | `Attribution Snapshot` |
+| `Order_2026` (1 link) | `Attribution Snapshot` |
+| Airtable-generated inverse fields (6) | Two Campaigns inverses for First/Last Campaign; four Attributions inverses for the Inquiry, Quote and Order links above |
 
-## Remaining work and release
+This is **35 physical fields**: 24 direct Attributions fields, four business
+links, one Inquiry revision, and six automatically generated inverse fields.
+Keep the existing canonical `Quotes.Inquiry` and `Order_2026.Inquiry` links
+unchanged; do not repurpose duplicate legacy Inquiry links. Preserve existing
+manual source fields and all existing formulas/options.
 
-The optional owner paste fields and Inquiry, Quote and Order hooks use the
-local durable binding implementation. The runtime projector has only been
-exercised with a synthetic Airtable table client, not a live provider.
-Production-compatible storage, exclusive-writer preflight and recovery,
-retention, schema approval, and private canonical acceptance remain **pending**.
-The pinned frontend fixture exercises a synthetic parent/iframe/backend/business
-chain, not a live deployment. Following an Inquiry's create-Quote action transfers
-its selected code once in same-tab owner session storage, for at most a minute.
-The Quote still verifies that code; absent or expired selection is Unknown.
-The existing frontend consent, tag, privacy and legacy advertising compatibility
-gates remain open.
+## Release order, rollback and validation limits
 
-Run isolated tests with `npm run test:attribution`. To exercise the actual
-frontend modules without copying them into this repository, run
-`node -r ts-node/register src/test-only/attribution-frontend-fixture.ts <website-module-path> <configurator-module-path> [vectors-path] [wire-output-path]`.
-The paths must refer to independently obtained local fixtures; keep non-public
-fixtures and captured payloads outside this repository.
+Only after separate Production approval: (1) approve the retention and
+persistent-storage design; (2) perform schema-only preflight and separately
+approve the additive 35-field migration; (3) provision and validate the
+persistent provider and single-writer recovery process; (4) deploy the backend
+with attribution disabled; (5) validate the browser CORS, owner-security,
+business-binding, restart and recovery gates with synthetic data; (6) coordinate
+frontend releases disabled; (7) consider activation only under a separate
+explicit approval, with the Production campaign allowlist empty until reviewed.
+No Website/3D, GTM, GA4 or Ads settings are changed here.
 
-Only after separate approvals: preflight and apply the additive migration,
-deploy the backend disabled, deploy frontends disabled, validate all integration
-gates, then consider enabling. Rollback disables only the new feature and
-restores the prior builds; retain existing records and links. Do not change
-existing tracking, delete business history, or run unapproved cleanup.
+Rollback by disabling the feature and restoring prior application/frontend
+builds. Leave additive fields and historical business links intact; do not
+delete or rewrite business history. Any schema cleanup requires separate
+approval.
+
+The repository test inventory has one legacy owner-actions E2E test that
+starts `src/index.ts`; its bootstrap loads dotenv before serving the local
+fixture and inherits ambient process settings. The final safe inventory
+excluded that entire test file: 260/260 included tests passed, with one test
+excluded (not reported as a runner skip or a pass). Two earlier full-inventory
+attempts accidentally included the E2E test; each reported 260 passed, one
+failed, and zero skipped because the local fixture did not start. The test's
+normal cleanup sends SIGTERM to its child and removes its temporary files, but
+whether any external call could have occurred before the failure is unproven.
+Do not treat either full-inventory attempt as green. The isolated route and
+business checks passed; local Quote fixture tests use the explicit-options
+factory and synthetic files, never the legacy environment-reading wrapper.
+
+On Node 22.23.4, the focused attribution suites passed 22/22 and the TypeScript
+build passed. The pinned synthetic frontend-to-router-to-business fixture
+passed five paths and 12 canonical scenarios. Direct browser-adapter tests
+passed; the latest local Chrome CORS fixture run accepted the direct request
+but did not receive the opaque-frame result before its assertion, so opaque
+origin browser behavior remains unaccepted. An earlier local browser run had
+passed, but it does not replace the latest incomplete result.
+
+`npm audit` reports five inherited dependency findings (two moderate, two
+high, one critical) in the locked body-parser, Express, Multer, proxy-addr and
+qs dependency tree. No audit fix or unrelated upgrade was applied. Production
+dependency remediation remains a separate review gate.
