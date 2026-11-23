@@ -99,7 +99,11 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   assert.ok(source.includes("process.env.SUPPLIER_SHIPPING_ENABLED === '1'"));
   assert.ok(source.includes('verifySupplierShippingRequest(secret'));
   assert.ok(routes.includes('supplierShippingItemNoLookupKeys(itemNo)'));
-  assert.ok(routes.includes("`EXACT({Item No}, '${safeFormulaLiteral(key)}')`"));
+  assert.ok(routes.includes("`{Item No} = '${safeFormulaLiteral(key)}'`"));
+  assert.equal((routes.match(/tableOrderItems\.select/g) || []).length, 1,
+    'Supplier mapping must use one bounded Airtable lookup for the whole batch');
+  assert.ok(routes.includes("logSupplierShippingStatus('batch_result'"));
+  assert.ok(routes.includes("logSupplierShippingStatus('batch_exception'"));
   assert.ok(!routes.includes('SUBSTITUTE(TRIM({Item No})'));
   for (const header of ["'x-lks-key-id'", "'x-lks-timestamp'", "'x-lks-signature'"]) {
     assert.ok(source.includes(header), `missing signed Supplier header ${header}`);
@@ -107,6 +111,22 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   for (const forbidden of ['customerName', 'phone', 'email', 'address', 'Quote Token']) {
     assert.ok(!routes.includes(forbidden), `Supplier routes must not accept ${forbidden}`);
   }
+});
+
+test('owner cost page leaves China shipment entry to Supplier Portal while preserving the protected legacy receiver', () => {
+  const getStart = source.indexOf("app.get('/admin/costs', requireAdmin,");
+  const supplierStart = source.indexOf('const syncSupplierShippingFinance', getStart);
+  assert.ok(getStart >= 0 && supplierStart > getStart, 'owner cost page must exist before Supplier receiver setup');
+  const page = source.slice(getStart, supplierStart);
+  for (const hidden of [
+    '建立中國運費批次',
+    'Shipment No.／順豐單號',
+    'chinaShipmentForm',
+    'shipment_item_',
+  ]) assert.ok(!page.includes(hidden), `owner cost page must not expose ${hidden}`);
+  assert.ok(page.includes('待補訂單成本'));
+  assert.ok(page.includes('supplier_item_'));
+  assert.ok(source.includes("app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,"));
 });
 
 test('driver settlement route cannot write P&L or Business Expenses', () => {
