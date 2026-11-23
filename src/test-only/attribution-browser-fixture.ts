@@ -76,7 +76,7 @@ const request = {
   consent: { ad_storage: 'granted', analytics_storage: 'granted', ad_user_data: 'granted', ad_personalization: 'granted' },
 };
 
-const pageSource = (): string => `<html><body data-result="pending" data-opaque="pending" data-done="false">
+const pageSource = (): string => `<html><body data-result="pending" data-revoke="pending" data-opaque-guard="pending" data-opaque="pending" data-bad-header="pending" data-bad-path="pending" data-done="false">
   <script type="module">
     import {createAttributionBrowserAdapter} from '/adapter.js';
     const request=${JSON.stringify(request)};
@@ -84,19 +84,51 @@ const pageSource = (): string => `<html><body data-result="pending" data-opaque=
     try {
       const result=await api.create('${handoffPath}',request,{'Idempotency-Key':request.requestId});
       document.body.dataset.result=result.shortCode?'accepted':'invalid-response';
+      await api.revoke('${revokePath}',{
+        contractVersion:'1.0.0',attributionId:request.attributionId,revocationProof:result.revocationProof,
+      });
+      document.body.dataset.revoke='accepted';
+      try { await api.create('/api/attribution/v1/invalid',request,{'Idempotency-Key':request.requestId}); }
+      catch { document.body.dataset.badPath='blocked'; }
+      try {
+        await fetch('${apiOrigin}${handoffPath}',{method:'POST',mode:'cors',credentials:'omit',
+          headers:{'Content-Type':'application/json','X-Unexpected':'x'},body:JSON.stringify(request)});
+        document.body.dataset.badHeader='unexpectedly-allowed';
+      } catch { document.body.dataset.badHeader='blocked'; }
     } catch { document.body.dataset.result='failed'; }
     const frame=document.createElement('iframe');
     frame.sandbox='allow-scripts';
     frame.srcdoc=\`<script>
       const request=\${JSON.stringify(request)};
-      fetch('${apiOrigin}${handoffPath}',{method:'POST',mode:'cors',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json','Idempotency-Key':request.requestId},body:JSON.stringify(request)})
-        .then(()=>parent.postMessage('opaque-accepted','*'))
-        .catch(()=>parent.postMessage('opaque-blocked','*'));
+      window.addEventListener('message',async event=>{
+        if(event.source!==parent||event.data!=='opaque-start') return;
+        try {
+          const module=await import('${websiteOrigin}/adapter.js');
+          let calls=0;
+          const api=module.createAttributionBrowserAdapter(window,()=>{calls++;throw new Error('unexpected fetch');});
+          try { await api.create('${handoffPath}',request,{'Idempotency-Key':request.requestId}); }
+          catch { parent.postMessage(calls===0?'opaque-guard-blocked':'opaque-guard-fetched','*'); }
+        } catch { parent.postMessage('opaque-guard-failed','*'); }
+        fetch('${apiOrigin}${handoffPath}',{method:'POST',mode:'cors',credentials:'omit',redirect:'error',headers:{'Content-Type':'application/json','Idempotency-Key':request.requestId},body:JSON.stringify(request)})
+          .then(()=>parent.postMessage('opaque-accepted','*'))
+          .catch(()=>parent.postMessage('opaque-blocked','*'));
+      },{once:true});
+      parent.postMessage('opaque-ready','*');
     <\\/script>\`;
     const opaqueResult=await new Promise(resolve=>{
       const timer=setTimeout(()=>resolve('timeout'),3000);
+      let frameReady=false;
+      let started=false;
+      window.__lksStartOpaque=()=>{
+        if(frameReady&&window.__lksInterceptReady&&!started){
+          started=true;
+          frame.contentWindow.postMessage('opaque-start','*');
+        }
+      };
       window.addEventListener('message',event=>{
         if(event.source!==frame.contentWindow||event.origin!=='null') return;
+        if(event.data==='opaque-ready'){frameReady=true;window.__lksStartOpaque();return;}
+        if(event.data.startsWith('opaque-guard-')){document.body.dataset.opaqueGuard=event.data;return;}
         if(event.data==='opaque-blocked'||event.data==='opaque-accepted'){
           clearTimeout(timer);
           resolve(event.data);
@@ -237,6 +269,7 @@ const main = async (): Promise<void> => {
   const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 9));
   const observations: Observation[] = [];
   const intercepted: Array<{ method: string; url: string; origin: string | null; headerNames: string[] }> = [];
+  const browserNetwork: Array<Record<string, unknown>> = [];
   const routingErrors: string[] = [];
   const app = express();
   app.use((req, res, next) => {
@@ -300,12 +333,51 @@ const main = async (): Promise<void> => {
     cdp.onEvent = message => {
       if (message.method === 'Target.attachedToTarget' && message.params) {
         const childSessionId = String(message.params.sessionId || '');
-        if (!childSessionId) return;
+        const info = message.params.targetInfo as { type?: string } | undefined;
+        browserNetwork.push({
+          event: message.method, type: info?.type || '',
+          waitingForDebugger: message.params.waitingForDebugger === true,
+        });
+        if (!childSessionId || info?.type !== 'iframe') return;
         void (async () => {
+          await cdp!.send('Network.enable', {}, childSessionId);
           await cdp!.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, childSessionId);
           await cdp!.send('Runtime.runIfWaitingForDebugger', {}, childSessionId);
+          if (!message.sessionId) throw new Error('Missing parent session for iframe interception.');
+          await cdp!.send('Runtime.evaluate', {
+            expression: 'window.__lksInterceptReady=true;window.__lksStartOpaque?.()',
+          }, message.sessionId);
         })().catch(error => {
           routingErrors.push(error instanceof Error ? error.message : 'Unable to enable child-target interception.');
+        });
+        return;
+      }
+      if (message.method === 'Network.loadingFailed' && message.params) {
+        const p = message.params as {
+          requestId?: string; errorText?: string; blockedReason?: string;
+          corsErrorStatus?: { corsError?: string; failedParameter?: string };
+        };
+        browserNetwork.push({
+          event: message.method, sessionId: message.sessionId || '', requestId: p.requestId || '', errorText: p.errorText || '',
+          blockedReason: p.blockedReason || '', corsErrorStatus: p.corsErrorStatus || null,
+        });
+        return;
+      }
+      if (message.method === 'Network.requestWillBeSent' && message.params) {
+        const p = message.params as { requestId?: string; frameId?: string; type?: string; request?: { url?: string; method?: string } };
+        const url = String(p.request?.url || '').split('?')[0];
+        browserNetwork.push({
+          event: message.method, sessionId: message.sessionId || '', requestId: p.requestId || '', frameId: p.frameId || '',
+          type: p.type || '', method: p.request?.method || '', url,
+        });
+        return;
+      }
+      if ((message.method === 'Page.frameAttached' || message.method === 'Page.frameNavigated') && message.params) {
+        const p = message.params as { frameId?: string; parentFrameId?: string; frame?: { id?: string; parentId?: string; securityOrigin?: string; url?: string } };
+        browserNetwork.push({
+          event: message.method, sessionId: message.sessionId || '', frameId: p.frameId || p.frame?.id || '',
+          parentFrameId: p.parentFrameId || p.frame?.parentId || '',
+          origin: p.frame?.securityOrigin || '', url: p.frame?.url || '',
         });
         return;
       }
@@ -330,7 +402,11 @@ const main = async (): Promise<void> => {
           return;
         }
         if (method === 'GET' && url.origin === websiteOrigin && url.pathname === '/adapter.js' && !url.search && !url.hash) {
-          await fulfill(cdp!, params.requestId, 200, [{ name: 'Content-Type', value: 'text/javascript; charset=utf-8' }],
+          const headers = [{ name: 'Content-Type', value: 'text/javascript; charset=utf-8' }];
+          if (getHeader(params.request.headers, 'origin') === 'null') {
+            headers.push({ name: 'Access-Control-Allow-Origin', value: 'null' });
+          }
+          await fulfill(cdp!, params.requestId, 200, headers,
             adapterModule, sessionId);
           return;
         }
@@ -379,6 +455,7 @@ const main = async (): Promise<void> => {
     if (!sessionId) throw new Error('Unable to attach to the synthetic Chrome page.');
     await cdp.send('Page.enable', {}, sessionId);
     await cdp.send('Runtime.enable', {}, sessionId);
+    await cdp.send('Network.enable', {}, sessionId);
     await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*', requestStage: 'Request' }] }, sessionId);
     await cdp.send('Target.setAutoAttach', {
       autoAttach: true,
@@ -389,6 +466,10 @@ const main = async (): Promise<void> => {
     await cdp.send('Page.navigate', { url: websiteOrigin }, sessionId);
     const website = await pageDone(cdp, sessionId);
     assert.match(website, /data-result="accepted"/);
+    assert.match(website, /data-revoke="accepted"/);
+    assert.match(website, /data-bad-header="blocked"/);
+    assert.match(website, /data-bad-path="blocked"/);
+    assert.match(website, /data-opaque-guard="opaque-guard-blocked"/);
     assert.match(website, /data-opaque="opaque-blocked"/);
 
     await cdp.send('Page.navigate', { url: disallowedOrigin }, sessionId);
@@ -401,16 +482,29 @@ const main = async (): Promise<void> => {
       && item.requestedHeaders === 'content-type,idempotency-key'));
     assert.ok(observations.some(item => item.method === 'OPTIONS'
       && item.origin === 'null' && item.statusCode === 403),
-    JSON.stringify({ observations: observations.map(({ method, path, origin, statusCode }) => ({ method, path, origin, statusCode })), intercepted, routingErrors }));
+    JSON.stringify({ observations: observations.map(({ method, path, origin, statusCode }) => ({ method, path, origin, statusCode })), intercepted, browserNetwork, routingErrors }));
     assert.ok(observations.some(item => item.method === 'OPTIONS'
       && item.origin === disallowedOrigin && item.statusCode === 403));
+    assert.ok(observations.some(item => item.method === 'OPTIONS'
+      && item.origin === websiteOrigin && item.requestedHeaders === 'content-type,x-unexpected' && item.statusCode === 403));
+    assert.ok(observations.some(item => item.method === 'OPTIONS'
+      && item.origin === websiteOrigin && item.path === revokePath && item.statusCode === 204));
     const posts = observations.filter(item => item.method === 'POST');
-    assert.equal(posts.length, 1);
+    assert.equal(posts.length, 2);
     assert.equal(posts[0].origin, websiteOrigin);
     assert.equal(posts[0].path, handoffPath);
     assert.equal(posts[0].contentType, 'application/json');
     assert.equal(posts[0].idempotencyKey, requestId);
     assert.equal(posts[0].cookie, null);
+    assert.equal(posts[1].origin, websiteOrigin);
+    assert.equal(posts[1].path, revokePath);
+    assert.equal(posts[1].statusCode, 204);
+    assert.equal(posts[1].cookie, null);
+    const missingOrigin = await fetch(`http://127.0.0.1:${port}${handoffPath}`, {
+      method: 'OPTIONS',
+      headers: { 'Access-Control-Request-Method': 'POST' },
+    });
+    assert.equal(missingOrigin.status, 403);
     process.stdout.write('Synthetic Chrome origin/CORS fixture passed through local CDP interception; this is not real TLS validation.\n');
   } finally {
     if (cdp) await cdp.send('Browser.close').catch(() => ({}));

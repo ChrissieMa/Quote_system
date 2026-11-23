@@ -1,6 +1,5 @@
 import express, { NextFunction, Request, Response } from 'express';
 import Airtable, { FieldSet } from 'airtable';
-import dotenv from 'dotenv';
 import crypto from 'crypto';
 import multer from 'multer';
 import { createAttributionRouter, AttributionRouterOptions } from './attribution-router';
@@ -106,8 +105,8 @@ import {
   type QuotationImagePresentation,
 } from './quotation-image';
 import {
-  createLocalQuoteFixture,
-  localQuoteFixtureEnabled,
+  createLocalQuoteFixtureWithOptions,
+  localQuoteFixtureEnabledWithOptions,
 } from './test-only/local-quote-fixture';
 import {
   createGoogleDriveQuotationImageProviderFromEnvironment,
@@ -197,7 +196,28 @@ import {
   validateOrderPaymentRequestId,
 } from './owner-finance';
 
-dotenv.config();
+type AttributionConfiguration = {
+  enabled: boolean;
+  store: AttributionRouterOptions['store'];
+  validation: AttributionRouterOptions['validation'];
+  now: AttributionRouterOptions['now'];
+  allowRequest: AttributionRouterOptions['allowRequest'];
+  transport: SerializedAirtableProjectionTransport;
+  mapping: AttributionProjectionMapping;
+};
+
+let activeAttributionConfiguration: ((configuration: AttributionConfiguration) => AttributionProjector | null) | null = null;
+export const configureAttribution = (configuration: AttributionConfiguration): AttributionProjector | null => {
+  if (!activeAttributionConfiguration) throw new Error('Attribution host is not initialized.');
+  return activeAttributionConfiguration(configuration);
+};
+
+export const createQuoteApp = (options: {
+  environment: NodeJS.ProcessEnv;
+  localFixture?: ReturnType<typeof createLocalQuoteFixtureWithOptions>;
+  useLegacyFixture?: boolean;
+  onMissingRequiredEnvironment?: (name: string) => never;
+}) => {
 
 const app = express();
 let attributionRuntime: { router: express.Router; hooks: AttributionBusinessHooks } | null = null;
@@ -231,21 +251,34 @@ const acceptExpenseReceiptUpload = (req: Request, res: Response, next: NextFunct
   });
 };
 
-const PORT = process.env.PORT || 3000;
-const PUBLIC_BASE_URL = process.env.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
-const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(process.env.PUBLIC_TOKEN_TTL_DAYS);
-const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(process.env.QUOTATION_IMAGE_ENABLED);
-const LOCAL_QUOTE_FIXTURE = localQuoteFixtureEnabled() ? createLocalQuoteFixture() : null;
+const PORT = options.environment.PORT || 3000;
+const PUBLIC_BASE_URL = options.environment.PUBLIC_BASE_URL || `http://localhost:${PORT}`;
+const PUBLIC_TOKEN_TTL_MS = publicTokenTtlMs(options.environment.PUBLIC_TOKEN_TTL_DAYS);
+const QUOTATION_IMAGE_ENABLED = quotationImageEnabled(options.environment.QUOTATION_IMAGE_ENABLED);
+const LOCAL_QUOTE_FIXTURE = options.localFixture || (
+  options.useLegacyFixture && localQuoteFixtureEnabledWithOptions({
+    nodeEnv: options.environment.NODE_ENV,
+    enabled: options.environment.LKS_LOCAL_QUOTE_FIXTURE,
+    publicBaseUrl: options.environment.PUBLIC_BASE_URL,
+  }) ? createLocalQuoteFixtureWithOptions({
+      pngPath: String(options.environment.LKS_QUOTATION_IMAGE_FIXTURE_PNG || ''),
+      metadataPath: String(options.environment.LKS_QUOTATION_IMAGE_FIXTURE_JSON || ''),
+      automaticQuotationImage: options.environment.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE === '1',
+      browserTransportEnabled: options.environment.LKS_LOCAL_3D_BROWSER_TRANSPORT === '1',
+      publicPreviewEnabled: options.environment.LKS_LOCAL_PUBLIC_PREVIEW === '1',
+      rendererOrigin: String(options.environment.LKS_LOCAL_3D_RENDERER_ORIGIN || ''),
+    }) : null
+);
 const LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE = Boolean(
-  LOCAL_QUOTE_FIXTURE && process.env.LKS_LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE === '1',
+  LOCAL_QUOTE_FIXTURE && options.environment.LKS_LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE === '1',
 );
 const GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER = !QUOTATION_IMAGE_ENABLED
   || (LOCAL_QUOTE_FIXTURE && !LOCAL_QUOTE_FIXTURE_GOOGLE_DRIVE)
   ? null
-  : createGoogleDriveQuotationImageProviderFromEnvironment(process.env);
+  : createGoogleDriveQuotationImageProviderFromEnvironment(options.environment);
 const QUOTATION_IMAGE_RENDERER_URL = GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER
   && !LOCAL_QUOTE_FIXTURE
-  ? normalizeQuotationImageRendererUrl(process.env.QUOTATION_IMAGE_RENDERER_URL)
+  ? normalizeQuotationImageRendererUrl(options.environment.QUOTATION_IMAGE_RENDERER_URL)
   : null;
 const BROWSER_QUOTATION_IMAGE_BRIDGE = QUOTATION_IMAGE_RENDERER_URL
   ? new BrowserQuotationImageBridge()
@@ -303,12 +336,12 @@ const parseQuoteItems = (raw: unknown): any[] => {
 };
 
 const COMPANY = {
-  name: process.env.COMPANY_NAME || 'LKS Display Box',
+  name: options.environment.COMPANY_NAME || 'LKS Display Box',
   address1: '香港九龍觀塘成業街7號',
   address2: '寧晉中心35樓G1室',
-  phone: process.env.COMPANY_PHONE || '68983722',
-  email: process.env.COMPANY_EMAIL || 'lksdisplaybox@gmail.com',
-  website: process.env.COMPANY_WEBSITE || 'https://lksdisplaybox.online',
+  phone: options.environment.COMPANY_PHONE || '68983722',
+  email: options.environment.COMPANY_EMAIL || 'lksdisplaybox@gmail.com',
+  website: options.environment.COMPANY_WEBSITE || 'https://lksdisplaybox.online',
 };
 
 
@@ -416,17 +449,17 @@ const requiredEnvVars = [
   'AIRTABLE_TABLE_QUOTES'
 ];
 for (const envVar of requiredEnvVars) {
-  if (!LOCAL_QUOTE_FIXTURE && !process.env[envVar]) {
-    console.error(`Missing required environment variable: ${envVar}`);
-    process.exit(1);
+  if (!LOCAL_QUOTE_FIXTURE && !options.environment[envVar]) {
+    if (options.onMissingRequiredEnvironment) options.onMissingRequiredEnvironment(envVar);
+    throw new Error(`Missing required environment variable: ${envVar}`);
   }
 }
 
 // Airtable Setup
 const base = (LOCAL_QUOTE_FIXTURE?.base || new Airtable({
-  apiKey: process.env.AIRTABLE_API_KEY,
+  apiKey: options.environment.AIRTABLE_API_KEY,
   requestTimeout: 15_000,
-}).base(process.env.AIRTABLE_BASE_ID!)) as Airtable.Base;
+}).base(options.environment.AIRTABLE_BASE_ID!)) as Airtable.Base;
 if (!LOCAL_QUOTE_FIXTURE) {
   installAirtableReadRetry(base, {
     maxAttempts: 3,
@@ -437,20 +470,20 @@ if (!LOCAL_QUOTE_FIXTURE) {
     },
   });
 }
-const tableCustomers = base(process.env.AIRTABLE_TABLE_CUSTOMERS || 'Customers');
-const tableCustomersActive = base(process.env.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
-const tableOrders = base(process.env.AIRTABLE_TABLE_ORDERS || 'Order_2026');
-const tableOrderItems = base(process.env.AIRTABLE_TABLE_ORDER_ITEMS || 'Order Items');
-const tableChinaShipments = base(process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS || 'China Shipments');
-const tableSupplierSyncReceipts = base(process.env.AIRTABLE_TABLE_SUPPLIER_SYNC_RECEIPTS || 'Supplier Sync Receipts');
-const tableQuotes = base(process.env.AIRTABLE_TABLE_QUOTES || 'Quotes');
-const tableInquiries = base(process.env.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
-const tableMonthlyPerformance = base(process.env.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
-const tableCampaigns = base(process.env.AIRTABLE_TABLE_CAMPAIGNS || 'Campaigns');
-const tableBusinessExpenses = base(process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES || 'Business Expenses');
-const tableExpenseChecklist = base(process.env.AIRTABLE_TABLE_EXPENSE_CHECKLIST || 'Expense Checklist');
-const tableMonthlyFinance = base(process.env.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
-const tableMarketingSpend = base(process.env.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
+const tableCustomers = base(options.environment.AIRTABLE_TABLE_CUSTOMERS || 'Customers');
+const tableCustomersActive = base(options.environment.AIRTABLE_TABLE_CUSTOMERS_ACTIVE || 'Customers (Active)');
+const tableOrders = base(options.environment.AIRTABLE_TABLE_ORDERS || 'Order_2026');
+const tableOrderItems = base(options.environment.AIRTABLE_TABLE_ORDER_ITEMS || 'Order Items');
+const tableChinaShipments = base(options.environment.AIRTABLE_TABLE_CHINA_SHIPMENTS || 'China Shipments');
+const tableSupplierSyncReceipts = base(options.environment.AIRTABLE_TABLE_SUPPLIER_SYNC_RECEIPTS || 'Supplier Sync Receipts');
+const tableQuotes = base(options.environment.AIRTABLE_TABLE_QUOTES || 'Quotes');
+const tableInquiries = base(options.environment.AIRTABLE_TABLE_INQUIRIES || 'Inquiries');
+const tableMonthlyPerformance = base(options.environment.AIRTABLE_TABLE_MONTHLY_PERFORMANCE || 'Monthly Performance');
+const tableCampaigns = base(options.environment.AIRTABLE_TABLE_CAMPAIGNS || 'Campaigns');
+const tableBusinessExpenses = base(options.environment.AIRTABLE_TABLE_BUSINESS_EXPENSES || 'Business Expenses');
+const tableExpenseChecklist = base(options.environment.AIRTABLE_TABLE_EXPENSE_CHECKLIST || 'Expense Checklist');
+const tableMonthlyFinance = base(options.environment.AIRTABLE_TABLE_MONTHLY_FINANCE || 'Monthly Finance');
+const tableMarketingSpend = base(options.environment.AIRTABLE_TABLE_MARKETING_SPEND || 'Marketing Spend');
 const quoteItemsMutationLock = new InProcessQuoteItemsLock();
 if (GOOGLE_DRIVE_QUOTATION_IMAGE_PROVIDER && BROWSER_QUOTATION_IMAGE_BRIDGE) {
   quotationImageRuntime.coordinator = new QuotationImageCoordinator(
@@ -512,8 +545,8 @@ if (LOCAL_QUOTE_FIXTURE) {
   const browserBridge = LOCAL_QUOTE_FIXTURE.browserBridge;
   if (browserBridge) {
     const localFixtureOrigins = new Set([new URL(PUBLIC_BASE_URL).origin]);
-    if (process.env.LKS_LOCAL_PUBLIC_PREVIEW === '1') {
-      const previewOrigin = new URL(String(process.env.LKS_LOCAL_PUBLIC_PREVIEW_ORIGIN || '').trim());
+    if (options.environment.LKS_LOCAL_PUBLIC_PREVIEW === '1') {
+      const previewOrigin = new URL(String(options.environment.LKS_LOCAL_PUBLIC_PREVIEW_ORIGIN || '').trim());
       if (previewOrigin.protocol !== 'https:'
         || previewOrigin.pathname !== '/'
         || previewOrigin.search
@@ -582,14 +615,14 @@ const QUOTATION_IMAGE_BROWSER_WORKER_PATH = BROWSER_QUOTATION_IMAGE_BRIDGE
     : null;
 
 const getAdminCredentials = () => {
-  const configuredSessionSecret = String(process.env.SESSION_SECRET || '').trim();
-  const existingSecretStoreValue = String(process.env.QUOTE_PILOT_CONFIRMATION_SECRET || '').trim();
+  const configuredSessionSecret = String(options.environment.SESSION_SECRET || '').trim();
+  const existingSecretStoreValue = String(options.environment.QUOTE_PILOT_CONFIRMATION_SECRET || '').trim();
   const derivedSessionSecret = existingSecretStoreValue
     ? crypto.createHmac('sha256', existingSecretStoreValue).update('lks-admin-session-v1').digest('base64url')
     : '';
   return {
-    username: String(process.env.ADMIN_USERNAME || 'lks').trim(),
-    password: String(process.env.ADMIN_PASSWORD || '').trim(),
+    username: String(options.environment.ADMIN_USERNAME || 'lks').trim(),
+    password: String(options.environment.ADMIN_PASSWORD || '').trim(),
     sessionSecret: configuredSessionSecret || derivedSessionSecret,
   };
 };
@@ -601,8 +634,8 @@ const adminConfigured = (): boolean => {
 };
 
 const getQuotePilotSecrets = () => ({
-  apiKey: String(process.env.QUOTE_PILOT_API_KEY || '').trim(),
-  confirmationSecret: String(process.env.QUOTE_PILOT_CONFIRMATION_SECRET || '').trim(),
+  apiKey: String(options.environment.QUOTE_PILOT_API_KEY || '').trim(),
+  confirmationSecret: String(options.environment.QUOTE_PILOT_CONFIRMATION_SECRET || '').trim(),
 });
 
 const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => {
@@ -616,18 +649,18 @@ const requireQuotePilotApi = (req: Request, res: Response, next: () => void) => 
   return next();
 };
 
-const supplierShippingEnabled = (): boolean => process.env.SUPPLIER_SHIPPING_ENABLED === '1';
+const supplierShippingEnabled = (): boolean => options.environment.SUPPLIER_SHIPPING_ENABLED === '1';
 
 const verifySupplierShippingApiRequest = (req: Request): { ok: boolean; code: string } => {
   const keyId = String(req.headers['x-lks-key-id'] || '').trim();
   const timestamp = String(req.headers['x-lks-timestamp'] || '').trim();
   const signature = String(req.headers['x-lks-signature'] || '').trim();
-  const currentKeyId = String(process.env.SUPPLIER_SHIPPING_KEY_ID || '').trim();
-  const nextKeyId = String(process.env.SUPPLIER_SHIPPING_NEXT_KEY_ID || '').trim();
+  const currentKeyId = String(options.environment.SUPPLIER_SHIPPING_KEY_ID || '').trim();
+  const nextKeyId = String(options.environment.SUPPLIER_SHIPPING_NEXT_KEY_ID || '').trim();
   const secret = keyId && keyId === currentKeyId
-    ? String(process.env.SUPPLIER_SHIPPING_SIGNING_SECRET || '').trim()
+    ? String(options.environment.SUPPLIER_SHIPPING_SIGNING_SECRET || '').trim()
     : keyId && keyId === nextKeyId
-      ? String(process.env.SUPPLIER_SHIPPING_NEXT_SIGNING_SECRET || '').trim()
+      ? String(options.environment.SUPPLIER_SHIPPING_NEXT_SIGNING_SECRET || '').trim()
       : '';
   if (!keyId || !secret) return { ok: false, code: 'not_configured_or_unknown_key' };
   return verifySupplierShippingRequest(secret, {
@@ -792,15 +825,7 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
   return next();
 };
 
-export const configureAttribution = (configuration: {
-  enabled: boolean;
-  store: AttributionRouterOptions['store'];
-  validation: AttributionRouterOptions['validation'];
-  now: AttributionRouterOptions['now'];
-  allowRequest: AttributionRouterOptions['allowRequest'];
-  transport: SerializedAirtableProjectionTransport;
-  mapping: AttributionProjectionMapping;
-}): AttributionProjector | null => {
+const configureAttributionForApp = (configuration: AttributionConfiguration): AttributionProjector | null => {
   if (!configuration.enabled) {
     attributionRuntime = null;
     return null;
@@ -1037,8 +1062,8 @@ const getAirtableMetadataTables = async (): Promise<AirtableMetadataTable[]> => 
     return airtableMetadataCache.tables;
   }
 
-  const apiKey = String(process.env.AIRTABLE_API_KEY || '').trim();
-  const baseId = String(process.env.AIRTABLE_BASE_ID || '').trim();
+  const apiKey = String(options.environment.AIRTABLE_API_KEY || '').trim();
+  const baseId = String(options.environment.AIRTABLE_BASE_ID || '').trim();
   if (!apiKey || !baseId) throw new Error('Airtable metadata credentials are missing');
 
   const response = await withAirtableReadRetry(async () => {
@@ -1107,8 +1132,8 @@ const getSharedSelectOptions = async (
 ): Promise<string[]> => {
   try {
     const tables = await getAirtableMetadataTables();
-    const quotesTable = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
-    const ordersTable = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+    const quotesTable = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_QUOTES, 'Quotes');
+    const ordersTable = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_ORDERS, 'Order_2026');
     const quoteChoices = quotesTable?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
     const orderChoices = ordersTable?.fields.find(field => field.name === fieldName)?.options?.choices?.map(choice => choice.name) || [];
     const allowedSet = new Set(allowed);
@@ -1392,7 +1417,7 @@ const findCanonicalInquiryForQuote = async (
     customerId,
     {
       asOfDate: quoteDate,
-      inactivityDays: resolveInquiryCycleInactivityDays(process.env.INQUIRY_CYCLE_INACTIVITY_DAYS),
+      inactivityDays: resolveInquiryCycleInactivityDays(options.environment.INQUIRY_CYCLE_INACTIVITY_DAYS),
       preferredInquiryId,
     },
   );
@@ -1539,8 +1564,8 @@ const fieldChoices = (field: AirtableMetadataField): string[] =>
 
 const getQuoteShortMetadata = async (): Promise<QuoteShortMetadata> => {
   const tables = await getAirtableMetadataTables();
-  const quotes = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
-  const inquiries = findMetadataTable(tables, process.env.AIRTABLE_TABLE_INQUIRIES, 'Inquiries');
+  const quotes = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_QUOTES, 'Quotes');
+  const inquiries = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_INQUIRIES, 'Inquiries');
   const quoteSource = requireMetadataField(quotes, 'Quotes', 'Quote Source / Channel', 'singleSelect');
   const promotion = requireMetadataField(quotes, 'Quotes', 'Promotion / Offer Type', 'singleSelect');
   const discountType = requireMetadataField(quotes, 'Quotes', 'Discount Type', 'singleSelect');
@@ -1639,10 +1664,10 @@ const buildQuoteDeletionSnapshot = async (rawQuoteNo: unknown): Promise<QuoteDel
   ]);
   if (!quoteRecord) throw new Error(`Quote not found: ${quoteNo}.`);
 
-  const quotesMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
-  const ordersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
-  const orderItemsMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDER_ITEMS, 'Order Items');
-  const customersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_CUSTOMERS, 'Customers');
+  const quotesMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_QUOTES, 'Quotes');
+  const ordersMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+  const orderItemsMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_ORDER_ITEMS, 'Order Items');
+  const customersMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_CUSTOMERS, 'Customers');
   if (!quotesMeta || !ordersMeta || !orderItemsMeta || !customersMeta) {
     throw new Error('Required production Airtable table metadata is incomplete.');
   }
@@ -1848,9 +1873,9 @@ const resolveProductionTarget = async (
     : {};
   const type = String(target.type || '');
   const tables = await getAirtableMetadataTables();
-  const quotesMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes');
-  const ordersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
-  const customersMeta = findMetadataTable(tables, process.env.AIRTABLE_TABLE_CUSTOMERS, 'Customers');
+  const quotesMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_QUOTES, 'Quotes');
+  const ordersMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+  const customersMeta = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_CUSTOMERS, 'Customers');
   if (!quotesMeta || !ordersMeta || !customersMeta) {
     throw new Error('Required production Airtable metadata is incomplete.');
   }
@@ -2127,8 +2152,8 @@ const buildContactMutations = async (
   const supplied = Object.entries(contact).filter(([key, value]) => key !== 'syncLinked' && value !== undefined);
   if (!supplied.length) return;
   const allowedTypes = ['singleLineText', 'multilineText', 'phoneNumber', 'email'];
-  const quoteMeta = findMetadataTable(target.tables, process.env.AIRTABLE_TABLE_QUOTES, 'Quotes')!;
-  const customerMeta = findMetadataTable(target.tables, process.env.AIRTABLE_TABLE_CUSTOMERS, 'Customers')!;
+  const quoteMeta = findMetadataTable(target.tables, options.environment.AIRTABLE_TABLE_QUOTES, 'Quotes')!;
+  const customerMeta = findMetadataTable(target.tables, options.environment.AIRTABLE_TABLE_CUSTOMERS, 'Customers')!;
   let linkedCustomer: any | null = null;
   const customerId = target.type === 'customer'
     ? target.record.id
@@ -2341,7 +2366,7 @@ const buildOrderItemMutation = async (
   }
   const orderItemsMeta = findMetadataTable(
     target.tables,
-    process.env.AIRTABLE_TABLE_ORDER_ITEMS,
+    options.environment.AIRTABLE_TABLE_ORDER_ITEMS,
     'Order Items',
   );
   if (!orderItemsMeta) throw new Error('Order Items metadata is missing.');
@@ -3132,7 +3157,7 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
   // that actually exist instead of breaking the owner pages on an unknown name.
   const writableFields = await keepExistingAirtableFields(
     fields,
-    process.env.AIRTABLE_TABLE_MONTHLY_FINANCE,
+    options.environment.AIRTABLE_TABLE_MONTHLY_FINANCE,
     'Monthly Finance'
   );
   if (writableFields && Object.keys(writableFields).length > 0) {
@@ -8253,7 +8278,7 @@ const receiptSequenceLock = new InProcessQuoteItemsLock();
 
 const requireOrderPaymentSchema = async (): Promise<void> => {
   const tables = await getAirtableMetadataTables();
-  const table = findMetadataTable(tables, process.env.AIRTABLE_TABLE_ORDERS, 'Order_2026');
+  const table = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_ORDERS, 'Order_2026');
   if (!table) throw new Error('order-payment-schema-missing-table');
   const expected = new Map<string, string>([
     [ORDER_AMOUNT_RECEIVED_FIELD, 'currency'],
@@ -8277,7 +8302,7 @@ const expenseReceiptUploadLock = new InProcessQuoteItemsLock();
 
 const requireExpenseReceiptSchema = async (): Promise<ExpenseReceiptSchema> => {
   const tables = await getAirtableMetadataTables();
-  const table = findMetadataTable(tables, process.env.AIRTABLE_TABLE_BUSINESS_EXPENSES, 'Business Expenses');
+  const table = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_BUSINESS_EXPENSES, 'Business Expenses');
   if (!table) throw new Error('expense-receipt-schema-missing-table');
   const expected = new Map<string, string>([
     [EXPENSE_RECEIPT_FIELD, 'multipleAttachments'],
@@ -8614,7 +8639,7 @@ type FinanceRecord = { id: string; fields: FieldSet };
 
 const requireDriverPaymentSchema = async (): Promise<void> => {
   const tables = await getAirtableMetadataTables();
-  const table = findMetadataTable(tables, process.env.AIRTABLE_TABLE_CHINA_SHIPMENTS, 'China Shipments');
+  const table = findMetadataTable(tables, options.environment.AIRTABLE_TABLE_CHINA_SHIPMENTS, 'China Shipments');
   if (!table) throw new Error('driver-payment-schema-missing-table');
   const expected = new Map<string, string>([
     [DRIVER_PAID_FIELD, 'currency'],
@@ -9313,8 +9338,8 @@ app.post('/admin/expenses/receipts', requireAdmin, requireSameOrigin, acceptExpe
         }]);
       } else {
         await uploadExpenseReceiptToAirtable({
-          apiKey: String(process.env.AIRTABLE_API_KEY || ''),
-          baseId: String(process.env.AIRTABLE_BASE_ID || ''),
+          apiKey: String(options.environment.AIRTABLE_API_KEY || ''),
+          baseId: String(options.environment.AIRTABLE_BASE_ID || ''),
           recordId: created.id,
           attachmentFieldId: schema.attachmentFieldId,
           filename,
@@ -9947,7 +9972,7 @@ const onServerListening = () => {
     console.log(`TEST-ONLY original Share: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.share}`);
     console.log(`TEST-ONLY original Invoice: ${PUBLIC_BASE_URL}${LOCAL_QUOTE_FIXTURE.urls.invoice}`);
   }
-  if (adminConfigured() && process.env.NODE_ENV !== 'test') {
+  if (adminConfigured() && options.environment.NODE_ENV !== 'test') {
     syncMonthlyFinance().catch(error => console.error('Initial finance sync failed:', error));
     setInterval(() => {
       syncMonthlyFinance().catch(error => console.error('Scheduled finance sync failed:', error));
@@ -9957,5 +9982,22 @@ const onServerListening = () => {
   }
 };
 
-if (LOCAL_QUOTE_FIXTURE) app.listen(Number(PORT), '127.0.0.1', onServerListening);
-else app.listen(PORT, onServerListening);
+return { app, configureAttribution: configureAttributionForApp, start: () => {
+  if (LOCAL_QUOTE_FIXTURE) app.listen(Number(PORT), '127.0.0.1', onServerListening);
+  else app.listen(PORT, onServerListening);
+} };
+};
+
+if (require.main === module) {
+  require('dotenv').config();
+  const runtime = createQuoteApp({
+    environment: process.env,
+    useLegacyFixture: true,
+    onMissingRequiredEnvironment: name => {
+      console.error(`Missing required environment variable: ${name}`);
+      process.exit(1);
+    },
+  });
+  activeAttributionConfiguration = runtime.configureAttribution;
+  runtime.start();
+}

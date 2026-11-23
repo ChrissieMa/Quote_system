@@ -135,32 +135,53 @@ builds. Leave additive fields and historical business links intact; do not
 delete or rewrite business history. Any schema cleanup requires separate
 approval.
 
-The repository test inventory has one legacy owner-actions E2E test that
-starts `src/index.ts`; its bootstrap loads dotenv before serving the local
-fixture and inherits ambient process settings. The final safe inventory
-excluded that entire test file: 260/260 included tests passed, with one test
-excluded (not reported as a runner skip or a pass). Two earlier full-inventory
-attempts accidentally included the E2E test; each reported 260 passed, one
-failed, and zero skipped because the local fixture did not start. The test's
-normal cleanup sends SIGTERM to its child and removes its temporary files, but
-whether any external call could have occurred before the failure is unproven.
-Do not treat either full-inventory attempt as green. The isolated route and
-business checks passed; local Quote fixture tests use the explicit-options
-factory and synthetic files, never the legacy environment-reading wrapper.
+The owner-actions E2E now uses the real registered application routes via an
+explicit-options app factory and a synthetic local Quote adapter. Importing the
+app does not run dotenv or the CLI startup, and the fixture supplies all its
+configuration explicitly. The test exercises login, same-origin and CSRF
+rejection, payment replay, receipt rendering and duplicate expense upload.
+Normal CLI startup retains its existing configuration and listening path.
+
+Historically, two full-inventory attempts included the old E2E bootstrap; each
+reported 260 passed, one failed, and zero skipped because the local fixture did
+not start. The old test's cleanup sent SIGTERM to its child and removed its
+temporary files, but whether an external call could have occurred before those
+failures is unproven. The subsequent safe inventory passed 260 tests with that
+entire E2E file excluded. Those historical attempts must not be reported as
+full-suite passes.
 
 On Node 22.23.4, the focused attribution suites passed 22/22 and the TypeScript
-build passed. The pinned synthetic frontend-to-router-to-business fixture
+build passed. The unchanged full repository test inventory passed 261/261,
+with zero failures, skips or exclusions. The earlier pinned synthetic frontend-to-router-to-business fixture
 passed five paths and 12 canonical scenarios. Direct browser-adapter tests
-passed. Earlier local Chrome trial results are excluded from acceptance
-because those runs disabled the browser sandbox and certificate verification.
-The latest normal-sandbox Chrome run used local CDP interception and passed the
-Website-origin preflight/create and disallowed-origin denial. The opaque iframe
-observed a failed fetch, but no `OPTIONS` request with `Origin: null` reached
-the local router, so the failure is not proof of the router's opaque-origin
-rejection. Browser-origin CORS acceptance remains pending. CDP fulfillment
-tests browser-origin behavior only; it is not real TLS validation.
+passed. Earlier local Chrome trials are excluded from acceptance because
+those runs disabled the browser sandbox and certificate verification. A later
+normal-sandbox diagnostic identified an iframe preflight that reached loopback
+before child interception was enabled and failed with connection refused.
+The corrected local CDP fixture waits for child interception before making
+the opaque request: the router observes `Origin: null` and returns 403, and
+the browser rejects it. The fixture also exercises first-party create/revoke,
+disallowed origin and header, missing origin, invalid path, and the adapter's
+opaque-origin rejection without a fetch. CDP fulfillment tests browser-origin
+behavior only; it is not real TLS validation. Final pinned peer frontend
+modules were not supplied to this fixture, so the combined final-peer browser
+chain remains a separate acceptance gate.
 
-`npm audit` reports five inherited dependency findings (two moderate, two
-high, one critical) in the locked body-parser, Express, Multer, proxy-addr and
-qs dependency tree. No audit fix or unrelated upgrade was applied. Production
-dependency remediation remains a separate review gate.
+## Locked dependency audit assessment
+
+The following is a source-based assessment, not a penetration test or
+Production verification. The classifications concern the stated advisory
+mechanisms, not every possible defect in a package.
+
+| Locked package | Advisory and fixed range | Local call path and assessment |
+| --- | --- | --- |
+| body-parser 1.20.8 | GHSA-27r3-jxmh-p828, fixed in 1.20.9 or later in the 1.x line | **Reachable parser; exploitability uncertain.** Global JSON and extended form parsers run before route authentication and accept compressed request bodies by default. The 1 MB limit is not evidence that the compressed trailing-bytes denial of service is prevented; ingress controls are unverified. |
+| Express 4.22.2 | Audit finding inherited from qs GHSA-6pq8-jhm2-2vcw | **Uncertain dependency finding.** Express uses qs for query parsing, not the advisory's `qs.stringify` call. No independent Express advisory appears in this audit result; remediation must address the resolved qs version and verify compatibility, not assume a particular Express upgrade alone fixes the override. |
+| Multer 2.3.0 | GHSA-3pph-fpjx-jg34 fixed in 2.4.0; GHSA-q7qp-rjg7-q26m fixed in 2.5.0 | **Advisory prerequisites not present in the inspected app.** The owner-authenticated, same-origin expense upload uses memory storage, not disk storage, and configures no asynchronous file filter. Its one-file/5 MB limit does not fix either package vulnerability; reassess if upload configuration changes. |
+| proxy-addr 2.0.7 | GHSA-jqcg-44mw-7w3h fixed in 2.0.8 | **Specific subnet-matching path not used by the inspected app.** Express is configured with a numeric one-hop trust function, rather than an IPv4-mapped IPv6 trust subnet. Login and attribution rate limiting use `req.ip`; actual proxy-chain behavior and any other consumers require separate verification. |
+| qs 6.16.0 | GHSA-6pq8-jhm2-2vcw affects versions through 6.16.0; a non-affected version must be newer | **Uncertain.** The inspected application, Express, body-parser and Airtable source paths did not call `qs.stringify`; Express/body-parser do parse untrusted query/form data with qs. This does not prove that no indirect or future caller can reach the advisory's stringify case. |
+
+`npm audit` reports five package findings (two moderate, two high, one critical).
+No dependency upgrade or audit fix was applied. Review fixed releases and the
+lockfile override separately; audit findings and ingress/provider assumptions
+remain Production gates.

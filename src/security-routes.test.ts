@@ -96,7 +96,7 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   assert.ok(start >= 0 && end > start, 'Supplier shipping routes must exist before the owner route');
   const routes = source.slice(start, end);
   assert.equal((routes.match(/requireSupplierShippingSignature\(req, res\)/g) || []).length, 2);
-  assert.ok(source.includes("process.env.SUPPLIER_SHIPPING_ENABLED === '1'"));
+  assert.ok(source.includes("options.environment.SUPPLIER_SHIPPING_ENABLED === '1'"));
   assert.ok(source.includes('verifySupplierShippingRequest(secret'));
   assert.ok(routes.includes('supplierShippingItemNoLookupKeys(itemNo)'));
   assert.ok(routes.includes("`{Item No} = '${safeFormulaLiteral(key)}'`"));

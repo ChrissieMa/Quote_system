@@ -1,21 +1,11 @@
 import assert from 'node:assert/strict';
-import { spawn, type ChildProcess } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
-
-const waitForServer = async (url: string, child: ChildProcess): Promise<void> => {
-  for (let attempt = 0; attempt < 40; attempt += 1) {
-    if (child.exitCode !== null) throw new Error(`local fixture exited with ${child.exitCode}`);
-    try {
-      const response = await fetch(`${url}/robots.txt`);
-      if (response.ok) return;
-    } catch { /* still starting */ }
-    await new Promise(resolve => setTimeout(resolve, 100));
-  }
-  throw new Error('local fixture did not start');
-};
+import { AddressInfo } from 'node:net';
+import { createQuoteApp } from '../index';
+import { createLocalQuoteFixtureWithOptions } from './local-quote-fixture';
 
 const capture = (html: string, pattern: RegExp, label: string): string => {
   const value = html.match(pattern)?.[1];
@@ -45,26 +35,27 @@ test('owner can choose a payment method and upload one idempotent expense receip
       branding: { enabled: false, style: 'none' }, show_dimensions: true, show_price: false,
     },
   }));
-  const port = 32000 + Math.floor(Math.random() * 5000);
-  const origin = `http://127.0.0.1:${port}`;
-  const child = spawn(process.execPath, ['-r', 'ts-node/register', 'src/index.ts'], {
-    cwd: path.resolve(__dirname, '../..'),
-    env: {
-      ...process.env,
-      NODE_ENV: 'test', PORT: String(port), PUBLIC_BASE_URL: origin,
-      LKS_LOCAL_QUOTE_FIXTURE: '1', QUOTATION_IMAGE_ENABLED: '0',
-      LKS_QUOTATION_IMAGE_FIXTURE_PNG: pngPath,
-      LKS_QUOTATION_IMAGE_FIXTURE_JSON: jsonPath,
-      ADMIN_USERNAME: 'lks', ADMIN_PASSWORD: 'test-password', SESSION_SECRET: 's'.repeat(64),
+  const runtime = createQuoteApp({
+    environment: {
+      NODE_ENV: 'test', PUBLIC_BASE_URL: 'http://127.0.0.1',
+      QUOTATION_IMAGE_ENABLED: '0', ADMIN_USERNAME: 'lks',
+      ADMIN_PASSWORD: 'test-password', SESSION_SECRET: 's'.repeat(64),
     },
-    stdio: 'ignore',
+    localFixture: createLocalQuoteFixtureWithOptions({ pngPath, metadataPath: jsonPath }),
   });
-  t.after(() => {
-    child.kill('SIGTERM');
+  const server = runtime.app.listen(0, '127.0.0.1');
+  t.after(async () => {
+    await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
     fs.rmSync(dir, { recursive: true, force: true });
   });
-  await waitForServer(origin, child);
+  await new Promise<void>((resolve, reject) => {
+    server.once('listening', resolve);
+    server.once('error', reject);
+  });
+  const origin = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 
+  const unauthenticated = await fetch(`${origin}/quotes`, { redirect: 'manual' });
+  assert.equal(unauthenticated.status, 303);
   const login = await fetch(`${origin}/login`, {
     method: 'POST', redirect: 'manual', headers: { Origin: origin, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams({ username: 'lks', password: 'test-password', next: '/quotes' }),
@@ -78,12 +69,33 @@ test('owner can choose a payment method and upload one idempotent expense receip
   const receiptAction = capture(quotesHtml, /action="([^"]+\/mark-paid)"/, 'Receipt action');
   const csrf = capture(quotesHtml, /name="csrf" value="([a-f0-9]{64})"/, 'csrf');
   const paymentRequestId = capture(quotesHtml, /name="payment_request_id" value="(recv_[a-f0-9]{32})"/, 'payment request id');
+  const paymentBody = (token: string) => new URLSearchParams({
+    csrf: token, payment_request_id: paymentRequestId, payment_method: 'FPS',
+  });
+  const wrongOrigin = await fetch(`${origin}${receiptAction}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { Origin: 'https://evil.example.test', Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: paymentBody(csrf),
+  });
+  assert.equal(wrongOrigin.status, 403);
+  const wrongCsrf = await fetch(`${origin}${receiptAction}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: paymentBody('invalid'),
+  });
+  assert.equal(wrongCsrf.status, 403);
   const paid = await fetch(`${origin}${receiptAction}`, {
     method: 'POST', redirect: 'manual',
     headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({ csrf, payment_request_id: paymentRequestId, payment_method: 'FPS' }),
+    body: paymentBody(csrf),
   });
   assert.equal(paid.status, 302);
+  const replay = await fetch(`${origin}${receiptAction}`, {
+    method: 'POST', redirect: 'manual',
+    headers: { Origin: origin, Cookie: cookie, 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: paymentBody(csrf),
+  });
+  assert.equal(replay.status, 302);
   const paidHtml = await (await fetch(`${origin}/quotes`, { headers: { Cookie: cookie } })).text();
   assert.ok(!paidHtml.includes('建立收據＝確認全數收款'));
   const receiptPath = capture(paidHtml, /href="([^"]+)"[^>]*>View Receipt/, 'Receipt link');
