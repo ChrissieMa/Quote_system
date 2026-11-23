@@ -180,6 +180,7 @@ import {
   MACBOOK_INSTALLMENT_COUNT,
   MACBOOK_INSTALLMENT_EXPENSE_NAME,
   parseDriverPaymentAmountCents,
+  parseOutstandingFinanceStatusParts,
   planDriverPayment,
   planFullReceipt,
   auditReceiptBackfill,
@@ -2953,10 +2954,7 @@ const getOutstandingFinanceStatus = (fields: FieldSet): string => {
   const rawStatus = String(fields['Finance Data Status'] || '').trim();
   if (!rawStatus) return '';
   const orderNo = fields['Internal 1 Order No'] || fields['Internal Order No'];
-  return rawStatus
-    .split('|')
-    .map(part => part.trim())
-    .filter(part => part && (part.includes('⏳') || /尚欠|未有|未建立|missing/i.test(part)))
+  return parseOutstandingFinanceStatusParts(rawStatus)
     // From JUN2602 onward the driver payable is already known from the quote:
     // 90% to the driver and 10% retained by LKS. A not-yet-created Delivery is
     // therefore not missing finance data.

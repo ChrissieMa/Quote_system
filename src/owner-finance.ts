@@ -92,6 +92,16 @@ export const MACBOOK_INSTALLMENT_EXPENSE_NAME = 'Apple MacBook Pro — monthly i
 export const MACBOOK_INSTALLMENT_START_MONTH = '2026-08';
 export const MACBOOK_INSTALLMENT_COUNT = 24;
 
+export const parseOutstandingFinanceStatusParts = (rawStatus: unknown): string[] =>
+  String(rawStatus || '')
+    .split('|')
+    .map(part => part.trim())
+    .filter(part => part && (
+      part.includes('⏳')
+      || part.includes('⚠️')
+      || /尚欠|未有|未建立|待入|missing/i.test(part)
+    ));
+
 const monthIndex = (month: string): number | null => {
   if (!VALID_MONTH.test(month)) return null;
   const [year, monthNumber] = month.split('-').map(Number);

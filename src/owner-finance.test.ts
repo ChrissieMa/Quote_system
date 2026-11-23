@@ -14,6 +14,7 @@ import {
   getBusinessExpenseDashboardLabel,
   getBusinessExpenseOperatingAmount,
   parseDriverPaymentAmountCents,
+  parseOutstandingFinanceStatusParts,
   planDriverPayment,
   planFullReceipt,
   planOrderPayment,
@@ -34,6 +35,15 @@ const baseOptions = {
   getDriverPaid: (order: { fields: Record<string, unknown> }) => Number(order.fields.driverPaid || 0),
   getOutstandingFinanceStatus: () => '⏳ 尚欠成本',
 };
+
+test('shipped orders remain pending when only supplier cost is waiting to be entered', () => {
+  assert.deepEqual(parseOutstandingFinanceStatusParts(
+    '⚠️ 待入小糖成本 | ✅ 中國運費 | ✅ 已建立 Delivery',
+  ), ['⚠️ 待入小糖成本']);
+  assert.deepEqual(parseOutstandingFinanceStatusParts(
+    '✅ 小糖成本 | ✅ 中國運費 | ✅ 已建立 Delivery',
+  ), []);
+});
 
 test('capital equipment and allocation-pending marketing are excluded from August P&L', () => {
   const summary = calculateOwnerFinanceSummary({
