@@ -9674,7 +9674,7 @@ const supplierShippingAdapter = new AirtableSupplierShippingAdapter({
 const supplierShippingReceiver = new SupplierShippingReceiver(supplierShippingAdapter);
 
 const logSupplierShippingStatus = (
-  event: 'signature_rejected' | 'mapping_result' | 'mapping_lookup_failed',
+  event: 'signature_rejected' | 'mapping_result' | 'mapping_lookup_failed' | 'batch_result' | 'batch_exception',
   detail: Record<string, string | number>,
 ): void => {
   // Deliberately log only bounded technical status. Never include request
@@ -9777,11 +9777,24 @@ app.post('/api/integrations/supplier-shipping/v1/batches', async (req: Request, 
         : result.status === 'retryable_failure'
           ? 503
           : 409;
+    logSupplierShippingStatus('batch_result', {
+      status,
+      outcome: result.status,
+      code: result.code,
+    });
     res.status(status).json(result);
-  } catch (error) {
+  } catch (error: any) {
     if (error instanceof SupplierShippingContractError) {
+      logSupplierShippingStatus('batch_result', { status: 400, outcome: 'rejected', code: error.code });
       return res.status(400).json({ status: 'rejected', code: error.code });
     }
+    const upstreamStatus = Number(error?.statusCode ?? error?.status);
+    const rawCode = String(error?.error ?? error?.code ?? 'unknown');
+    logSupplierShippingStatus('batch_exception', {
+      status: 503,
+      upstreamStatus: Number.isFinite(upstreamStatus) ? upstreamStatus : 0,
+      code: /^[A-Za-z0-9_-]{1,80}$/.test(rawCode) ? rawCode : 'unknown',
+    });
     res.status(503).json({ status: 'retryable_failure', code: 'supplier_shipping_unavailable' });
   }
 });
