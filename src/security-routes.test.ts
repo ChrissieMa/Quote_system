@@ -96,6 +96,22 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   }
 });
 
+test('owner cost page leaves China shipment entry to Supplier Portal while preserving the protected legacy receiver', () => {
+  const getStart = source.indexOf("app.get('/admin/costs', requireAdmin,");
+  const supplierStart = source.indexOf('const syncSupplierShippingFinance', getStart);
+  assert.ok(getStart >= 0 && supplierStart > getStart, 'owner cost page must exist before Supplier receiver setup');
+  const page = source.slice(getStart, supplierStart);
+  for (const hidden of [
+    '建立中國運費批次',
+    'Shipment No.／順豐單號',
+    'chinaShipmentForm',
+    'shipment_item_',
+  ]) assert.ok(!page.includes(hidden), `owner cost page must not expose ${hidden}`);
+  assert.ok(page.includes('待補訂單成本'));
+  assert.ok(page.includes('supplier_item_'));
+  assert.ok(source.includes("app.post('/admin/china-shipments', requireAdmin, requireSameOrigin,"));
+});
+
 test('driver settlement route cannot write P&L or Business Expenses', () => {
   const start = source.indexOf("app.post('/admin/china-shipments/:shipmentId/driver-payments'");
   const end = source.indexOf("app.get('/admin/costs'", start);
