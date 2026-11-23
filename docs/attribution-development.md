@@ -175,13 +175,17 @@ mechanisms, not every possible defect in a package.
 
 | Locked package | Advisory and fixed range | Local call path and assessment |
 | --- | --- | --- |
-| body-parser 1.20.8 | GHSA-27r3-jxmh-p828, fixed in 1.20.9 or later in the 1.x line | **Reachable parser; exploitability uncertain.** Global JSON and extended form parsers run before route authentication and accept compressed request bodies by default. The 1 MB limit is not evidence that the compressed trailing-bytes denial of service is prevented; ingress controls are unverified. |
+| body-parser 1.20.9 | GHSA-27r3-jxmh-p828 is fixed in 1.20.9; npm audit still lists body-parser through the separate qs advisory | **The targeted high-severity issue is removed.** Global JSON and extended form parsers run before route authentication and accept compressed request bodies by default. The 1 MB limit is not evidence that all compressed-body denial-of-service cases are prevented; ingress controls are unverified. |
 | Express 4.22.2 | Audit finding inherited from qs GHSA-6pq8-jhm2-2vcw | **Uncertain dependency finding.** Express uses qs for query parsing, not the advisory's `qs.stringify` call. No independent Express advisory appears in this audit result; remediation must address the resolved qs version and verify compatibility, not assume a particular Express upgrade alone fixes the override. |
 | Multer 2.3.0 | GHSA-3pph-fpjx-jg34 fixed in 2.4.0; GHSA-q7qp-rjg7-q26m fixed in 2.5.0 | **Advisory prerequisites not present in the inspected app.** The owner-authenticated, same-origin expense upload uses memory storage, not disk storage, and configures no asynchronous file filter. Its one-file/5 MB limit does not fix either package vulnerability; reassess if upload configuration changes. |
 | proxy-addr 2.0.7 | GHSA-jqcg-44mw-7w3h fixed in 2.0.8 | **Specific subnet-matching path not used by the inspected app.** Express is configured with a numeric one-hop trust function, rather than an IPv4-mapped IPv6 trust subnet. Login and attribution rate limiting use `req.ip`; actual proxy-chain behavior and any other consumers require separate verification. |
 | qs 6.16.0 | GHSA-6pq8-jhm2-2vcw affects versions through 6.16.0; a non-affected version must be newer | **Uncertain.** The inspected application, Express, body-parser and Airtable source paths did not call `qs.stringify`; Express/body-parser do parse untrusted query/form data with qs. This does not prove that no indirect or future caller can reach the advisory's stringify case. |
 
-`npm audit` reports five package findings (two moderate, two high, one critical).
-No dependency upgrade or audit fix was applied. Review fixed releases and the
-lockfile override separately; audit findings and ingress/provider assumptions
-remain Production gates.
+The lock pins body-parser 1.20.9 through an exact override; the lock diff changes
+only that package path and keeps the existing Express, Multer, qs, proxy-addr,
+and development dependency versions. The high-severity GHSA-27r3-jxmh-p828
+finding for body-parser 1.20.8 is removed. `npm audit` still exits nonzero and
+reports five affected package nodes (three moderate, one high, one critical):
+body-parser and Express remain listed through qs, plus qs, Multer, and
+proxy-addr. These represent the four residual dependency/advisory areas
+assessed above; no broad audit fix or unrelated upgrade was applied.
