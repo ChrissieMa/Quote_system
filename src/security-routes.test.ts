@@ -83,6 +83,8 @@ test('Supplier shipping routes require the dedicated signed request and disabled
   assert.ok(source.includes('verifySupplierShippingRequest(secret'));
   assert.ok(routes.includes('supplierShippingItemNoLookupKeys(itemNo)'));
   assert.ok(routes.includes("`EXACT({Item No}, '${safeFormulaLiteral(key)}')`"));
+  assert.equal((routes.match(/tableOrderItems\.select/g) || []).length, 1,
+    'Supplier mapping must use one bounded Airtable lookup for the whole batch');
   assert.ok(!routes.includes('SUBSTITUTE(TRIM({Item No})'));
   for (const header of ["'x-lks-key-id'", "'x-lks-timestamp'", "'x-lks-signature'"]) {
     assert.ok(source.includes(header), `missing signed Supplier header ${header}`);

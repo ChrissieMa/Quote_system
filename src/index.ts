@@ -9708,7 +9708,12 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
       return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
     }
     const seenSourceIds = new Set<string>();
-    const mappings = [];
+    const requestedItems: Array<{
+      sourceItemId: string;
+      itemNo: string;
+      fallbackKeys: string[];
+    }> = [];
+    const candidateItemNos = new Set<string>();
     for (const raw of req.body.items) {
       if (!raw || typeof raw !== 'object' || Array.isArray(raw)
         || Object.keys(raw).some(key => !['sourceItemId', 'itemNo'].includes(key))) {
@@ -9721,37 +9726,42 @@ app.post('/api/integrations/supplier-shipping/v1/order-item-mappings', async (re
         return res.status(400).json({ status: 'rejected', code: 'invalid_mapping_request' });
       }
       seenSourceIds.add(sourceItemId);
-      let records = await tableOrderItems.select({
-        filterByFormula: `EXACT({Item No}, '${safeFormulaLiteral(itemNo)}')`,
-        maxRecords: 2,
-      }).firstPage();
-      if (records.length === 0) {
-        const exactKey = itemNo.normalize('NFKC').trim().toUpperCase();
-        const fallbackKeys = supplierShippingItemNoLookupKeys(itemNo)
-          .filter(key => key !== exactKey);
-        if (fallbackKeys.length > 0) {
-          const exactFallbacks = fallbackKeys.map(key =>
-            `EXACT({Item No}, '${safeFormulaLiteral(key)}')`);
-          records = await tableOrderItems.select({
-            filterByFormula: exactFallbacks.length === 1
-              ? exactFallbacks[0]
-              : `OR(${exactFallbacks.join(',')})`,
-            maxRecords: 2,
-          }).firstPage();
-        }
-      }
-      mappings.push(records.length === 1
-        ? { sourceItemId, status: 'matched', orderItemRecordId: records[0].id }
-        : { sourceItemId, status: records.length === 0 ? 'missing' : 'ambiguous' });
+      const exactKey = itemNo.normalize('NFKC').trim().toUpperCase();
+      const fallbackKeys = supplierShippingItemNoLookupKeys(itemNo)
+        .filter(key => key !== exactKey);
+      requestedItems.push({ sourceItemId, itemNo, fallbackKeys });
+      candidateItemNos.add(itemNo);
+      for (const key of fallbackKeys) candidateItemNos.add(key);
     }
+    const exactCandidateFormulas = [...candidateItemNos].map(key =>
+      `EXACT({Item No}, '${safeFormulaLiteral(key)}')`);
+    const records = await tableOrderItems.select({
+      filterByFormula: exactCandidateFormulas.length === 1
+        ? exactCandidateFormulas[0]
+        : `OR(${exactCandidateFormulas.join(',')})`,
+      maxRecords: 100,
+    }).firstPage();
+    const mappings = requestedItems.map(({ sourceItemId, itemNo, fallbackKeys }) => {
+      const exactRecords = records.filter(record => String(record.fields['Item No'] || '') === itemNo);
+      const matchedRecords = exactRecords.length > 0
+        ? exactRecords
+        : records.filter(record => fallbackKeys.includes(String(record.fields['Item No'] || '')));
+      return matchedRecords.length === 1
+        ? { sourceItemId, status: 'matched', orderItemRecordId: matchedRecords[0].id }
+        : { sourceItemId, status: matchedRecords.length === 0 ? 'missing' : 'ambiguous' };
+    });
     logSupplierShippingStatus('mapping_result', {
       matched: mappings.filter(mapping => mapping.status === 'matched').length,
       missing: mappings.filter(mapping => mapping.status === 'missing').length,
       ambiguous: mappings.filter(mapping => mapping.status === 'ambiguous').length,
     });
     res.json({ status: mappings.every(mapping => mapping.status === 'matched') ? 'matched' : 'review_required', mappings });
-  } catch {
-    logSupplierShippingStatus('mapping_lookup_failed', { status: 503 });
+  } catch (error: any) {
+    const upstreamStatus = Number(error?.statusCode ?? error?.status);
+    logSupplierShippingStatus('mapping_lookup_failed', {
+      status: 503,
+      upstreamStatus: Number.isFinite(upstreamStatus) ? upstreamStatus : 0,
+    });
     res.status(503).json({ status: 'retryable_failure', code: 'mapping_lookup_failed' });
   }
 });
