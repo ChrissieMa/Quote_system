@@ -258,13 +258,19 @@ const main = async (): Promise<void> => {
   chmodSync(dir, 0o711);
   const profile = join(dir, 'chrome-profile');
   mkdirSync(profile, { mode: 0o700 });
-  const uidResult = spawnSync('id', ['-u', 'nobody'], { encoding: 'utf8' });
-  const gidResult = spawnSync('id', ['-g', 'nobody'], { encoding: 'utf8' });
-  if (uidResult.status !== 0 || gidResult.status !== 0) throw new Error('An existing unprivileged browser account is required.');
-  const uid = Number(uidResult.stdout.trim());
-  const gid = Number(gidResult.stdout.trim());
-  if (!Number.isInteger(uid) || !Number.isInteger(gid)) throw new Error('Invalid unprivileged browser account.');
-  chownSync(profile, uid, gid);
+  if (process.platform !== 'linux') throw new Error('The normal-sandbox browser fixture requires Linux.');
+  const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  let rootDropIdentity: { uid: number; gid: number } | null = null;
+  if (runningAsRoot) {
+    const uidResult = spawnSync('id', ['-u', 'nobody'], { encoding: 'utf8' });
+    const gidResult = spawnSync('id', ['-g', 'nobody'], { encoding: 'utf8' });
+    if (uidResult.status !== 0 || gidResult.status !== 0) throw new Error('An existing unprivileged browser account is required.');
+    const uid = Number(uidResult.stdout.trim());
+    const gid = Number(gidResult.stdout.trim());
+    if (!Number.isInteger(uid) || !Number.isInteger(gid)) throw new Error('Invalid unprivileged browser account.');
+    chownSync(profile, uid, gid);
+    rootDropIdentity = { uid, gid };
+  }
 
   const store = new LocalAttributionStore(join(dir, 'store.sqlite'), Buffer.alloc(32, 9));
   const observations: Observation[] = [];
@@ -317,10 +323,11 @@ const main = async (): Promise<void> => {
     const websiteHtml = pageSource();
     const allowedOrigins = new Set([websiteOrigin, disallowedOrigin]);
 
-    browser = spawn('/usr/bin/setpriv', [
-      `--reuid=${uid}`, `--regid=${gid}`, '--init-groups', '--',
-      browserPath, ...browserFlags(profile),
-    ], {
+    const executable = rootDropIdentity ? '/usr/bin/setpriv' : browserPath;
+    const args = rootDropIdentity
+      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', browserPath, ...browserFlags(profile)]
+      : browserFlags(profile);
+    browser = spawn(executable, args, {
       env: { HOME: profile, PATH: '/usr/bin:/bin' },
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
     });
