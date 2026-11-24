@@ -151,10 +151,15 @@ entire E2E file excluded. Those historical attempts must not be reported as
 full-suite passes.
 
 On Node 22.23.4, the focused attribution suites passed 22/22 and the TypeScript
-build passed. The unchanged full repository test inventory passed 261/261,
-with zero failures, skips or exclusions. The earlier pinned synthetic frontend-to-router-to-business fixture
-passed five paths and 12 canonical scenarios. Direct browser-adapter tests
-passed. Earlier local Chrome trials are excluded from acceptance because
+build passed. Before the latest master sync, the complete repository inventory
+passed 261/261 with zero failures, skips or exclusions. After merging the
+owner-finance change, the complete inventory passed 262/262, including its
+new shipped-order finance regression test; Supplier-specific suites passed
+24/24 and attribution suites passed 22/22. The merged source retains the
+latest owner-finance changes and does not alter their tests. The earlier pinned
+synthetic frontend-to-router-to-business fixture passed five paths and 12
+canonical scenarios. Direct browser-adapter tests passed. Earlier local Chrome
+trials are excluded from acceptance because
 those runs disabled the browser sandbox and certificate verification. A later
 normal-sandbox diagnostic identified an iframe preflight that reached loopback
 before child interception was enabled and failed with connection refused.
