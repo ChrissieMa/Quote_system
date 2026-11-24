@@ -36,6 +36,8 @@ The final macOS normal-sandbox synthetic browser attempt timed out at the first 
 
 A focused follow-up captured only the synthetic auto-attached target state and routing errors. It observed one `page` target with `waitingForDebugger=false` and no routing error. This disproves the suspected ignored paused-target cause; no auto-attach or interception behavior was changed, and the temporary macOS diagnostic edits were removed.
 
+A minimal `pull_request`-only Linux acceptance workflow was prepared with `contents: read`, disabled checkout credential persistence, exact Node 22.23.4, the hosted runner's installed Google Chrome and the existing normal-sandbox fixture. It contained no secret/environment read, private peer source, deployment or Production action. GitHub rejected the branch push because the current OAuth credential lacks `workflow` scope; the GitHub integration also returned 403 for the same workflow-file write. No workflow file or launcher change landed in PR #40, and the rejected local changes were removed.
+
 ## Future activation and rollback
 
 Activation is not approved. After all remaining gates and a separate explicit Production approval, the reviewed source change is exactly:
@@ -48,4 +50,4 @@ Before merge, rollback is simply to leave PR #40 unmerged. If the disabled candi
 
 ## Remaining gate
 
-Obtain one final Linux normal-sandbox browser pass at this candidate, then assemble the separate Production approval packet. Production merge, deployment, schema/config installation, key provisioning and activation remain unapproved.
+A maintainer credential with workflow permission must add the reviewed minimal PR-only workflow, then obtain one final Linux normal-sandbox browser pass before assembling the separate Production approval packet. Production merge, deployment, schema/config installation, key provisioning and activation remain unapproved.
