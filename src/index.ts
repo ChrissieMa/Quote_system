@@ -8,6 +8,15 @@ import { AttributionProjectionMapping, AttributionProjector } from './attributio
 import { SerializedAirtableProjectionTransport } from './attribution-airtable';
 import { attributionOwnerTransferScript } from './attribution-owner-transfer';
 import {
+  AttributionCompositionInput,
+  attributionConfigurationFailure,
+  attributionDeploymentConfigPath,
+  attributionProofKeyPath,
+  composeAttribution,
+  loadApprovedAttributionDeploymentFile,
+  readAttributionProofKeyFile,
+} from './attribution-composition';
+import {
   accessoryOrderItemName,
   accessoryStorageName,
   buildPilotPreview,
@@ -851,6 +860,22 @@ const configureAttributionForApp = (configuration: AttributionConfiguration): At
     hooks: createAttributionBusinessHooks(configuration.store, configuration.now, reportError, () => projector.requestFlush()),
   };
   return projector;
+};
+
+const activateAttributionForApp = (input: Omit<AttributionCompositionInput, 'tables'>): AttributionProjector | null => {
+  const composed = composeAttribution({
+    ...input,
+    tables: name => base(name) as unknown as ReturnType<AttributionCompositionInput['tables']>,
+  });
+  if (!composed) return null;
+  try {
+    return configureAttributionForApp(composed);
+  } catch {
+    attributionRuntime = null;
+    try { composed.store.close(); } catch { /* attribution remains closed */ }
+    input.report(attributionConfigurationFailure);
+    return null;
+  }
 };
 
 const quotationImageReadyHandshakeRunKey = (req: Request): string | null => {
@@ -9980,7 +10005,7 @@ const onServerListening = () => {
   }
 };
 
-return { app, configureAttribution: configureAttributionForApp, start: () => {
+return { app, configureAttribution: configureAttributionForApp, activateAttribution: activateAttributionForApp, start: () => {
   if (LOCAL_QUOTE_FIXTURE) app.listen(Number(PORT), '127.0.0.1', onServerListening);
   else app.listen(PORT, onServerListening);
 } };
@@ -9997,5 +10022,31 @@ if (require.main === module) {
     },
   });
   activeAttributionConfiguration = runtime.configureAttribution;
+  // Future activation is exactly this literal false -> true after a separate approval.
+  const ATTRIBUTION_ACTIVATION_ENABLED = false;
+  if (ATTRIBUTION_ACTIVATION_ENABLED) {
+    try {
+      const approvedDeployment = loadApprovedAttributionDeploymentFile(
+        attributionDeploymentConfigPath,
+        process.version,
+        { kind: 'production' },
+      );
+      runtime.activateAttribution({
+        enabled: true,
+        storePath: approvedDeployment.storePath,
+        pathPolicy: { kind: 'production' },
+        exclusiveWriterConfirmed: approvedDeployment.exclusiveWriterConfirmed,
+        proofKey: () => readAttributionProofKeyFile(attributionProofKeyPath),
+        mapping: approvedDeployment.mapping,
+        publicPaths: approvedDeployment.publicPaths,
+        campaignKeys: approvedDeployment.campaignKeys,
+        nodeVersion: process.version,
+        now: () => Date.now(),
+        report: message => console.error(message),
+      });
+    } catch {
+      console.error(attributionConfigurationFailure);
+    }
+  }
   runtime.start();
 }

@@ -7,16 +7,34 @@ service has been created or changed.
 
 ## Runtime composition and storage gate
 
-The host starts with no attribution router mounted. `configureAttribution` is
-an explicit in-process composition point; it returns without activation unless
-its caller explicitly passes `enabled: true`. It receives a
+The host starts with no attribution router mounted. The real CLI now contains
+one literal `ATTRIBUTION_ACTIVATION_ENABLED = false` gate. While that literal is
+false it does not load deployment configuration, read a proof key, inspect or
+open the attribution store, construct a limiter, access an attribution table or
+mount an attribution route. `configureAttribution` remains an explicit
+in-process composition point; it returns without activation unless its caller
+explicitly passes `enabled: true`. It receives a
 `LocalAttributionStore`, validation allowlists, an injected request limiter,
 the asynchronous Airtable projection transport and a complete explicit field
 mapping. `createAirtableProjectionTransport` must receive that same store, an
 explicit Airtable base client and an explicit exclusive-writer confirmation.
 There is no environment-variable configuration, default base, credential,
 campaign key, background worker, timer or automatic recovery in this feature.
-The host bootstrap does not call this composition point.
+The only future activation code change is the reviewed literal `false` to
+`true`; it still requires the separately provisioned private non-secret mapping
+file and proof-key file and remains subject to a separate Production approval.
+
+The private deployment file has one exact JSON schema and fixed path
+`/data/lks-attribution/deployment.json`. It must declare schema version
+`attribution-deployment-v1`, the exact running Node version, fixed store and
+mount paths, `single-process` writer mode, an explicit true exclusive-writer
+confirmation, public-path and campaign allowlists, and the complete table,
+field, surface and campaign mapping. Unknown or missing keys, a runtime mismatch,
+duplicate fields inside one table mapping, campaign drift, a same-device
+`/data/lks-attribution` directory, or any existing database/WAL/SHM symlink or
+non-regular file fails closed with one static sanitized error. Equal physical
+field names in different tables remain valid. This file contains no proof key;
+the key remains a separate private regular file.
 
 The expected backend is the Quote service, and the Website/3D browser origin is
 `https://lksdisplaybox.online`. `createAttributionBrowserAdapter` rejects any
@@ -150,15 +168,17 @@ failures is unproven. The subsequent safe inventory passed 260 tests with that
 entire E2E file excluded. Those historical attempts must not be reported as
 full-suite passes.
 
-On Node 22.23.4, the focused attribution suites passed 22/22 and the TypeScript
+On Node 22.23.4, the final focused attribution suites passed 31/31 and the TypeScript
 build passed. Before the latest master sync, the complete repository inventory
 passed 261/261 with zero failures, skips or exclusions. After merging the
 owner-finance change, the complete inventory passed 262/262, including its
 new shipped-order finance regression test; Supplier-specific suites passed
-24/24 and attribution suites passed 22/22. The merged source retains the
-latest owner-finance changes and does not alter their tests. The earlier pinned
-synthetic frontend-to-router-to-business fixture passed five paths and 12
-canonical scenarios. Direct browser-adapter tests passed. Earlier local Chrome
+24/24. The final complete inventory passed 271/271: the original 262 tests plus
+nine composition, deployment, mount and file-safety tests, with zero failures,
+skips or exclusions. The source retains the latest owner-finance changes and
+does not alter their tests. The final pinned Website and 3D source snapshots
+passed the private synthetic frontend-to-router-to-business fixture across five
+paths and 12 canonical scenarios. Direct browser-adapter tests passed. Earlier local Chrome
 trials are excluded from acceptance because
 those runs disabled the browser sandbox and certificate verification. A later
 normal-sandbox diagnostic identified an iframe preflight that reached loopback
@@ -170,7 +190,11 @@ disallowed origin and header, missing origin, invalid path, and the adapter's
 opaque-origin rejection without a fetch. CDP fulfillment tests browser-origin
 behavior only; it is not real TLS validation. Final pinned peer frontend
 modules were not supplied to this fixture, so the combined final-peer browser
-chain remains a separate acceptance gate.
+chain remains a separate acceptance gate. A final macOS normal-sandbox attempt
+did not weaken browser settings but timed out twice at the first synthetic
+`Page.navigate` (5 seconds and then 15 seconds). It is not counted as a pass;
+the Linux fixture remains the required platform for the final normal-sandbox
+rerun. No real TLS or deployed-browser claim is made.
 
 ## Locked dependency audit assessment
 

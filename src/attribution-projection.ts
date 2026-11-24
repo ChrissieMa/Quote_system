@@ -37,6 +37,21 @@ const oneLink = (value: unknown): string | null => {
   return value[0];
 };
 
+export const validateProjectionMapping = (mapping: AttributionProjectionMapping): void => {
+  for (const fields of [mapping.tables, mapping.attribution, mapping.inquiry, mapping.quote, mapping.order]) {
+    const values = Object.values(fields);
+    if (values.some(value => typeof value !== 'string' || !value.trim()) || new Set(values).size !== values.length) {
+      throw new Error('Invalid attribution projection mapping.');
+    }
+  }
+  if (!mapping.surfaces.wordpress || !mapping.surfaces.configurator) throw new Error('Invalid surface mapping.');
+  for (const [key, campaign] of mapping.campaigns) {
+    if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(key) || !campaign.source || !campaign.recordId) {
+      throw new Error('Invalid campaign mapping.');
+    }
+  }
+};
+
 export class AttributionProjector {
   private running = false;
   private requested = false;
@@ -48,18 +63,7 @@ export class AttributionProjector {
     private readonly reportError: (message: string) => void,
   ) {
     if (!transport.usesStore(store)) throw new Error('Projection transport must use the binding store.');
-    for (const fields of [mapping.tables, mapping.attribution, mapping.inquiry, mapping.quote, mapping.order]) {
-      const values = Object.values(fields);
-      if (values.some(value => typeof value !== 'string' || !value.trim()) || new Set(values).size !== values.length) {
-        throw new Error('Invalid attribution projection mapping.');
-      }
-    }
-    if (!mapping.surfaces.wordpress || !mapping.surfaces.configurator) throw new Error('Invalid surface mapping.');
-    for (const [key, campaign] of mapping.campaigns) {
-      if (!/^[a-z0-9][a-z0-9._-]{0,79}$/.test(key) || !campaign.source || !campaign.recordId) {
-        throw new Error('Invalid campaign mapping.');
-      }
-    }
+    validateProjectionMapping(mapping);
   }
 
   private fields(snapshot: AttributionSnapshot): Record<string, ProjectionValue> {
