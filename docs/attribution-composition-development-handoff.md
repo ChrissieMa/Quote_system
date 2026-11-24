@@ -34,6 +34,8 @@ Scope: Quote System PR #40, Development only
 
 The final macOS normal-sandbox synthetic browser attempt timed out at the first `Page.navigate` with both the original 5-second bound and one 15-second diagnostic bound. No `--no-sandbox`, certificate bypass or weakened assertion was used. This is **not a browser pass**. The existing Linux normal-sandbox fixture must be rerun against the final candidate before any Production request. Synthetic CDP HTTPS is not real deployed TLS.
 
+A focused follow-up captured only the synthetic auto-attached target state and routing errors. It observed one `page` target with `waitingForDebugger=false` and no routing error. This disproves the suspected ignored paused-target cause; no auto-attach or interception behavior was changed, and the temporary macOS diagnostic edits were removed.
+
 ## Future activation and rollback
 
 Activation is not approved. After all remaining gates and a separate explicit Production approval, the reviewed source change is exactly:
