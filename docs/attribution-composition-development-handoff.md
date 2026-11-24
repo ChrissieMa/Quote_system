@@ -1,6 +1,6 @@
 # Attribution runtime composition Development handoff
 
-Recorded: 2026-11-25 07:40 HKT  
+Recorded: 2026-11-25 07:51 HKT
 Status: `in_progress`  
 Scope: Quote System PR #40, Development only
 
@@ -32,11 +32,13 @@ Scope: Quote System PR #40, Development only
 
 ## Browser evidence limit
 
-The final macOS normal-sandbox synthetic browser attempt timed out at the first `Page.navigate` with both the original 5-second bound and one 15-second diagnostic bound. No `--no-sandbox`, certificate bypass or weakened assertion was used. This is **not a browser pass**. The existing Linux normal-sandbox fixture must be rerun against the final candidate before any Production request. Synthetic CDP HTTPS is not real deployed TLS.
+The final macOS normal-sandbox synthetic browser attempt timed out at the first `Page.navigate` with both the original 5-second bound and one 15-second diagnostic bound. No `--no-sandbox`, certificate bypass or weakened assertion was used. This is not counted as a browser pass. Synthetic CDP HTTPS is not real deployed TLS.
 
 A focused follow-up captured only the synthetic auto-attached target state and routing errors. It observed one `page` target with `waitingForDebugger=false` and no routing error. This disproves the suspected ignored paused-target cause; no auto-attach or interception behavior was changed, and the temporary macOS diagnostic edits were removed.
 
-A minimal `pull_request`-only Linux acceptance workflow was prepared with `contents: read`, disabled checkout credential persistence, exact Node 22.23.4, the hosted runner's installed Google Chrome and the existing normal-sandbox fixture. It contained no secret/environment read, private peer source, deployment or Production action. GitHub rejected the branch push because the current OAuth credential lacks `workflow` scope; the GitHub integration also returned 403 for the same workflow-file write. No workflow file or launcher change landed in PR #40, and the rejected local changes were removed.
+A minimal `pull_request`-only Linux acceptance workflow is now present on PR #40 with `contents: read`, disabled checkout credential persistence, exact Node 22.23.4, the hosted runner's installed Google Chrome and the existing normal-sandbox fixture. It contains no secret/environment read, private peer source, deployment or Production action. The launcher runs Chrome directly for the hosted runner's unprivileged user and retains the root-only `nobody`/`setpriv` path; it adds no `--no-sandbox` or certificate bypass.
+
+GitHub Actions run [45513148675](https://github.com/ChrissieMa/Quote_system/actions/runs/45513148675) completed successfully at 2026-11-25 07:50 HKT. The `normal-sandbox-cors` job passed checkout, exact runtime/browser verification and the existing browser adapter/router CORS acceptance, including OPTIONS and `Origin: null` rejection. This closes the final Linux normal-sandbox Development gate for the current source candidate. It does not prove real deployed TLS or authorize Production.
 
 ## Future activation and rollback
 
@@ -50,4 +52,4 @@ Before merge, rollback is simply to leave PR #40 unmerged. If the disabled candi
 
 ## Remaining gate
 
-A maintainer credential with workflow permission must add the reviewed minimal PR-only workflow, then obtain one final Linux normal-sandbox browser pass before assembling the separate Production approval packet. Production merge, deployment, schema/config installation, key provisioning and activation remain unapproved.
+The Linux normal-sandbox Development gate is passed. Production merge, deployment, schema/config installation, key provisioning, live operational verification and activation remain unapproved and require a separate concrete Production plan and explicit Owner approval. The existing dependency-audit findings also remain recorded above; no broad dependency upgrade was made in this bounded change.

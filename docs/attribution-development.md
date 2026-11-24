@@ -189,12 +189,16 @@ the browser rejects it. The fixture also exercises first-party create/revoke,
 disallowed origin and header, missing origin, invalid path, and the adapter's
 opaque-origin rejection without a fetch. CDP fulfillment tests browser-origin
 behavior only; it is not real TLS validation. Final pinned peer frontend
-modules were not supplied to this fixture, so the combined final-peer browser
-chain remains a separate acceptance gate. A final macOS normal-sandbox attempt
+modules were not supplied to this fixture, so that local fixture alone does not
+prove the combined final-peer browser chain. A final macOS normal-sandbox attempt
 did not weaken browser settings but timed out twice at the first synthetic
 `Page.navigate` (5 seconds and then 15 seconds). It is not counted as a pass;
-the Linux fixture remains the required platform for the final normal-sandbox
-rerun. No real TLS or deployed-browser claim is made.
+the final Linux normal-sandbox rerun subsequently passed on exact Node 22.23.4
+and the hosted runner's installed Google Chrome. GitHub Actions run
+[45513148675](https://github.com/ChrissieMa/Quote_system/actions/runs/45513148675)
+passed the browser adapter/router CORS fixture, including OPTIONS and
+`Origin: null` rejection, with no sandbox or certificate bypass. No real TLS or
+deployed-browser claim is made.
 
 ## Locked dependency audit assessment
 
