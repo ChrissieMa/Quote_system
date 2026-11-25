@@ -1,0 +1,61 @@
+{
+  "schemaVersion": "attribution-deployment-v1",
+  "requiredNodeVersion": "v22.23.4",
+  "storePath": "/data/lks-attribution/attribution.sqlite",
+  "mountPath": "/data/lks-attribution",
+  "exclusiveWriterConfirmed": true,
+  "writerMode": "single-process",
+  "publicPaths": [
+    "/"
+  ],
+  "campaignKeys": [],
+  "mapping": {
+    "tables": {
+      "attributions": "Attributions",
+      "inquiries": "Inquiries",
+      "quotes": "Quotes",
+      "orders": "Order_2026"
+    },
+    "attribution": {
+      "code": "Handoff Code",
+      "attributionId": "Attribution ID",
+      "contractVersion": "Contract Version",
+      "entrySurface": "Entry Surface",
+      "firstAt": "First Touch At",
+      "firstChannel": "First Channel",
+      "firstSource": "First Source",
+      "firstMedium": "First Medium",
+      "firstCampaign": "First Campaign",
+      "firstPath": "First Landing Path",
+      "firstEvidence": "First Evidence",
+      "firstConfidence": "First Confidence",
+      "lastAt": "Last Touch At",
+      "lastChannel": "Last Channel",
+      "lastSource": "Last Source",
+      "lastMedium": "Last Medium",
+      "lastCampaign": "Last Campaign",
+      "lastPath": "Last Landing Path",
+      "lastEvidence": "Last Evidence",
+      "lastConfidence": "Last Confidence",
+      "consent": "Consent At Capture",
+      "createdAt": "Created At",
+      "expiresAt": "Expires At"
+    },
+    "inquiry": {
+      "first": "First Attribution",
+      "latest": "Latest Attribution",
+      "revision": "Attribution Projection Revision"
+    },
+    "quote": {
+      "snapshot": "Attribution Snapshot"
+    },
+    "order": {
+      "snapshot": "Attribution Snapshot"
+    },
+    "surfaces": {
+      "wordpress": "WordPress",
+      "configurator": "3D"
+    },
+    "campaigns": {}
+  }
+}

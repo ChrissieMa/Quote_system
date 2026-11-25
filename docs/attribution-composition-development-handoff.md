@@ -1,15 +1,17 @@
 # Attribution runtime composition Development handoff
 
-Recorded: 2026-11-25 07:51 HKT
-Status: `in_progress`  
+Recorded: 2026-11-25 07:58 HKT
+Status: `release_candidate` (disabled Development candidate only)
 Scope: Quote System PR #40, Development only
 
 ## Source
 
 - Branch: `codex/attribution-systems-v1-20261122`
-- Previous reviewed PR head: `238efd6e28295e0cce7df607ddccdafa6852ba80`
-- Disabled composition candidate: `b798e3edaaf4b908b367728411c2529f2b22431c`
+- Runtime source candidate: `b798e3edaaf4b908b367728411c2529f2b22431c`
+- Final tested evidence/workflow head: `6d98a41901b62c6fb2eaebcd0e429b3062c6ecde`
+- Linux workflow source: `ab55b744a5815d2c766f5d44de7d6fc6241d09d4`
 - Formal master included by the branch: `2ff9990640e481a261edbac820be7689620d21ee`
+- The Production runtime/package/lock tree is unchanged between the runtime source candidate and final tested evidence head. Later commits contain only handoff evidence, the CI workflow and its test-only launcher adjustment.
 - The feature remains literal-disabled. No merge, deployment, schema change, business-data access, configuration change or activation was performed.
 
 ## Candidate behavior
@@ -27,7 +29,7 @@ Scope: Quote System PR #40, Development only
 - Supplier shipping suites: **24/24 passed**.
 - Attribution suites: **31/31 passed**.
 - TypeScript build: passed.
-- Final private peer snapshots: five frontend-to-router-to-business paths and 12 canonical scenarios passed using synthetic data only.
+- Central supplied scoped R2 verification evidence for the agreed frontend-to-router-to-business paths and canonical scenarios. It is supporting evidence only; no private peer location, identifier or source was copied into this public repository.
 - Dependency audit: still exits nonzero with five existing affected package nodes (three moderate, one high, one critical). No broad audit fix or Express/Multer upgrade was made.
 
 ## Browser evidence limit
@@ -38,7 +40,7 @@ A focused follow-up captured only the synthetic auto-attached target state and r
 
 A minimal `pull_request`-only Linux acceptance workflow is now present on PR #40 with `contents: read`, disabled checkout credential persistence, exact Node 22.23.4, the hosted runner's installed Google Chrome and the existing normal-sandbox fixture. It contains no secret/environment read, private peer source, deployment or Production action. The launcher runs Chrome directly for the hosted runner's unprivileged user and retains the root-only `nobody`/`setpriv` path; it adds no `--no-sandbox` or certificate bypass.
 
-GitHub Actions run [45513148675](https://github.com/ChrissieMa/Quote_system/actions/runs/45513148675) completed successfully at 2026-11-25 07:50 HKT. The `normal-sandbox-cors` job passed checkout, exact runtime/browser verification and the existing browser adapter/router CORS acceptance, including OPTIONS and `Origin: null` rejection. This closes the final Linux normal-sandbox Development gate for the current source candidate. It does not prove real deployed TLS or authorize Production.
+GitHub Actions run [45513656061](https://github.com/ChrissieMa/Quote_system/actions/runs/45513656061) completed successfully for final tested evidence head `6d98a41901b62c6fb2eaebcd0e429b3062c6ecde`. Job `normal-sandbox-cors` passed checkout, exact Node 22.23.4/runtime/browser verification and the existing browser adapter/router CORS acceptance, including OPTIONS and `Origin: null` rejection. This closes the final Linux normal-sandbox Development gate. The retained macOS timeouts above remain non-passes. Neither result proves real deployed TLS or authorizes Production.
 
 ## Future activation and rollback
 
@@ -48,7 +50,21 @@ Activation is not approved. After all remaining gates and a separate explicit Pr
 
 The operator must separately provision the fixed non-secret deployment file and private proof-key file without placing either value in Git, chat or evidence. Invalid or absent files keep attribution closed while ordinary Quote and Supplier routes remain available.
 
-Before merge, rollback is simply to leave PR #40 unmerged. If the disabled candidate is later merged under approval, source rollback is a revert of `b798e3edaaf4b908b367728411c2529f2b22431c`; keep the literal false and do not delete any durable store, schema or history. Activation/configuration rollback is always false first, with no automatic writer recovery.
+The complete additive, non-secret configuration shape is `docs/attribution-deployment.template.json`. It pins the fixed Production paths, Node runtime and single-writer declaration, starts with an empty campaign allowlist/mapping, and contains no key or credential. It is a review template, not installed Production configuration. Before any future activation, an approved operator must verify every table/field against the separately approved additive schema, approve every public path, provision the private proof-key file, and pass the storage/security preflights.
+
+Before merge, rollback is simply to leave PR #40 unmerged. If the disabled candidate is later merged under approval, restore the formal master code-only baseline `2ff9990640e481a261edbac820be7689620d21ee`; keep the literal false and do not delete any durable store, schema or history. Activation/configuration rollback is always false first, with no automatic writer recovery.
+
+## Disabled backend build candidate
+
+- Artifact: `lks-quote-attribution-disabled-b798e3e.zip`
+- Runtime source candidate: `b798e3edaaf4b908b367728411c2529f2b22431c`
+- Formal master baseline: `2ff9990640e481a261edbac820be7689620d21ee`
+- Final evidence head: `6d98a41901b62c6fb2eaebcd0e429b3062c6ecde`
+- Contents are limited to compiled `dist/`, `package.json`, `package-lock.json`, `tsconfig.json` and a non-secret build manifest. No `.env`, deployment configuration, proof key, customer asset, database or Production value is present.
+- Startup activation is verified literal `false` in both `src/index.ts` and compiled `dist/index.js`.
+- Artifact is retained in the authorized local artifacts area outside this repository under the filename above; no local Owner path is published here.
+- SHA-256: `5c329169f19be3be09444467e433944d398731a18ffcff868bcbeb404b7c83ee`
+- Archive verification: 82 entries; ZIP CRC test passed with no errors.
 
 ## Remaining gate
 
