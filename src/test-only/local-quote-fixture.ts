@@ -36,13 +36,32 @@ type FixtureTable = {
   destroy(ids: string[]): Promise<FixtureRecord[]>;
 };
 
-export const localQuoteFixtureEnabled = (): boolean => {
-  const publicBaseUrl = String(process.env.PUBLIC_BASE_URL || '').trim();
+export type LocalQuoteFixtureOptions = {
+  pngPath: string;
+  metadataPath: string;
+  automaticQuotationImage?: boolean;
+  browserTransportEnabled?: boolean;
+  publicPreviewEnabled?: boolean;
+  rendererOrigin?: string;
+};
+
+export const localQuoteFixtureEnabledWithOptions = (configuration: {
+  nodeEnv: string | undefined;
+  enabled: string | undefined;
+  publicBaseUrl: string | undefined;
+}): boolean => {
+  const publicBaseUrl = String(configuration.publicBaseUrl || '').trim();
   const loopbackOnly = /^http:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?\/?$/i.test(publicBaseUrl);
-  return process.env.NODE_ENV === 'test'
-    && process.env.LKS_LOCAL_QUOTE_FIXTURE === '1'
+  return configuration.nodeEnv === 'test'
+    && configuration.enabled === '1'
     && loopbackOnly;
 };
+
+export const localQuoteFixtureEnabled = (): boolean => localQuoteFixtureEnabledWithOptions({
+  nodeEnv: process.env.NODE_ENV,
+  enabled: process.env.LKS_LOCAL_QUOTE_FIXTURE,
+  publicBaseUrl: process.env.PUBLIC_BASE_URL,
+});
 
 const fixtureToken = (label: string): string => formatDeterministicPublicToken(
   Date.now(),
@@ -142,22 +161,20 @@ const createTable = (
   };
 };
 
-const requireFixtureFiles = (): { png: Buffer; request: unknown } => {
-  const pngPath = String(process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG || '').trim();
-  const metadataPath = String(process.env.LKS_QUOTATION_IMAGE_FIXTURE_JSON || '').trim();
-  if (!pngPath || !metadataPath) throw new Error('Local Quote fixture paths are required.');
-  const png = fs.readFileSync(pngPath);
+const requireFixtureFiles = (configuration: LocalQuoteFixtureOptions): { png: Buffer; request: unknown } => {
+  if (!configuration.pngPath || !configuration.metadataPath) throw new Error('Local Quote fixture paths are required.');
+  const png = fs.readFileSync(configuration.pngPath);
   if (!png.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
     throw new Error('Local Quote fixture must be a PNG.');
   }
-  const metadata = JSON.parse(fs.readFileSync(metadataPath, 'utf8')) as Record<string, unknown>;
+  const metadata = JSON.parse(fs.readFileSync(configuration.metadataPath, 'utf8')) as Record<string, unknown>;
   if (metadata.width !== 1280 || metadata.height !== 1280 || metadata.stateRestored !== true) {
     throw new Error('Local Quote fixture evidence is not an accepted 1280 x 1280 restored-state render.');
   }
   return { png, request: sanitizeQuotationRenderRequest(metadata.request) };
 };
 
-export const createLocalQuoteFixture = (): {
+export const createLocalQuoteFixtureWithOptions = (configuration: LocalQuoteFixtureOptions): {
   base: ((tableName: string) => FixtureTable) & { _tables: Map<string, FixtureTable> };
   metadataTables: Array<Record<string, unknown>>;
   installQuotationImageRuntime(runtime: QuotationImageRuntimeAdapters, options?: {
@@ -175,13 +192,13 @@ export const createLocalQuoteFixture = (): {
   };
   urls: { create: string; share: string; invoice: string };
 } => {
-  const { png, request } = requireFixtureFiles();
-  const automaticQuotationImage = process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE === '1';
+  const { png, request } = requireFixtureFiles(configuration);
+  const automaticQuotationImage = configuration.automaticQuotationImage === true;
   const idempotencyKey = quotationImageIdempotencyKey(LOCAL_ITEM_ID, request);
   const assetKey = quotationImageAssetKey(idempotencyKey);
-  const browserTransportEnabled = process.env.LKS_LOCAL_3D_BROWSER_TRANSPORT === '1';
-  const publicPreviewEnabled = process.env.LKS_LOCAL_PUBLIC_PREVIEW === '1';
-  const rendererOrigin = String(process.env.LKS_LOCAL_3D_RENDERER_ORIGIN || '').trim();
+  const browserTransportEnabled = configuration.browserTransportEnabled === true;
+  const publicPreviewEnabled = configuration.publicPreviewEnabled === true;
+  const rendererOrigin = String(configuration.rendererOrigin || '').trim();
   const browserRenderer = browserTransportEnabled
     ? new LocalBrowserQuotationImageBridge()
     : undefined;
@@ -520,3 +537,13 @@ export const createLocalQuoteFixture = (): {
     },
   };
 };
+
+export const createLocalQuoteFixture = (): ReturnType<typeof createLocalQuoteFixtureWithOptions> =>
+  createLocalQuoteFixtureWithOptions({
+    pngPath: String(process.env.LKS_QUOTATION_IMAGE_FIXTURE_PNG || ''),
+    metadataPath: String(process.env.LKS_QUOTATION_IMAGE_FIXTURE_JSON || ''),
+    automaticQuotationImage: process.env.LKS_LOCAL_QUOTE_FIXTURE_AUTO_IMAGE === '1',
+    browserTransportEnabled: process.env.LKS_LOCAL_3D_BROWSER_TRANSPORT === '1',
+    publicPreviewEnabled: process.env.LKS_LOCAL_PUBLIC_PREVIEW === '1',
+    rendererOrigin: String(process.env.LKS_LOCAL_3D_RENDERER_ORIGIN || ''),
+  });

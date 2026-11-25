@@ -1,0 +1,43 @@
+name: Attribution browser sandbox
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/attribution-browser-sandbox.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig.json'
+      - 'src/attribution-*.ts'
+      - 'src/security.ts'
+      - 'src/test-only/attribution-browser-fixture.ts'
+
+permissions:
+  contents: read
+
+jobs:
+  normal-sandbox-cors:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out pull request source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Use exact Node runtime
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.23.4
+          cache: npm
+
+      - name: Install locked dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Verify runtime and browser
+        run: |
+          test "$(node --version)" = "v22.23.4"
+          command -v google-chrome
+          google-chrome --version
+
+      - name: Run normal-sandbox CORS acceptance
+        run: node -r ts-node/register src/test-only/attribution-browser-fixture.ts "$(command -v google-chrome)"
