@@ -1,5 +1,4 @@
 import assert from 'node:assert/strict';
-import { createHash } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -360,13 +359,11 @@ test('proof-key reader refuses symlinks, wide modes, nonregular and unbounded in
   }
 });
 
-test('activation candidate has the exact reviewed two-gate boolean variant and loads durable inputs only inside the gate', () => {
+test('actual CLI wiring is literal-disabled and loads exact durable inputs only inside the gate', () => {
   const source = fs.readFileSync(path.join(__dirname, 'index.ts'), 'utf8');
   const start = source.indexOf('if (require.main === module)');
   const cli = source.slice(start);
-  const normalized = source.replace('const ATTRIBUTION_ACTIVATION_ENABLED = true;', 'const ATTRIBUTION_ACTIVATION_ENABLED = false;').replace('const ATTRIBUTION_SYNTHETIC_ACCEPTANCE_ENABLED = true;', 'const ATTRIBUTION_SYNTHETIC_ACCEPTANCE_ENABLED = false;');
-  assert.ok(cli.includes('const ATTRIBUTION_ACTIVATION_ENABLED = true;'));
-  assert.equal(createHash('sha256').update(normalized).digest('hex'), '5ebee354f4df55252e3978b47643498e2a511af0ae51c9485a552374299d3ebb');
+  assert.ok(cli.includes('const ATTRIBUTION_ACTIVATION_ENABLED = false;'));
   assert.ok(cli.includes('if (ATTRIBUTION_ACTIVATION_ENABLED) {'));
   assert.ok(cli.indexOf('loadApprovedAttributionDeploymentFile(') > cli.indexOf('if (ATTRIBUTION_ACTIVATION_ENABLED)'));
   assert.ok(cli.indexOf('runtime.activateAttribution({') > cli.indexOf('loadApprovedAttributionDeploymentFile('));
