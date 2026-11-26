@@ -3,6 +3,9 @@ import Airtable, { FieldSet } from 'airtable';
 import crypto from 'crypto';
 import multer from 'multer';
 import { createAttributionRouter, AttributionRouterOptions } from './attribution-router';
+import { nextBusinessNumber } from './attribution-numbering-isolation';
+import { SyntheticAttributionAcceptance, loadAcceptancePlan } from './attribution-synthetic-acceptance';
+import { createSyntheticAcceptanceRouter } from './attribution-synthetic-router';
 import { AttributionBusinessHooks, createAttributionBusinessHooks, selectedAttributionCode } from './attribution-business';
 import { AttributionProjectionMapping, AttributionProjector } from './attribution-projection';
 import { SerializedAirtableProjectionTransport } from './attribution-airtable';
@@ -835,7 +838,7 @@ const requireSameOrigin = (req: Request, res: Response, next: () => void) => {
   return next();
 };
 
-const configureAttributionForApp = (configuration: AttributionConfiguration): AttributionProjector | null => {
+const configureAttributionForApp = (configuration: AttributionConfiguration, acceptanceEnabled = false): AttributionProjector | null => {
   if (!configuration.enabled) {
     attributionRuntime = null;
     return null;
@@ -859,17 +862,29 @@ const configureAttributionForApp = (configuration: AttributionConfiguration): At
     }),
     hooks: createAttributionBusinessHooks(configuration.store, configuration.now, reportError, () => projector.requestFlush()),
   };
+  if (acceptanceEnabled === true) {
+    const acceptance = new SyntheticAttributionAcceptance({
+      store: configuration.store, mapping: configuration.mapping, transport: configuration.transport,
+      projector, hooks: attributionRuntime.hooks,
+      tables: name => base(name) as unknown as import('./attribution-synthetic-acceptance').AcceptanceTable,
+      now: configuration.now,
+    });
+    attributionRuntime.router.use(createSyntheticAcceptanceRouter({
+      enabled: true, engine: acceptance, requireOwner: requireAdmin, requireOwnerOriginAndCsrf,
+      plan: cleanup => loadAcceptancePlan(configuration.now(), cleanup), formToken: getOwnerFormToken,
+    }));
+  }
   return projector;
 };
 
-const activateAttributionForApp = (input: Omit<AttributionCompositionInput, 'tables'>): AttributionProjector | null => {
+const activateAttributionForApp = (input: Omit<AttributionCompositionInput, 'tables'>, acceptanceEnabled = false): AttributionProjector | null => {
   const composed = composeAttribution({
     ...input,
     tables: name => base(name) as unknown as ReturnType<AttributionCompositionInput['tables']>,
   });
   if (!composed) return null;
   try {
-    return configureAttributionForApp(composed);
+    return configureAttributionForApp(composed, acceptanceEnabled);
   } catch {
     attributionRuntime = null;
     try { composed.store.close(); } catch { /* attribution remains closed */ }
@@ -3207,23 +3222,7 @@ const syncMonthlyFinance = async (requestedMonth?: string): Promise<Record<strin
   };
 };
 
-const getNextNumber = async (
-  table: Airtable.Table<FieldSet>,
-  field: string,
-  prefix: string
-): Promise<string> => {
-  const records = await table
-    .select({ fields: [field], sort: [{ field, direction: 'desc' }], maxRecords: 1 })
-    .firstPage();
-  if (records.length === 0 || !records[0].get(field)) return `${prefix}-2026-0001`;
-  const lastNumber = records[0].get(field) as string;
-  const match = lastNumber.match(/-(\d+)$/);
-  if (match) {
-    const next = parseInt(match[1], 10) + 1;
-    return `${prefix}-2026-${next.toString().padStart(4, '0')}`;
-  }
-  return `${prefix}-2026-0001`;
-};
+const getNextNumber = nextBusinessNumber;
 
 const getHongKongDate = (): string =>
   new Intl.DateTimeFormat('en-CA', {
@@ -10022,8 +10021,11 @@ if (require.main === module) {
     },
   });
   activeAttributionConfiguration = runtime.configureAttribution;
-  // Future activation is exactly this literal false -> true after a separate approval.
-  const ATTRIBUTION_ACTIVATION_ENABLED = false;
+  // Preparation may align runtime/config only. Production remains literal-disabled
+  // until a separate, explicit activation approval changes this exact boolean.
+  const ATTRIBUTION_ACTIVATION_ENABLED = true;
+  // Separate literal gate: no probe route or plan read in the normal release.
+  const ATTRIBUTION_SYNTHETIC_ACCEPTANCE_ENABLED = true;
   if (ATTRIBUTION_ACTIVATION_ENABLED) {
     try {
       const approvedDeployment = loadApprovedAttributionDeploymentFile(
@@ -10043,7 +10045,7 @@ if (require.main === module) {
         nodeVersion: process.version,
         now: () => Date.now(),
         report: message => console.error(message),
-      });
+      }, ATTRIBUTION_SYNTHETIC_ACCEPTANCE_ENABLED);
     } catch {
       console.error(attributionConfigurationFailure);
     }

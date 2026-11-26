@@ -1,16 +1,33 @@
 import { createHash } from 'crypto';
 import type Airtable from 'airtable';
 import type { FieldSet } from 'airtable';
-import { AttributionProjectionTransport, ProjectionRecord, ProjectionValue } from './attribution-projection';
+import { AttributionProjectionTransport, AttributionProjectionMapping, ProjectionRecord, ProjectionValue } from './attribution-projection';
 import { LocalAttributionStore } from './attribution-store';
 
 type AirtableRecord = { id: string; fields: FieldSet };
 export type AirtableTableClient = {
   find(id: string): Promise<AirtableRecord>;
-  select(options: { filterByFormula: string; maxRecords: number; pageSize: number }): { firstPage(): Promise<readonly AirtableRecord[]> };
-  create(records: Array<{ fields: FieldSet }>): Promise<readonly AirtableRecord[]>;
-  update(records: Array<{ id: string; fields: FieldSet }>): Promise<readonly AirtableRecord[]>;
+  select(options: { filterByFormula: string; maxRecords: number; pageSize: number; fields?: string[]; returnFieldsByFieldId?: boolean }): { firstPage(): Promise<readonly AirtableRecord[]> };
+  create(records: Array<{ fields: FieldSet }>, options?: { returnFieldsByFieldId: true }): Promise<readonly AirtableRecord[]>;
+  update(records: Array<{ id: string; fields: FieldSet }>, options?: { returnFieldsByFieldId: true }): Promise<readonly AirtableRecord[]>;
 };
+
+export type ProjectionSdkOptions = {
+  readFields: Record<string, string[]>;
+  lookupNames: Record<string, string>;
+};
+
+/** Fixed migration name is needed only for Airtable's name-only formula grammar. */
+export const projectionSdkOptions = (mapping: AttributionProjectionMapping): ProjectionSdkOptions => ({
+  readFields: {
+    [mapping.tables.attributions]: Object.values(mapping.attribution),
+    [mapping.tables.inquiries]: Object.values(mapping.inquiry),
+    [mapping.tables.quotes]: Object.values(mapping.quote),
+    [mapping.tables.orders]: Object.values(mapping.order),
+  },
+  lookupNames: { [mapping.attribution.code]: /^fld[A-Za-z0-9]{14}$/.test(mapping.attribution.code)
+    ? 'Handoff Code' : mapping.attribution.code },
+});
 
 const canonical = (value: unknown): string => {
   if (value === null || typeof value !== 'object') return JSON.stringify(value);
@@ -42,6 +59,7 @@ export class SerializedAirtableProjectionTransport implements AttributionProject
     private readonly store: LocalAttributionStore,
     private readonly table: (name: string) => AirtableTableClient,
     exclusiveWriterConfirmed: true,
+    private readonly sdkOptions?: ProjectionSdkOptions,
   ) {
     if (exclusiveWriterConfirmed !== true) throw new Error('Exclusive projection writer preflight is required.');
   }
@@ -76,18 +94,31 @@ export class SerializedAirtableProjectionTransport implements AttributionProject
 
   async read(table: string, id: string): Promise<ProjectionRecord> {
     if (!this.owner) throw new Error('Projection writer is not active.');
-    return normalize(await this.table(table).find(id));
+    if (this.sdkOptions && !this.sdkOptions.readFields[table]?.length) throw new Error('Projection table is outside the field allowlist.');
+    if (!/^[A-Za-z0-9_-]{1,128}$/.test(id)) throw new Error('Invalid projection record ID.');
+    const matches = await this.table(table).select({
+      filterByFormula: `RECORD_ID() = '${id}'`, maxRecords: 2, pageSize: 2,
+      returnFieldsByFieldId: true, ...(this.sdkOptions ? { fields: this.sdkOptions.readFields[table] } : {}),
+    }).firstPage();
+    if (matches.length !== 1 || matches[0].id !== id) throw new Error('Projection record was not found in its exact table.');
+    return normalize(matches[0]);
   }
 
   async findOrCreate(table: string, field: string, value: string, fields: Record<string, ProjectionValue>): Promise<ProjectionRecord> {
     if (!this.owner) throw new Error('Projection writer is not active.');
+    if (this.sdkOptions && !this.sdkOptions.readFields[table]?.length) throw new Error('Projection table is outside the field allowlist.');
     if (!/^[A-Za-z0-9 _/-]+$/.test(field) || !/^LKS-[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/.test(value)) {
       throw new Error('Invalid attribution lookup.');
     }
     const storedId = this.store.projectionRecord(value);
     if (storedId) return this.read(table, storedId);
+    const lookupName = this.sdkOptions?.lookupNames[field] || field;
+    if (!/^[A-Za-z0-9 _/-]+$/.test(lookupName) || /^fld[A-Za-z0-9]{14}$/.test(lookupName)) {
+      throw new Error('Airtable formula lookup needs the reviewed field name.');
+    }
     const matches = await this.table(table).select({
-      filterByFormula: `{${field}} = '${value}'`, maxRecords: 2, pageSize: 2,
+      filterByFormula: `{${lookupName}} = '${value}'`, maxRecords: 2, pageSize: 2,
+      returnFieldsByFieldId: true, ...(this.sdkOptions ? { fields: this.sdkOptions.readFields[table] } : {}),
     }).firstPage();
     if (matches.length > 1) throw new Error('Attribution lookup is ambiguous.');
     if (matches.length === 1) {
@@ -95,7 +126,7 @@ export class SerializedAirtableProjectionTransport implements AttributionProject
       return normalize(matches[0]);
     }
     return this.write(async () => {
-      const created = await this.table(table).create([{ fields: toFields(fields) }]);
+      const created = await this.table(table).create([{ fields: toFields(fields) }], { returnFieldsByFieldId: true });
       if (created.length !== 1 || !created[0].id) throw new Error('Attribution creation was not confirmed.');
       this.store.rememberProjectionRecord(value, created[0].id);
       return normalize(created[0]);
@@ -106,7 +137,7 @@ export class SerializedAirtableProjectionTransport implements AttributionProject
     const current = await this.read(table, id);
     if (current.version !== version) return false;
     return this.write(async () => {
-      const updated = await this.table(table).update([{ id, fields: toFields(fields) }]);
+      const updated = await this.table(table).update([{ id, fields: toFields(fields) }], { returnFieldsByFieldId: true });
       if (updated.length !== 1 || updated[0].id !== id) throw new Error('Projection update was not confirmed.');
       for (const [key, value] of Object.entries(fields)) {
         if (JSON.stringify(updated[0].fields[key]) !== JSON.stringify(value)) throw new Error('Projection update did not match.');
@@ -121,4 +152,4 @@ export const createAirtableProjectionTransport = (
   base: Airtable.Base,
   exclusiveWriterConfirmed: true,
 ): SerializedAirtableProjectionTransport =>
-  new SerializedAirtableProjectionTransport(store, name => base(name), exclusiveWriterConfirmed);
+  new SerializedAirtableProjectionTransport(store, name => base(name) as unknown as AirtableTableClient, exclusiveWriterConfirmed);

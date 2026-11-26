@@ -103,6 +103,12 @@ export class LocalAttributionStore {
     try {
       initializeWal(this.db);
       this.db.exec(`
+      CREATE TABLE IF NOT EXISTS attribution_acceptance_journal (
+        run_id TEXT PRIMARY KEY, body TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS attribution_acceptance_retired_codes (
+        code TEXT PRIMARY KEY
+      );
       CREATE TABLE IF NOT EXISTS attribution_codes (
         code TEXT PRIMARY KEY
       );
@@ -214,7 +220,7 @@ export class LocalAttributionStore {
   }
 
   resolve(code: string, now: number): AttributionSnapshot | null {
-    const row = this.db.prepare('SELECT snapshot FROM attribution_handoffs WHERE code = ? AND revoked = 0 AND expires_at > ?').get(code, now);
+    const row = this.db.prepare('SELECT snapshot FROM attribution_handoffs WHERE code = ? AND revoked = 0 AND expires_at > ? AND code NOT IN (SELECT code FROM attribution_acceptance_retired_codes)').get(code, now);
     return row ? JSON.parse(String(row.snapshot)) as AttributionSnapshot : null;
   }
 
@@ -390,6 +396,27 @@ export class LocalAttributionStore {
       }
       this.db.prepare("UPDATE attribution_projection_writer SET state = 'idle', owner = NULL, inflight = 0 WHERE singleton = 1 AND owner = ?").run(owner);
     });
+  }
+
+  acceptanceCodeUnused(code: string): boolean {
+    return Boolean(this.db.prepare('SELECT code FROM attribution_handoffs WHERE code = ? AND bound = 0 AND revoked = 0').get(code));
+  }
+
+  acceptanceJournal(runId: string): string | null {
+    if (!/^attrtest_[a-z0-9]{16,48}$/.test(runId)) throw new Error('Invalid synthetic run.');
+    const row = this.db.prepare('SELECT body FROM attribution_acceptance_journal WHERE run_id = ?').get(runId);
+    return row ? String(row.body) : null;
+  }
+
+  saveAcceptanceJournal(runId: string, body: string): void {
+    if (!/^attrtest_[a-z0-9]{16,48}$/.test(runId) || body.length > 40000) throw new Error('Invalid synthetic journal.');
+    JSON.parse(body);
+    this.transaction(() => { this.db.prepare('INSERT INTO attribution_acceptance_journal (run_id, body) VALUES (?, ?) ON CONFLICT(run_id) DO UPDATE SET body = excluded.body').run(runId, body); });
+  }
+
+  retireAcceptanceCodes(codes: readonly string[]): void {
+    if (codes.length !== 5 || new Set(codes).size !== 5 || codes.some(code => !/^LKS-[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/.test(code))) throw new Error('Invalid synthetic retirement.');
+    this.transaction(() => { for (const code of codes) this.db.prepare('INSERT OR IGNORE INTO attribution_acceptance_retired_codes (code) VALUES (?)').run(code); });
   }
 
   revoke(attributionId: string, proof: string, now: number): void {

@@ -55,6 +55,15 @@ export class SyntheticAirtableClient {
     select: options => ({
       firstPage: async () => {
         this.fail('select', false);
+        const exactId = /^RECORD_ID\(\) = '([A-Za-z0-9_-]+)'$/.exec(options.filterByFormula);
+        if (exactId) {
+          this.fail('find', false);
+          const fields = this.records(name).get(exactId[1]);
+          const result = fields ? [{ id: exactId[1], fields: structuredClone(fields) }] : [];
+          this.fail('find', true);
+          this.fail('select', true);
+          return result;
+        }
         const match = /^\{([A-Za-z0-9 _/-]+)\} = '(LKS-[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16})'$/.exec(options.filterByFormula);
         if (!match) throw new Error('Unexpected synthetic lookup.');
         const result = [...this.records(name)]

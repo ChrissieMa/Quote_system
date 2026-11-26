@@ -1,12 +1,16 @@
 {
   "schemaVersion": "attribution-deployment-v1",
-  "requiredNodeVersion": "v22.23.4",
+  "requiredNodeVersion": "v22.23.5",
   "storePath": "/data/lks-attribution/attribution.sqlite",
   "mountPath": "/data/lks-attribution",
-  "exclusiveWriterConfirmed": true,
+  "exclusiveWriterConfirmed": false,
   "writerMode": "single-process",
   "publicPaths": [
-    "/"
+    "/",
+    "/contact/",
+    "/quote/",
+    "/configurator/",
+    "/display-box/"
   ],
   "campaignKeys": [],
   "mapping": {
