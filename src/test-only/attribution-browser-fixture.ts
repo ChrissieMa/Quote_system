@@ -345,10 +345,13 @@ const main = async (): Promise<void> => {
     const websiteHtml = pageSource();
     const allowedOrigins = new Set([websiteOrigin, disallowedOrigin]);
 
-    const executable = rootDropIdentity ? '/usr/bin/setpriv' : browserPath;
+    // The fixture intentionally does not inherit the host desktop environment.
+    // Give Chrome a private session bus instead of an invalid/absent address;
+    // dbus-run-session terminates that bus with this disposable browser.
+    const executable = rootDropIdentity ? '/usr/bin/setpriv' : '/usr/bin/dbus-run-session';
     const args = rootDropIdentity
-      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', browserPath, ...browserFlags(profile)]
-      : browserFlags(profile);
+      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', '/usr/bin/dbus-run-session', '--', browserPath, ...browserFlags(profile)]
+      : ['--', browserPath, ...browserFlags(profile)];
     browser = spawn(executable, args, {
       env: { HOME: profile, PATH: '/usr/bin:/bin' },
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
