@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -155,6 +155,7 @@ export class CdpPipe {
   private startupStderr = '';
   private failure: Error | null = null;
   private receivedMessages = 0;
+  private receivedBytes = 0;
   private readonly pending = new Map<number, PendingCommand>();
   onEvent: (message: CdpMessage) => void = () => undefined;
 
@@ -172,6 +173,8 @@ export class CdpPipe {
       });
       browser.once('error', error => this.failAll(this.diagnostic(`Chrome launch failed: ${error.message}`)));
       browser.once('close', (code, signal) => {
+        process.stdout.write(JSON.stringify({ event: 'BROWSER_CHILD_EXIT', code, signal,
+          receivedCDPMessages: this.receivedMessages, receivedCDPBytes: this.receivedBytes }) + '\n');
         this.failAll(this.diagnostic(`Chrome exited (code=${code}, signal=${signal})`));
       });
     } else {
@@ -194,10 +197,11 @@ export class CdpPipe {
   }
 
   private diagnostic(message: string): Error {
-    return new Error(`${message}; receivedCDPMessages=${this.receivedMessages}${this.startupStderr.trim() ? `\nChrome startup stderr:\n${this.startupStderr.trim()}` : ''}`);
+    return new Error(`${message}; receivedCDPMessages=${this.receivedMessages}; receivedCDPBytes=${this.receivedBytes}${this.startupStderr.trim() ? `\nChrome startup stderr:\n${this.startupStderr.trim()}` : ''}`);
   }
 
   private receive(chunk: string): void {
+    this.receivedBytes += Buffer.byteLength(chunk);
     this.buffer += chunk;
     let separator = this.buffer.indexOf('\0');
     while (separator !== -1) {
@@ -278,6 +282,13 @@ const pageDone = async (cdp: CdpPipe, sessionId: string): Promise<string> => {
 const main = async (): Promise<void> => {
   const [browserPath] = process.argv.slice(2);
   if (!browserPath || browserPath.startsWith('-')) throw new Error('Provide the local browser executable as a CLI argument.');
+  const browserFile = realpathSync(browserPath);
+  if (statSync(browserFile).size < 65536) {
+    const launcher = readFileSync(browserFile, 'utf8');
+    if (launcher.startsWith('#!')) process.stdout.write(JSON.stringify({ event: 'BROWSER_LAUNCHER_METADATA',
+      launcher: browserFile, relevantPublicSourceLines: launcher.split('\n')
+        .filter(line => /exec|pipe|\/dev\/null|readlink|HERE|CHROME_WRAPPER/.test(line)).slice(0,30) }) + '\n');
+  }
   const dir = mkdtempSync(join(tmpdir(), 'attribution-browser-'));
   chmodSync(dir, 0o711);
   const profile = join(dir, 'chrome-profile');

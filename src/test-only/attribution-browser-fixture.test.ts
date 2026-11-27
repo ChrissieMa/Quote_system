@@ -1,8 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
-import { Readable, Writable } from 'node:stream';
+import { PassThrough, Readable, Writable } from 'node:stream';
 import { CdpPipe } from './attribution-browser-fixture';
+
+test('the DevTools wire uses a literal NUL frame terminator', async () => {
+  let sent = Buffer.alloc(0);
+  const input = new Writable({ write(chunk, _encoding, callback) { sent = Buffer.from(chunk); callback(); } });
+  const output = new PassThrough();
+  const pipe = new CdpPipe(input, output);
+  const pending = pipe.send('Browser.getVersion');
+  assert.equal(sent.at(-1), 0);
+  assert.deepEqual(JSON.parse(sent.subarray(0, -1).toString()), { id: 1, method: 'Browser.getVersion', params: {} });
+  output.end();
+  await assert.rejects(pending, /output pipe closed/);
+});
 
 test('an exited browser reports its actual startup failure instead of Target.getTargets timeout', async () => {
   const child = spawn(process.execPath, ['-e', 'process.stderr.write("SYNTHETIC_STARTUP_FAILURE\\n");process.exit(23)'],
