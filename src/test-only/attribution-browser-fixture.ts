@@ -154,6 +154,7 @@ export class CdpPipe {
   private buffer = '';
   private startupStderr = '';
   private failure: Error | null = null;
+  private receivedMessages = 0;
   private readonly pending = new Map<number, PendingCommand>();
   onEvent: (message: CdpMessage) => void = () => undefined;
 
@@ -193,7 +194,7 @@ export class CdpPipe {
   }
 
   private diagnostic(message: string): Error {
-    return new Error(`${message}${this.startupStderr.trim() ? `\nChrome startup stderr:\n${this.startupStderr.trim()}` : ''}`);
+    return new Error(`${message}; receivedCDPMessages=${this.receivedMessages}${this.startupStderr.trim() ? `\nChrome startup stderr:\n${this.startupStderr.trim()}` : ''}`);
   }
 
   private receive(chunk: string): void {
@@ -205,6 +206,7 @@ export class CdpPipe {
       separator = this.buffer.indexOf('\0');
       if (!text) continue;
       const message = JSON.parse(text) as CdpMessage;
+      this.receivedMessages++;
       if (message.id !== undefined) {
         const pending = this.pending.get(message.id);
         if (!pending) continue;
@@ -345,13 +347,10 @@ const main = async (): Promise<void> => {
     const websiteHtml = pageSource();
     const allowedOrigins = new Set([websiteOrigin, disallowedOrigin]);
 
-    // The fixture intentionally does not inherit the host desktop environment.
-    // Give Chrome a private session bus instead of an invalid/absent address;
-    // dbus-run-session terminates that bus with this disposable browser.
-    const executable = rootDropIdentity ? '/usr/bin/setpriv' : '/usr/bin/dbus-run-session';
+    const executable = rootDropIdentity ? '/usr/bin/setpriv' : browserPath;
     const args = rootDropIdentity
-      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', '/usr/bin/dbus-run-session', '--', browserPath, ...browserFlags(profile)]
-      : ['--', browserPath, ...browserFlags(profile)];
+      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', browserPath, ...browserFlags(profile)]
+      : browserFlags(profile);
     browser = spawn(executable, args, {
       env: { HOME: profile, PATH: '/usr/bin:/bin' },
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
@@ -478,6 +477,9 @@ const main = async (): Promise<void> => {
       });
     };
 
+    const version = await cdp.send('Browser.getVersion');
+    process.stdout.write(JSON.stringify({ event: 'BROWSER_CONTROL_READY', product: version.product,
+      protocolVersion: version.protocolVersion }) + '\n');
     const targets = await cdp.send('Target.getTargets');
     const targetInfos = targets.targetInfos as Array<{ targetId: string; type: string; url: string }> | undefined;
     const target = targetInfos?.find(item => item.type === 'page' && item.url === 'about:blank');
