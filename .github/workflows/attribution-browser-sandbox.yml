@@ -33,10 +33,18 @@ jobs:
       - name: Install locked dependencies
         run: npm ci --ignore-scripts
 
+      - name: Install checksum-pinned test Chrome
+        run: |
+          curl --fail --location --proto '=https' --tlsv1.2 https://dl.google.com/linux/chrome/deb/pool/main/g/google-chrome-stable/google-chrome-stable_158.0.8127.88-1_amd64.deb --output "$RUNNER_TEMP/lks-test-chrome.deb"
+          printf '%s  %s\n' 'a656b2db00a8cb7f13a1d754f6aad91f84014906452c6dfb7f3ead93035da03b' "$RUNNER_TEMP/lks-test-chrome.deb" | sha256sum --check --strict
+          sudo dpkg -i "$RUNNER_TEMP/lks-test-chrome.deb"
+          rm -- "$RUNNER_TEMP/lks-test-chrome.deb"
+
       - name: Verify runtime and browser
         run: |
           test "$(node --version)" = "v22.23.4"
           command -v google-chrome
+          test "$(google-chrome --product-version)" = "158.0.8127.88"
           google-chrome --version
 
       - name: Run normal-sandbox CORS acceptance
