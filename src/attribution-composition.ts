@@ -8,7 +8,7 @@ import {
   realpathSync,
 } from 'node:fs';
 import { dirname, isAbsolute, normalize, sep } from 'node:path';
-import { AirtableTableClient, SerializedAirtableProjectionTransport } from './attribution-airtable';
+import { AirtableTableClient, SerializedAirtableProjectionTransport, projectionSdkOptions } from './attribution-airtable';
 import { AttributionProjectionMapping, validateProjectionMapping } from './attribution-projection';
 import { AttributionRateLimit } from './attribution-rate-limit';
 import { LocalAttributionStore } from './attribution-store';
@@ -267,7 +267,7 @@ export const composeAttribution = (input: AttributionCompositionInput): Composed
     }
     if (!Buffer.isBuffer(key) || key.length !== 32) throw new Error('key');
     store = new LocalAttributionStore(input.storePath, key);
-    const transport = new SerializedAirtableProjectionTransport(store, input.tables, input.exclusiveWriterConfirmed);
+    const transport = new SerializedAirtableProjectionTransport(store, input.tables, input.exclusiveWriterConfirmed, projectionSdkOptions(mapping));
     return {
       enabled: true,
       store,
