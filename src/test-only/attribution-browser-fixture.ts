@@ -184,7 +184,8 @@ export class CdpPipe {
     const message = sessionId ? { id, method, params, sessionId } : { id, method, params };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.failAll(this.diagnostic(`Chrome DevTools command timed out: ${method}`));
+        this.pending.delete(id);
+        reject(this.diagnostic(`Chrome DevTools command timed out: ${method}`));
       }, 5000);
       this.pending.set(id, { resolve, reject, timer });
       this.input.write(`${JSON.stringify(message)}\0`);
@@ -535,7 +536,9 @@ const main = async (): Promise<void> => {
     assert.equal(missingOrigin.status, 403);
     process.stdout.write('Synthetic Chrome origin/CORS fixture passed through local CDP interception; this is not real TLS validation.\n');
   } finally {
-    if (cdp) await cdp.send('Browser.close').catch(() => ({}));
+    if (cdp) await cdp.send('Browser.close').catch(() => {
+      if (browser && browser.exitCode === null && browser.signalCode === null) browser.kill('SIGTERM');
+    });
     if (browser && browser.exitCode === null && browser.signalCode === null) {
       await new Promise<void>(resolve => browser!.once('close', () => resolve()));
     }
