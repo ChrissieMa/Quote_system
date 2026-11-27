@@ -10023,9 +10023,9 @@ if (require.main === module) {
   activeAttributionConfiguration = runtime.configureAttribution;
   // Preparation may align runtime/config only. Production remains literal-disabled
   // until a separate, explicit activation approval changes this exact boolean.
-  const ATTRIBUTION_ACTIVATION_ENABLED = false;
+  const ATTRIBUTION_ACTIVATION_ENABLED = true;
   // Separate literal gate: no probe route or plan read in the normal release.
-  const ATTRIBUTION_SYNTHETIC_ACCEPTANCE_ENABLED = false;
+  const ATTRIBUTION_SYNTHETIC_ACCEPTANCE_ENABLED = true;
   if (ATTRIBUTION_ACTIVATION_ENABLED) {
     try {
       const approvedDeployment = loadApprovedAttributionDeploymentFile(
