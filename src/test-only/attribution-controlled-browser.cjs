@@ -16,7 +16,7 @@ const chrome = spawn('/Applications/Google Chrome.app/Contents/MacOS/Google Chro
 const exited = new Promise(r=>chrome.once('close',r));
 const cdp = new CdpPipe(chrome.stdio[3],chrome.stdio[4],chrome);
 const site='https://lksdisplaybox.online', api='https://quote.lksdisplaybox.online';
-const sessions=new Map(), errors=[], results=[], requests=[], revocations=[], networkTimes=new Map();
+const sessions=new Map(), errors=[], results=[], requests=[], revocations=[], networkTimes=new Map(), documents=new Map();
 const out=options.output||path.join(__dirname,'controlled-live-five-sources.json');
 let context, parentForCleanup;
 const command=(m,p={},s)=>cdp.send(m,p,s);
@@ -29,6 +29,12 @@ const delay=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,label,ms=15000){const end=Date.now()+ms;while(Date.now()<end){if(errors.length)throw Error(errors.join(';'));if(await fn())return;await delay(100);}throw Error(label);}
 cdp.onEvent=m=>{
  if(m.method==='Network.requestWillBeSent')networkTimes.set(m.params.requestId,Math.floor(m.params.wallTime*1000));
+ if(m.method==='Network.responseReceived'&&m.params.type==='Document'){
+  const response=m.params.response,u=new URL(response.url);
+  // A Cloudflare child iframe can return200 while the top document is403.
+  // Keep the exact main-frame identity; never call that iframe an app success.
+  if(u.origin===site)documents.set(m.sessionId+':'+m.params.frameId,{url:u.origin+u.pathname,status:response.status,fromDiskCache:response.fromDiskCache===true});
+ }
  if(m.method==='Fetch.requestPaused') void (async()=>{
   const {requestId,request,resourceType}=m.params;const u=new URL(request.url);
   const info=sessions.get(m.sessionId);
@@ -90,13 +96,19 @@ async function run(){
  if(readonly){
   const p=await newCase('readonly_preflight');
   for(const pathname of ['/','/configurator/']){
+   const navigationStarted=Date.now();
    const n=await command('Page.navigate',{url:site+pathname},p.sessionId);assert.ok(!n.errorText);
+   const navigationMs=Date.now()-navigationStarted;
    await until(()=>evaluate(p.sessionId,"document.readyState==='complete'"),'Public read-only navigation incomplete');
    await delay(1000);
    let challenge=await evaluate(p.sessionId,"/just a moment|請稍候/i.test(document.title)||Boolean(document.querySelector('script[src*=\"challenge-platform\"]'))");
-   if(challenge&&options.onVerification){await options.onVerification({path:pathname});challenge=await evaluate(p.sessionId,"/just a moment|請稍候/i.test(document.title)");}
+   const mainDocument=()=>documents.get(p.sessionId+':'+n.frameId);
+   if(challenge&&options.onVerification){await options.onVerification({path:pathname,sessionId:p.sessionId,command,evaluate,navigationMs,document:mainDocument()});challenge=await evaluate(p.sessionId,"/just a moment|請稍候/i.test(document.title)");}
+   const state={path:pathname,navigationMs,document:mainDocument(),...await evaluate(p.sessionId,"({title:document.title,canvas:document.querySelectorAll('canvas').length,configEnabled:window.lksAttributionBridgeV1?.enabled===true,scripts:[...document.querySelectorAll('script[src]')].map(e=>e.src).filter(x=>/index-|wordpress-bootstrap/.test(x))})")};
+   if(options.onReadinessPage)await options.onReadinessPage(state,{sessionId:p.sessionId,command});
    assert.equal(challenge,false,'HUMAN_VERIFICATION_REQUIRED: '+pathname);
-   console.log(JSON.stringify({event:'READONLY_PUBLIC_SOURCE',path:pathname,...await evaluate(p.sessionId,"({title:document.title,canvas:document.querySelectorAll('canvas').length,configEnabled:window.lksAttributionBridgeV1?.enabled===true,scripts:[...document.querySelectorAll('script[src]')].map(e=>e.src).filter(x=>/index-|wordpress-bootstrap/.test(x))})")}));
+   assert.ok(pathname!=='/configurator/'||state.canvas>0,'Actual public 3D canvas missing');
+   console.log(JSON.stringify({event:'READONLY_PUBLIC_SOURCE',...state}));
   }
   assert.equal(requests.length,0,'Read-only probe must not register any attribution');return {readonly:true,productionWrites:0};
  }
