@@ -126,7 +126,7 @@ async function run(){
    // parent receipt after the approved business-row cleanup, without exposing proof.
    parentForCleanup=p;
    s=(await newPage(caseId,p.browserContextId)).sessionId;
-   const nav=await command('Page.navigate',{url:site+'/configurator/'},s);assert.ok(!nav.errorText);
+   const nav=await command('Page.navigate',{url:site+'/configurator/'},s);assert.ok(!nav.errorText,'3D navigation failed: '+nav.errorText);
    await until(()=>evaluate(s,"document.readyState==='complete'&&document.querySelectorAll('canvas').length>0"),'Actual 3D canvas missing',25000);
    await until(()=>Promise.resolve(requests.filter(r=>r.caseId===caseId&&r.path.endsWith('/handoffs')).length>before),'3D live registration missing');
    await delay(200);body=requests.filter(r=>r.caseId===caseId&&r.path.endsWith('/handoffs')).at(-1).body;
@@ -136,7 +136,7 @@ async function run(){
   const code=await codeFromCta(s);assert.match(code||'',/^LKS-[0-9ABCDEFGHJKMNPQRSTVWXYZ]{16}$/);
   if(caseId==='threeD')assert.equal(await evaluate(s,"window.dataLayer.filter(x=>x?.event==='lks_whatsapp_click_intent').length"),1,'3D must emit exactly one existing intent');
   results.push({caseId,attributionId:body.attributionId,shortCode:code,firstTouch:body.firstTouch,lastTouch:body.lastTouch,entrySurface:body.entrySurface,preConsentZeroPersistence:true,normalTLS:!options.route});
-  fs.writeFileSync(out,JSON.stringify({recordedAt:new Date().toISOString(),source:'c34daa8',cases:results,complete:results.length===5,noMessagesSent:true,externalAnalyticsBlocked:true},null,2)+'\n');
+  fs.writeFileSync(out,JSON.stringify({recordedAt:new Date().toISOString(),source:options.source||'development-only',cases:results,complete:results.length===5,noMessagesSent:true,externalAnalyticsBlocked:true},null,2)+'\n');
   console.log(JSON.stringify({event:'LIVE_SOURCE_PASS',caseId,channel:body.firstTouch.channel,surface:body.entrySurface}));
   if(caseId!=='threeD'){await command('Target.disposeBrowserContext',{browserContextId:p.browserContextId});context=null;}
  }

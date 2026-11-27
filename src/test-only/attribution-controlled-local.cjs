@@ -22,8 +22,8 @@ const sha=x=>createHash('sha256').update(x).digest('hex');
 const site='https://lksdisplaybox.online',api='https://quote.lksdisplaybox.online';
 const linkFields={inquiries:['Quote','Order','Monthly Performance','Quotes','Order_2026','Customer','First Attribution','Latest Attribution'],quotes:['Customer','Inquiries','Monthly Performance','Inquiry','Performance Month','Attribution Snapshot'],orders:['Customer','Order Items','Deliveries','Inquiries','Marketing Spend','Inquiry','Performance Month','Attribution Snapshot'],attributions:['First Campaign','Last Campaign','Inquiries First Attribution','Inquiries Latest Attribution','Quotes Attribution Snapshot','Orders Attribution Snapshot']};
 async function main(){
- const [zip,website,runtime,output]=process.argv.slice(2);assert.ok(zip&&website&&runtime&&output,'Provide frozen ZIP, Website checkout, installed WP runtime and output directory');
- assert.equal(sha(fs.readFileSync(zip)),'5ccf3a6ac897fa85fc4cb51d3b054f30dc015daaf89ed57b83ed4b752b09e866','Frozen package must be unchanged');
+ const [zip,website,runtime,output,expectedSha]=process.argv.slice(2);assert.ok(zip&&website&&runtime&&output&&/^[a-f0-9]{64}$/.test(expectedSha),'Provide reviewed ZIP, Website checkout, installed WP runtime, output directory and exact expected SHA256');
+ assert.equal(sha(fs.readFileSync(zip)),expectedSha,'Reviewed package must be unchanged');
  const temp=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'lks-complete-browser-')));
  let composed,server;
  try{
@@ -42,7 +42,9 @@ async function main(){
     {step:'runPHP',code:php.replace('<?php',"<?php define('LKS_SYNTHETIC_CASE','fixed');")}
    ]}});}finally{Server.prototype.listen=originalListen;for(const s of servers)if(s.listening)await new Promise(r=>s.close(r));}
   const wp=JSON.parse(fs.readFileSync(path.join(evidence,'fixed.json'),'utf8'));assert.equal(wp.wordpress,'7.1.5');assert.equal(wp.config_count,1);assert.equal(wp.configuration_before_module,true);
-  const shell=`<!doctype html><html><head><meta charset="UTF-8"><title>Synthetic Website</title><script>window.dataLayer=[];</script>${wp.rendered_lks_html}</head><body><button id="lksWpConsentAccept">Accept</button><a href="https://wa.me/85200000000?text=Synthetic%20only">WhatsApp</a><script>document.querySelector('button').addEventListener('click',()=>window.dataLayer.push({event:'wpconsent_consent_processed',wpconsentPreferences:{essential:true,marketing:true,statistics:true}}));</script></body></html>`;
+  const activation=fs.readFileSync(path.join(packageDir,'wp-content/mu-plugins/lks-attribution-bridge-v1-activation.php'),'utf8');
+  const destination=activation.match(/return array\('([^']+)'\)/)?.[1];assert.ok(destination?.startsWith('https://wa.me/'),'Reviewed public destination missing');
+  const shell=`<!doctype html><html><head><meta charset="UTF-8"><title>Synthetic Website</title><script>window.dataLayer=[];</script>${wp.rendered_lks_html}</head><body><button id="lksWpConsentAccept">Accept</button><a href="${destination}?text=Synthetic%20only">WhatsApp</a><script>document.querySelector('button').addEventListener('click',()=>{document.cookie='wpconsent_preferences='+encodeURIComponent(JSON.stringify({essential:true,marketing:true,statistics:true}))+'; Max-Age=31536000; Path=/; SameSite=Lax; Secure';window.dataLayer.push({event:'wpconsent_consent_processed',wpconsentPreferences:{essential:true,marketing:true,statistics:true}});});</script></body></html>`;
   const client=actualSdkFixture(),mapping=client.mapping,reports=[];
   composed=composeAttribution({enabled:true,storePath:path.join(temp,'synthetic.sqlite'),pathPolicy:{kind:'test',directory:temp},exclusiveWriterConfirmed:true,
    proofKey:()=>Buffer.alloc(32,7),tables:client.table,mapping,publicPaths:['/','/contact/','/quote/','/configurator/','/display-box/'],campaignKeys:[],nodeVersion:process.version,now:Date.now,report:m=>reports.push(m),limit:{maxRequests:60,windowMs:60000,maxClients:20}});assert.ok(composed);
@@ -51,12 +53,13 @@ async function main(){
   const engine=new SyntheticAttributionAcceptance({store:composed.store,transport:composed.transport,projector,hooks,mapping,tables:client.table,now:Date.now});
   const app=express();app.use(createAttributionRouter({enabled:true,store:composed.store,validation:composed.validation,now:Date.now,allowRequest:()=>true,requireOwner:(_q,_r,n)=>n(),requireOwnerOriginAndCsrf:(_q,_r,n)=>n(),reportError:m=>reports.push(m)}));
   server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const local='http://127.0.0.1:'+server.address().port;
-  let cleanup=false;const network=[];fs.mkdirSync(output,{recursive:true});
+  let cleanup=false;const network=[],createdCodes=[];fs.mkdirSync(output,{recursive:true});
+  const runStartedAt=Date.now();
   const result=await runControlledBrowser({output:path.join(output,'full-browser-five-paths.json'),route:async({requestId,request,resourceType,networkStartedAt,sessionId,command})=>{
    const u=new URL(request.url);let body=Buffer.alloc(0),status=200,type='text/javascript',headers=[];network.push({method:request.method,origin:u.origin,path:u.pathname});
    if(u.origin===site){
     if(resourceType==='Document'&&!u.pathname.startsWith('/configurator/')){body=Buffer.from(shell);type='text/html';}
-    else {const relative=decodeURIComponent(u.pathname).replace(/^\//,'');const file=path.resolve(packageDir,relative);assert.ok(file.startsWith(packageDir+path.sep),'Path escape');if(fs.existsSync(file)&&fs.statSync(file).isFile()){body=fs.readFileSync(file);type=file.endsWith('.html')?'text/html':file.endsWith('.css')?'text/css':file.endsWith('.png')?'image/png':file.endsWith('.svg')?'image/svg+xml':'text/javascript';}else status=404;}
+    else {const relative=decodeURIComponent(u.pathname).replace(/^\//,'')+(u.pathname.endsWith('/')?'index.html':'');const file=path.resolve(packageDir,relative);assert.ok(file.startsWith(packageDir+path.sep),'Path escape');if(fs.existsSync(file)&&fs.statSync(file).isFile()){body=fs.readFileSync(file);type=file.endsWith('.html')?'text/html':file.endsWith('.css')?'text/css':file.endsWith('.png')?'image/png':file.endsWith('.svg')?'image/svg+xml':'text/javascript';}else status=404;}
    }else if(u.origin===api&&['/api/attribution/v1/handoffs','/api/attribution/v1/revoke'].includes(u.pathname)&&['OPTIONS','POST'].includes(request.method)){
     const reqHeaders=Object.fromEntries(Object.entries(request.headers).filter(([k])=>['origin','content-type','idempotency-key','access-control-request-method','access-control-request-headers'].includes(k.toLowerCase())));
     const response=await fetch(local+u.pathname,{method:request.method,headers:reqHeaders,...(request.postData?{body:request.postData}:{})});status=response.status;body=Buffer.from(await response.arrayBuffer());headers=[...response.headers].map(([name,value])=>({name,value}));type='application/json';
@@ -64,19 +67,21 @@ async function main(){
     assert.ok(status>=200&&status<300,'Synthetic router rejected browser request: '+status);
     if(request.method==='POST'&&u.pathname.endsWith('/handoffs')){
      const responseData=JSON.parse(body.toString());
+     createdCodes.push(responseData.shortCode);
      const timing={event:'FROZEN_FRONTEND_RESPONSE_TIMING',serverExpiry:responseData.expiresAt,networkStartedAt,expiryOverClientMaximumMs:Date.parse(responseData.expiresAt)-(networkStartedAt+7*24*60*60*1000),responseShape:Object.keys(responseData).sort()};
      fs.writeFileSync(path.join(output,'frozen-frontend-timing.json'),JSON.stringify(timing,null,2)+'\n');console.log(JSON.stringify(timing));
     }
    }else {status=403;}
    await command('Fetch.fulfillRequest',{requestId,responseCode:status,responseHeaders:[{name:'Content-Type',value:type},...headers.filter(h=>!['content-type','content-length','transfer-encoding','connection'].includes(h.name.toLowerCase()))],body:body.toString('base64')},sessionId);
   },acceptance:async cases=>{
-   const now=Date.now();const plan={schemaVersion:'attribution-synthetic-acceptance-v1',runId:'attrtest_navigation20261127',approvalReference:'DEVELOPMENT_SYNTHETIC_ONLY',notBefore:new Date(now-1000).toISOString(),expiresAt:new Date(now+1800000).toISOString(),cleanupExpiresAt:new Date(now+2400000).toISOString(),allowCleanup:true,automationReview:'no_customer_actions_verified',attributionIds:Object.fromEntries(cases.map(c=>[c.caseId,c.attributionId])),linkFields};
+   const now=runStartedAt;const plan={schemaVersion:'attribution-synthetic-acceptance-v1',runId:'attrtest_navigation20261127',approvalReference:'OWNER-APPROVAL-DEVELOPMENT_SYNTHETIC_ONLY',notBefore:new Date(now-1000).toISOString(),expiresAt:new Date(now+1800000).toISOString(),cleanupExpiresAt:new Date(now+2400000).toISOString(),allowCleanup:true,automationReview:'no_customer_actions_verified',attributionIds:Object.fromEntries(cases.map(c=>[c.caseId,c.attributionId])),linkFields};
    const accepted=await engine.run(plan,{contractVersion:'1.0.0',codes:Object.fromEntries(cases.map(c=>[c.caseId,c.shortCode]))});assert.equal(accepted.cases,5);assert.equal(accepted.syntheticBusinessRecords,15);assert.equal(accepted.syntheticAttributions,5);
    const journal=JSON.parse(composed.store.acceptanceJournal(plan.runId));
    for(const c of cases){const e=journal.entities.find(e=>e.caseId===c.caseId),iq=client.read(mapping.tables.inquiries,e.inquiry),q=client.read(mapping.tables.quotes,e.quote),o=client.read(mapping.tables.orders,e.order);const snap=q[mapping.quote.snapshot];assert.deepEqual(iq[mapping.inquiry.first],snap);assert.deepEqual(o[mapping.order.snapshot],snap);const a=client.read(mapping.tables.attributions,snap[0]);assert.equal(a[mapping.attribution.firstChannel],c.firstTouch.channel);}
    const removed=await engine.cleanup(plan);assert.equal(removed.cleanupComplete,true);assert.equal([...client.rows.values()].reduce((n,t)=>n+t.size,0),0);cleanup=true;
   }});
   assert.equal(cleanup,true);assert.equal(result.cases.length,5);assert.equal(result.unusedParentReceiptRevoked,true);assert.deepEqual(reports,[]);
+  assert.equal(createdCodes.length,6);for(const code of createdCodes)assert.equal(composed.store.resolve(code,Date.now()),null,'Every own synthetic code is retired');
   const proof={recordedAt:new Date().toISOString(),packageSha256:sha(fs.readFileSync(zip)),wordpress:wp.wordpress,configurationBeforeModule:wp.configuration_before_module,realBrowser:'Mac Chrome normal OS keychain and fresh isolated profile',sameAcceptanceRunner:true,paths:result.cases.map(c=>({caseId:c.caseId,channel:c.firstTouch.channel,inquiry:true,quote:true,order:true})),businessRows:15,attributionRows:5,all20FakeRowsDeleted:true,unusedParentReceiptRevoked:true,externalBrowserRequests:0,productionWrites:0,securityBypass:false,limits:'Synthetic HTTPS interception -> actual loopback Quote router -> installed SDK fake REST; not Production TLS, Cloudflare clearance or actual Airtable certification'};
   fs.writeFileSync(path.join(output,'full-browser-tool-proof.json'),JSON.stringify(proof,null,2)+'\n');console.log(JSON.stringify(proof));
  }catch(error){
