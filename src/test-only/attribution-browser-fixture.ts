@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
-import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, openSync, readSync, closeSync, rmSync } from 'node:fs';
+import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -292,28 +292,6 @@ const pageDone = async (cdp: CdpPipe, sessionId: string): Promise<string> => {
 const main = async (): Promise<void> => {
   const [browserPath] = process.argv.slice(2);
   if (!browserPath || browserPath.startsWith('-')) throw new Error('Provide the local browser executable as a CLI argument.');
-  const browserFile = realpathSync(browserPath);
-  let browserExecutable = browserPath;
-  if (statSync(browserFile).size < 65536) {
-    const launcher = readFileSync(browserFile, 'utf8');
-    if (launcher.startsWith('#!')) process.stdout.write(JSON.stringify({ event: 'BROWSER_LAUNCHER_METADATA',
-      launcher: browserFile, relevantPublicSourceLines: launcher.split('\n')
-        .filter(line => /exec|pipe|\/dev\/null|readlink|HERE|CHROME_WRAPPER/.test(line)).slice(0,30) }) + '\n');
-  }
-  if (browserFile === '/opt/google/chrome/google-chrome') {
-    // Use the same installed Google Chrome, without a shell launcher/process
-    // substitutions between the driver and its inherited DevTools descriptors.
-    const native = '/opt/google/chrome/chrome';
-    assert.equal(realpathSync(native), native);
-    assert.ok(statSync(native).isFile());
-    const fd = openSync(native, 'r');
-    try {
-      const magic = Buffer.alloc(4); readSync(fd, magic, 0, 4, 0);
-      assert.deepEqual([...magic], [0x7f, 0x45, 0x4c, 0x46]);
-    } finally { closeSync(fd); }
-    browserExecutable = native;
-  }
-  process.stdout.write(JSON.stringify({ event: 'BROWSER_EXECUTABLE', path: browserExecutable }) + '\n');
   const dir = mkdtempSync(join(tmpdir(), 'attribution-browser-'));
   chmodSync(dir, 0o711);
   const profile = join(dir, 'chrome-profile');
@@ -383,9 +361,9 @@ const main = async (): Promise<void> => {
     const websiteHtml = pageSource();
     const allowedOrigins = new Set([websiteOrigin, disallowedOrigin]);
 
-    const executable = rootDropIdentity ? '/usr/bin/setpriv' : browserExecutable;
+    const executable = rootDropIdentity ? '/usr/bin/setpriv' : browserPath;
     const args = rootDropIdentity
-      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', browserExecutable, ...browserFlags(profile)]
+      ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', browserPath, ...browserFlags(profile)]
       : browserFlags(profile);
     browser = spawn(executable, args, {
       env: { HOME: profile, PATH: '/usr/bin:/bin' },
