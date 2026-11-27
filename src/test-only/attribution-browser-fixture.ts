@@ -149,30 +149,50 @@ const disallowedPage = (): string => `<html><body data-result="pending" data-don
     .finally(()=>document.body.dataset.done='true');
 </script></body></html>`;
 
-class CdpPipe {
+export class CdpPipe {
   private nextId = 0;
   private buffer = '';
+  private startupStderr = '';
+  private failure: Error | null = null;
   private readonly pending = new Map<number, PendingCommand>();
   onEvent: (message: CdpMessage) => void = () => undefined;
 
-  constructor(private readonly input: Writable, output: Readable) {
+  constructor(private readonly input: Writable, output: Readable, browser?: ChildProcess) {
     output.setEncoding('utf8');
     output.on('data', (chunk: string) => this.receive(chunk));
     output.on('error', error => this.failAll(error));
     input.on('error', error => this.failAll(error));
+    if (browser) {
+      // This child has only the fixture HOME/PATH and synthetic network. Keep a
+      // bounded startup diagnostic, never inherited credentials/environment.
+      browser.stderr?.setEncoding('utf8');
+      browser.stderr?.on('data', (chunk: string) => {
+        this.startupStderr = (this.startupStderr + chunk).slice(-8192);
+      });
+      browser.once('error', error => this.failAll(this.diagnostic(`Chrome launch failed: ${error.message}`)));
+      browser.once('close', (code, signal) => {
+        this.failAll(this.diagnostic(`Chrome exited (code=${code}, signal=${signal})`));
+      });
+    } else {
+      output.once('end', () => this.failAll(new Error('Chrome DevTools output pipe closed.')));
+    }
   }
 
   send(method: string, params: Record<string, unknown> = {}, sessionId?: string): Promise<Record<string, unknown>> {
+    if (this.failure) return Promise.reject(this.failure);
     const id = ++this.nextId;
     const message = sessionId ? { id, method, params, sessionId } : { id, method, params };
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(id);
-        reject(new Error(`Chrome DevTools command timed out: ${method}`));
+        this.failAll(this.diagnostic(`Chrome DevTools command timed out: ${method}`));
       }, 5000);
       this.pending.set(id, { resolve, reject, timer });
       this.input.write(`${JSON.stringify(message)}\0`);
     });
+  }
+
+  private diagnostic(message: string): Error {
+    return new Error(`${message}${this.startupStderr.trim() ? `\nChrome startup stderr:\n${this.startupStderr.trim()}` : ''}`);
   }
 
   private receive(chunk: string): void {
@@ -198,9 +218,10 @@ class CdpPipe {
   }
 
   private failAll(error: Error): void {
+    this.failure = this.failure || error;
     for (const [id, pending] of this.pending) {
       clearTimeout(pending.timer);
-      pending.reject(error);
+      pending.reject(this.failure);
       this.pending.delete(id);
     }
   }
@@ -336,7 +357,7 @@ const main = async (): Promise<void> => {
     if (!(input instanceof Writable) || !(output instanceof Readable)) {
       throw new Error('Chrome DevTools pipe was not created.');
     }
-    cdp = new CdpPipe(input, output);
+    cdp = new CdpPipe(input, output, browser);
     cdp.onEvent = message => {
       if (message.method === 'Target.attachedToTarget' && message.params) {
         const childSessionId = String(message.params.sessionId || '');
@@ -515,7 +536,7 @@ const main = async (): Promise<void> => {
     process.stdout.write('Synthetic Chrome origin/CORS fixture passed through local CDP interception; this is not real TLS validation.\n');
   } finally {
     if (cdp) await cdp.send('Browser.close').catch(() => ({}));
-    if (browser && browser.exitCode === null) {
+    if (browser && browser.exitCode === null && browser.signalCode === null) {
       await new Promise<void>(resolve => browser!.once('close', () => resolve()));
     }
     await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
@@ -524,4 +545,6 @@ const main = async (): Promise<void> => {
   }
 };
 
-main().catch(error => { console.error(error); process.exitCode = 1; });
+if (require.main === module) {
+  main().catch(error => { console.error(error); process.exitCode = 1; });
+}
