@@ -2,7 +2,17 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { PassThrough, Readable, Writable } from 'node:stream';
-import { CdpPipe } from './attribution-browser-fixture';
+import { CdpPipe, browserChildEnvironment } from './attribution-browser-fixture';
+
+test('macOS retains its native keychain location while the browser profile stays separate', () => {
+  const result = browserChildEnvironment('/synthetic/fresh-profile', 'darwin', () => '/synthetic/os-user');
+  assert.deepEqual(result, { HOME: '/synthetic/os-user', PATH: '/usr/bin:/bin' });
+});
+
+test('Linux sandbox fixtures retain their disposable HOME and never look up the Mac home', () => {
+  assert.deepEqual(browserChildEnvironment('/synthetic/fresh-profile', 'linux', () => { throw Error('unexpected'); }),
+    { HOME: '/synthetic/fresh-profile', PATH: '/usr/bin:/bin' });
+});
 
 test('the DevTools wire uses a literal NUL frame terminator', async () => {
   let sent = Buffer.alloc(0);

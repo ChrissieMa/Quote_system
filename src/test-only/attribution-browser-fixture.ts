@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { spawn, spawnSync, ChildProcess } from 'node:child_process';
 import { chmodSync, chownSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { Readable, Writable } from 'node:stream';
 import express from 'express';
@@ -59,6 +59,15 @@ const browserFlags = (profile: string): string[] => [
   '--remote-debugging-pipe',
   'about:blank',
 ];
+
+// A fresh Chrome profile isolates cookies/history. HOME is a different boundary:
+// macOS uses it to locate its normal OS-managed keychain. Pointing HOME at the
+// profile can open a blocking "Keychain Not Found" system dialog. Keep native
+// keychain protection; never use mock-keychain/basic-password-store switches.
+export function browserChildEnvironment(profile: string, platform = process.platform,
+  macHome: () => string = () => userInfo().homedir): { HOME: string; PATH: string } {
+  return { HOME: platform === 'darwin' ? macHome() : profile, PATH: '/usr/bin:/bin' };
+}
 
 const request = {
   contractVersion: '1.0.0',
@@ -296,8 +305,13 @@ const main = async (): Promise<void> => {
   chmodSync(dir, 0o711);
   const profile = join(dir, 'chrome-profile');
   mkdirSync(profile, { mode: 0o700 });
-  if (process.platform !== 'linux') throw new Error('The normal-sandbox browser fixture requires Linux.');
+  if (process.platform !== 'linux' && process.platform !== 'darwin') {
+    throw new Error('The normal-sandbox browser fixture requires Linux or macOS.');
+  }
   const runningAsRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+  if (process.platform === 'darwin' && runningAsRoot) {
+    throw new Error('Run the macOS browser fixture as the normal unprivileged user.');
+  }
   let rootDropIdentity: { uid: number; gid: number } | null = null;
   if (runningAsRoot) {
     const uidResult = spawnSync('id', ['-u', 'nobody'], { encoding: 'utf8' });
@@ -366,7 +380,7 @@ const main = async (): Promise<void> => {
       ? [`--reuid=${rootDropIdentity.uid}`, `--regid=${rootDropIdentity.gid}`, '--init-groups', '--', browserPath, ...browserFlags(profile)]
       : browserFlags(profile);
     browser = spawn(executable, args, {
-      env: { HOME: profile, PATH: '/usr/bin:/bin' },
+      env: browserChildEnvironment(profile),
       stdio: ['ignore', 'ignore', 'pipe', 'pipe', 'pipe'],
     });
     const input = browser.stdio[3];
